@@ -16,6 +16,7 @@ import * as qb      from './impl/quickbooks.js';
 import * as files   from './impl/files.js';
 import * as github  from './impl/github.js';
 import * as scripts from './impl/scripts.js';
+import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 
 const HANDLERS = {
   // Email / Calendar
