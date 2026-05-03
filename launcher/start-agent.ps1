@@ -67,8 +67,8 @@ $secrets = @{
     "QB_REFRESH_TOKEN"     = Get-Secret "QB_REFRESH_TOKEN"
     "QB_REALM_ID"          = "9130357265584656"
     "GITHUB_TOKEN"         = Get-Secret "GITHUB_TOKEN"
-    "GITHUB_ORG"           = "jrboehlke"
-    "GITHUB_DEFAULT_REPO"  = "JRBAssistant"
+    "GITHUB_USERNAME" = "jrb9900n"
+    "GITHUB_REPOS"    = "jrb-assistant-scripts,FleetOps,FieldOps,AuditMatchingEngine"
     "TEAMS_BOT_APP_ID"     = Get-Secret "M365_CLIENT_ID"
     "TEAMS_BOT_APP_SECRET" = Get-Secret "TEAMS_BOT_APP_SECRET"
     "TEAMS_PORT"           = "3978"
@@ -122,3 +122,4 @@ switch ($mode) {
     }
     default     { Write-Host "Usage: .\start-agent.ps1 [teams|scheduler|cli|pm2-teams]" }
 }
+
