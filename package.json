@@ -1,0 +1,24 @@
+{
+  "name": "jrb-executive-agent",
+  "version": "1.0.0",
+  "description": "Persistent AI executive assistant for J.R. Boehlke, LLC",
+  "type": "module",
+  "main": "core/agent.js",
+  "scripts": {
+    "start": "node core/agent.js",
+    "scheduler": "node scheduler/cron.js",
+    "teams": "node teams/bot.js",
+    "seed": "node agents/seed.js && node skills/seed.js",
+    "dev": "node --watch core/agent.js",
+    "dev:teams": "node --watch teams/bot.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@supabase/supabase-js": "^2.49.0",
+    "axios": "^1.9.0",
+    "node-cron": "^3.0.3",
+    "dotenv": "^16.4.0",
+    "winston": "^3.17.0",
+    "p-limit": "^6.2.0"
+  }
+}

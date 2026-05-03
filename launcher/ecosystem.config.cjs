@@ -1,0 +1,32 @@
+﻿module.exports = {
+  apps: [
+    {
+      name: 'jrb-teams-bot',
+      script: 'powershell.exe',
+      args: '-ExecutionPolicy Bypass -File C:\\Users\\Assistant\\JRBAgent\\agent\\launcher\\start-agent.ps1 teams',
+      cwd: 'C:\\Users\\Assistant\\JRBAgent\\agent',
+      interpreter: 'none',
+      autorestart: true,
+      watch: false,
+      max_restarts: 5,
+      restart_delay: 5000,
+      log_file: 'C:\\Users\\Assistant\\JRBAgent\\logs\\teams-bot.log',
+      error_file: 'C:\\Users\\Assistant\\JRBAgent\\logs\\teams-bot-error.log',
+      time: true,
+    },
+    {
+      name: 'jrb-scheduler',
+      script: 'powershell.exe',
+      args: '-ExecutionPolicy Bypass -File C:\\Users\\Assistant\\JRBAgent\\agent\\launcher\\start-agent.ps1 scheduler',
+      cwd: 'C:\\Users\\Assistant\\JRBAgent\\agent',
+      interpreter: 'none',
+      autorestart: true,
+      watch: false,
+      max_restarts: 5,
+      restart_delay: 10000,
+      log_file: 'C:\\Users\\Assistant\\JRBAgent\\logs\\scheduler.log',
+      error_file: 'C:\\Users\\Assistant\\JRBAgent\\logs\\scheduler-error.log',
+      time: true,
+    },
+  ],
+};

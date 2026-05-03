@@ -1,0 +1,425 @@
+2026-04-25 12:50:41 [[32minfo[39m] Agent saved {"name":"email-triage","taskType":"email"}
+2026-04-25 12:50:41 [[32minfo[39m] Agent saved {"name":"invoice-chaser","taskType":"crm"}
+2026-04-25 12:50:42 [[32minfo[39m] Agent saved {"name":"crm-analyst","taskType":"report"}
+2026-04-25 12:50:42 [[32minfo[39m] Agent saved {"name":"script-writer","taskType":"code"}
+2026-04-25 12:50:42 [[32minfo[39m] Agent saved {"name":"file-organiser","taskType":"file"}
+2026-04-25 12:50:42 [[32minfo[39m] Agent saved {"name":"general-assistant","taskType":"general"}
+2026-04-25 12:50:56 [[32minfo[39m] Skill saved {"name":"daily-email-digest"}
+2026-04-25 12:50:56 [[32minfo[39m] Skill saved {"name":"weekly-crm-report"}
+2026-04-25 12:50:56 [[32minfo[39m] Skill saved {"name":"invoice-aging-check"}
+2026-04-25 12:50:56 [[32minfo[39m] Skill saved {"name":"playwright-run"}
+2026-04-25 12:50:56 [[32minfo[39m] Skill saved {"name":"new-script"}
+2026-04-25 12:50:56 [[32minfo[39m] Skill saved {"name":"onedrive-save"}
+2026-04-25 13:20:55 [[32minfo[39m] Agent run started {"runId":"bd421020-feac-46bf-a193-e87e28025740","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what is today's date"}
+2026-04-25 13:20:56 [[32minfo[39m] Tokens: 2216 (in:2200 out:16) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"bd421020-feac-46bf-a193-e87e28025740"}
+2026-04-25 13:20:56 [[32minfo[39m] Agent run complete {"runId":"bd421020-feac-46bf-a193-e87e28025740","totalTokens":2216,"model":"claude-haiku-4-5-20251001"}
+2026-04-25 13:23:33 [[32minfo[39m] Agent run started {"runId":"b7504939-85ac-45b8-a6e5-685f5763e210","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what is today's date"}
+2026-04-25 13:23:35 [[32minfo[39m] Tokens: 2230 (in:2212 out:18) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"b7504939-85ac-45b8-a6e5-685f5763e210"}
+2026-04-25 13:23:35 [[32minfo[39m] Agent run complete {"runId":"b7504939-85ac-45b8-a6e5-685f5763e210","totalTokens":2230,"model":"claude-haiku-4-5-20251001"}
+2026-04-25 13:33:16 [[32minfo[39m] Agent run started {"runId":"fa9fe681-65b6-413c-a040-7af8e8728e32","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what is today's date"}
+2026-04-25 13:33:17 [[32minfo[39m] Tokens: 2230 (in:2212 out:18) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"fa9fe681-65b6-413c-a040-7af8e8728e32"}
+2026-04-25 13:33:17 [[32minfo[39m] Agent run complete {"runId":"fa9fe681-65b6-413c-a040-7af8e8728e32","totalTokens":2230,"model":"claude-haiku-4-5-20251001"}
+2026-04-25 14:09:42 [[32minfo[39m] Agent run started {"runId":"bcd201ad-dad1-41ba-99f7-00aa67769d64","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what is today's date"}
+2026-04-25 14:09:45 [[32minfo[39m] Tokens: 2121 (in:2103 out:18) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"bcd201ad-dad1-41ba-99f7-00aa67769d64"}
+2026-04-25 14:09:45 [[32minfo[39m] Agent run complete {"runId":"bcd201ad-dad1-41ba-99f7-00aa67769d64","totalTokens":2121,"model":"claude-haiku-4-5-20251001"}
+2026-04-28 13:01:55 [[32minfo[39m] Teams bot listening on port 3978
+2026-04-28 13:06:08 [[32minfo[39m] Teams message received {"text":"test"}
+2026-04-28 13:06:08 [[31merror[39m] Teams handler error {"err":"Cannot read properties of undefined (reading 'replace')"}
+2026-04-28 13:12:51 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-02 22:10:41 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-02 22:13:12 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-02 22:13:53 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-02 22:14:25 [[32minfo[39m] Teams message received {"text":"test"}
+2026-05-02 22:14:26 [[31merror[39m] Teams handler error {"err":"Cannot read properties of undefined (reading 'replace')"}
+2026-05-03 12:50:09 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 12:51:32 [[32minfo[39m] Teams message received {"from":"","text":"testing 123"}
+2026-05-03 12:51:33 [[32minfo[39m] Agent run started {"runId":"2de65561-0429-43a4-bb88-b638ad38de3f","taskType":"general","model":"claude-haiku-4-5-20251001","task":"testing 123"}
+2026-05-03 12:51:35 [[32minfo[39m] Tokens: 2150 (in:2100 out:50) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"2de65561-0429-43a4-bb88-b638ad38de3f"}
+2026-05-03 12:51:35 [[32minfo[39m] Agent run complete {"runId":"2de65561-0429-43a4-bb88-b638ad38de3f","totalTokens":2150,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 12:51:36 [[32minfo[39m] Tokens: 195 (in:127 out:68) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"2de65561-0429-43a4-bb88-b638ad38de3f"}
+2026-05-03 12:51:36 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":318}
+2026-05-03 12:51:42 [[32minfo[39m] Teams message received {"from":"","text":"What is today's date?"}
+2026-05-03 12:51:42 [[32minfo[39m] Agent run started {"runId":"20d60033-deec-40fe-a50f-0789a273f7ad","taskType":"general","model":"claude-haiku-4-5-20251001","task":"What is today's date?"}
+2026-05-03 12:51:43 [[32minfo[39m] Tokens: 2201 (in:2183 out:18) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"20d60033-deec-40fe-a50f-0789a273f7ad"}
+2026-05-03 12:51:43 [[32minfo[39m] Agent run complete {"runId":"20d60033-deec-40fe-a50f-0789a273f7ad","totalTokens":2201,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 12:51:44 [[32minfo[39m] Tokens: 128 (in:96 out:32) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"20d60033-deec-40fe-a50f-0789a273f7ad"}
+2026-05-03 12:51:45 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":121}
+2026-05-03 12:56:24 [[32minfo[39m] Teams message received {"from":"","text":"what month is it?"}
+2026-05-03 12:56:25 [[32minfo[39m] Agent run started {"runId":"17d2f98c-fe1d-433d-adfd-bee367802326","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what month is it?"}
+2026-05-03 12:56:26 [[32minfo[39m] Tokens: 2243 (in:2220 out:23) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"17d2f98c-fe1d-433d-adfd-bee367802326"}
+2026-05-03 12:56:26 [[32minfo[39m] Agent run complete {"runId":"17d2f98c-fe1d-433d-adfd-bee367802326","totalTokens":2243,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 12:56:27 [[32minfo[39m] Tokens: 134 (in:100 out:34) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"17d2f98c-fe1d-433d-adfd-bee367802326"}
+2026-05-03 12:56:27 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":119}
+2026-05-03 12:59:35 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 13:00:07 [[32minfo[39m] Teams message received {"from":"","text":"Who is the Packers quarterback?"}
+2026-05-03 13:00:08 [[32minfo[39m] Agent run started {"runId":"ba1af2f2-ad78-420f-818f-f8e700e73391","taskType":"general","model":"claude-haiku-4-5-20251001","task":"Who is the Packers quarterback?"}
+2026-05-03 13:00:10 [[32minfo[39m] Tokens: 2403 (in:2263 out:140) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"ba1af2f2-ad78-420f-818f-f8e700e73391"}
+2026-05-03 13:00:10 [[32minfo[39m] Agent run complete {"runId":"ba1af2f2-ad78-420f-818f-f8e700e73391","totalTokens":2403,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:00:11 [[32minfo[39m] Tokens: 300 (in:229 out:71) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"ba1af2f2-ad78-420f-818f-f8e700e73391"}
+2026-05-03 13:00:11 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":327}
+2026-05-03 13:05:08 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 13:05:24 [[32minfo[39m] Teams message received {"serviceUrl":"https://webchat.botframework.com/","from":"","text":"What month is Christmas in?"}
+2026-05-03 13:05:25 [[32minfo[39m] Reply status {"status":401,"body":""}
+2026-05-03 13:05:25 [[32minfo[39m] Agent run started {"runId":"3dcde5f4-2274-4687-93bd-5c5932a06515","taskType":"general","model":"claude-haiku-4-5-20251001","task":"What month is Christmas in?"}
+2026-05-03 13:05:26 [[32minfo[39m] Tokens: 2346 (in:2338 out:8) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"3dcde5f4-2274-4687-93bd-5c5932a06515"}
+2026-05-03 13:05:26 [[32minfo[39m] Agent run complete {"runId":"3dcde5f4-2274-4687-93bd-5c5932a06515","totalTokens":2346,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:05:26 [[32minfo[39m] Reply status {"status":401,"body":""}
+2026-05-03 13:05:27 [[32minfo[39m] Tokens: 107 (in:86 out:21) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"3dcde5f4-2274-4687-93bd-5c5932a06515"}
+2026-05-03 13:05:27 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":93}
+2026-05-03 13:07:59 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 13:08:12 [[32minfo[39m] Teams message received {"serviceUrl":"https://webchat.botframework.com/","from":"","text":"What is today's date?"}
+2026-05-03 13:08:12 [[32minfo[39m] Reply status {"status":400,"body":"{\r\n  \"error\": {\r\n    \"code\": \"MissingProperty\",\r\n    \"message\": \"The 'Activity.From' field is required\"\r\n  }\r\n}"}
+2026-05-03 13:08:12 [[32minfo[39m] Agent run started {"runId":"828cf6aa-a2c8-41a3-a91c-354229c1f92b","taskType":"general","model":"claude-haiku-4-5-20251001","task":"What is today's date?"}
+2026-05-03 13:08:14 [[32minfo[39m] Tokens: 2383 (in:2365 out:18) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"828cf6aa-a2c8-41a3-a91c-354229c1f92b"}
+2026-05-03 13:08:14 [[32minfo[39m] Agent run complete {"runId":"828cf6aa-a2c8-41a3-a91c-354229c1f92b","totalTokens":2383,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:08:14 [[32minfo[39m] Reply status {"status":400,"body":"{\r\n  \"error\": {\r\n    \"code\": \"MissingProperty\",\r\n    \"message\": \"The 'Activity.From' field is required\"\r\n  }\r\n}"}
+2026-05-03 13:08:15 [[32minfo[39m] Tokens: 126 (in:96 out:30) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"828cf6aa-a2c8-41a3-a91c-354229c1f92b"}
+2026-05-03 13:08:15 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":104}
+2026-05-03 13:10:11 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 13:10:20 [[32minfo[39m] Teams message received {"serviceUrl":"https://webchat.botframework.com/","from":"","text":"what time is it?"}
+2026-05-03 13:10:21 [[32minfo[39m] Reply status {"status":403,"body":""}
+2026-05-03 13:10:21 [[32minfo[39m] Agent run started {"runId":"5d7d041b-a014-4761-850e-1409b1125658","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what time is it?"}
+2026-05-03 13:10:22 [[32minfo[39m] Tokens: 2410 (in:2326 out:84) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"5d7d041b-a014-4761-850e-1409b1125658"}
+2026-05-03 13:10:23 [[32minfo[39m] Agent run complete {"runId":"5d7d041b-a014-4761-850e-1409b1125658","totalTokens":2410,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:10:23 [[32minfo[39m] Reply status {"status":403,"body":""}
+2026-05-03 13:10:24 [[32minfo[39m] Tokens: 225 (in:164 out:61) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"5d7d041b-a014-4761-850e-1409b1125658"}
+2026-05-03 13:10:24 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":279}
+2026-05-03 13:18:41 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/uk/36b87369-1d8a-49fc-b6a4-d90a8a390c83/","from":"AppValidation-20260427-2bd5ed92-93e2-4f8a-a0b1-f499812c3222","text":"Hi"}
+2026-05-03 13:18:42 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777832320736\"}"}
+2026-05-03 13:18:42 [[32minfo[39m] Agent run started {"runId":"9e1dbdfe-7ddd-4cb3-a54a-dc82e553718d","taskType":"general","model":"claude-haiku-4-5-20251001","task":"Hi"}
+2026-05-03 13:18:44 [[32minfo[39m] Tokens: 2403 (in:2351 out:52) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"9e1dbdfe-7ddd-4cb3-a54a-dc82e553718d"}
+2026-05-03 13:18:44 [[32minfo[39m] Agent run complete {"runId":"9e1dbdfe-7ddd-4cb3-a54a-dc82e553718d","totalTokens":2403,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:18:44 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777832322395\"}"}
+2026-05-03 13:18:45 [[32minfo[39m] Tokens: 187 (in:127 out:60) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"9e1dbdfe-7ddd-4cb3-a54a-dc82e553718d"}
+2026-05-03 13:18:45 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":259}
+2026-05-03 13:18:52 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/uk/36b87369-1d8a-49fc-b6a4-d90a8a390c83/","from":"AppValidation-20260427-2bd5ed92-93e2-4f8a-a0b1-f499812c3222","text":"Hello"}
+2026-05-03 13:18:53 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777832331262\"}"}
+2026-05-03 13:18:53 [[32minfo[39m] Agent run started {"runId":"fe87b95a-8665-480d-b302-55fb496db096","taskType":"general","model":"claude-haiku-4-5-20251001","task":"Hello"}
+2026-05-03 13:18:54 [[32minfo[39m] Tokens: 2450 (in:2377 out:73) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"fe87b95a-8665-480d-b302-55fb496db096"}
+2026-05-03 13:18:54 [[32minfo[39m] Agent run complete {"runId":"fe87b95a-8665-480d-b302-55fb496db096","totalTokens":2450,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:18:55 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777832332934\"}"}
+2026-05-03 13:18:55 [[32minfo[39m] Tokens: 203 (in:148 out:55) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"fe87b95a-8665-480d-b302-55fb496db096"}
+2026-05-03 13:18:55 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":255}
+2026-05-03 13:19:03 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/uk/36b87369-1d8a-49fc-b6a4-d90a8a390c83/","from":"AppValidation-20260427-2bd5ed92-93e2-4f8a-a0b1-f499812c3222","text":"Help"}
+2026-05-03 13:19:04 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777832342041\"}"}
+2026-05-03 13:19:04 [[32minfo[39m] Agent run started {"runId":"97c3adb1-4be6-49ea-92ca-ae2eca484473","taskType":"general","model":"claude-haiku-4-5-20251001","task":"Help"}
+2026-05-03 13:19:06 [[32minfo[39m] Tokens: 2495 (in:2361 out:134) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"97c3adb1-4be6-49ea-92ca-ae2eca484473"}
+2026-05-03 13:19:06 [[32minfo[39m] Agent run complete {"runId":"97c3adb1-4be6-49ea-92ca-ae2eca484473","totalTokens":2495,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:19:06 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777832344335\"}"}
+2026-05-03 13:19:07 [[32minfo[39m] Tokens: 297 (in:219 out:78) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"97c3adb1-4be6-49ea-92ca-ae2eca484473"}
+2026-05-03 13:19:07 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":357}
+2026-05-03 13:24:31 [[32minfo[39m] Teams message received {"serviceUrl":"https://webchat.botframework.com/","from":"","text":"how many days are in a week?"}
+2026-05-03 13:24:31 [[32minfo[39m] Reply status {"status":403,"body":""}
+2026-05-03 13:24:31 [[32minfo[39m] Agent run started {"runId":"d9f6e215-dd37-46dd-98f8-e7970252b039","taskType":"general","model":"claude-haiku-4-5-20251001","task":"how many days are in a week?"}
+2026-05-03 13:24:32 [[32minfo[39m] Tokens: 2439 (in:2425 out:14) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"d9f6e215-dd37-46dd-98f8-e7970252b039"}
+2026-05-03 13:24:32 [[32minfo[39m] Agent run complete {"runId":"d9f6e215-dd37-46dd-98f8-e7970252b039","totalTokens":2439,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:24:32 [[32minfo[39m] Reply status {"status":403,"body":""}
+2026-05-03 13:24:33 [[32minfo[39m] Tokens: 107 (in:94 out:13) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"d9f6e215-dd37-46dd-98f8-e7970252b039"}
+2026-05-03 13:24:33 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":27}
+2026-05-03 13:35:26 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Assistant JRB","text":"testing 123"}
+2026-05-03 13:35:26 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833324881\"}"}
+2026-05-03 13:35:27 [[32minfo[39m] Agent run started {"runId":"6ed28615-5c1e-4379-9960-8167a4fa43b3","taskType":"general","model":"claude-haiku-4-5-20251001","task":"testing 123"}
+2026-05-03 13:35:29 [[32minfo[39m] Tokens: 2540 (in:2403 out:137) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"6ed28615-5c1e-4379-9960-8167a4fa43b3"}
+2026-05-03 13:35:29 [[32minfo[39m] Agent run complete {"runId":"6ed28615-5c1e-4379-9960-8167a4fa43b3","totalTokens":2540,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:35:29 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833327548\"}"}
+2026-05-03 13:35:30 [[32minfo[39m] Tokens: 319 (in:222 out:97) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"6ed28615-5c1e-4379-9960-8167a4fa43b3"}
+2026-05-03 13:35:30 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":414}
+2026-05-03 13:35:38 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Assistant JRB","text":"What time is it?"}
+2026-05-03 13:35:38 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833336704\"}"}
+2026-05-03 13:35:38 [[32minfo[39m] Agent run started {"runId":"63f67c5e-5c42-463e-921b-56a5db7a47f4","taskType":"general","model":"claude-haiku-4-5-20251001","task":"What time is it?"}
+2026-05-03 13:35:40 [[32minfo[39m] Tokens: 2528 (in:2441 out:87) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"63f67c5e-5c42-463e-921b-56a5db7a47f4"}
+2026-05-03 13:35:40 [[32minfo[39m] Agent run complete {"runId":"63f67c5e-5c42-463e-921b-56a5db7a47f4","totalTokens":2528,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:35:41 [[32minfo[39m] Tokens: 230 (in:171 out:59) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"63f67c5e-5c42-463e-921b-56a5db7a47f4"}
+2026-05-03 13:35:41 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":260}
+2026-05-03 13:35:42 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833340164\"}"}
+2026-05-03 13:36:47 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Assistant JRB","text":"who is the packer's quarterback?"}
+2026-05-03 13:36:47 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833405653\"}"}
+2026-05-03 13:36:47 [[32minfo[39m] Agent run started {"runId":"15a191e0-f977-4bad-ae88-f8a3febcf062","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the packer's quarterback?"}
+2026-05-03 13:36:49 [[32minfo[39m] Tokens: 2566 (in:2443 out:123) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"15a191e0-f977-4bad-ae88-f8a3febcf062"}
+2026-05-03 13:36:49 [[32minfo[39m] Agent run complete {"runId":"15a191e0-f977-4bad-ae88-f8a3febcf062","totalTokens":2566,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:36:49 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833407566\"}"}
+2026-05-03 13:36:50 [[32minfo[39m] Tokens: 294 (in:210 out:84) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"15a191e0-f977-4bad-ae88-f8a3febcf062"}
+2026-05-03 13:36:50 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":374}
+2026-05-03 13:37:05 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Assistant JRB","text":"What does JR Boehlke do?"}
+2026-05-03 13:37:05 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833423671\"}"}
+2026-05-03 13:37:05 [[32minfo[39m] Agent run started {"runId":"d6cb3f19-3f4c-45de-a714-4791c09def96","taskType":"general","model":"claude-haiku-4-5-20251001","task":"What does JR Boehlke do?"}
+2026-05-03 13:37:08 [[32minfo[39m] Tokens: 2694 (in:2475 out:219) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"d6cb3f19-3f4c-45de-a714-4791c09def96"}
+2026-05-03 13:37:08 [[32minfo[39m] Agent run complete {"runId":"d6cb3f19-3f4c-45de-a714-4791c09def96","totalTokens":2694,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:37:09 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833426982\"}"}
+2026-05-03 13:37:10 [[32minfo[39m] Tokens: 408 (in:315 out:93) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"d6cb3f19-3f4c-45de-a714-4791c09def96"}
+2026-05-03 13:37:10 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":376}
+2026-05-03 13:39:34 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"what day is today?"}
+2026-05-03 13:39:34 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833572655\"}"}
+2026-05-03 13:39:34 [[32minfo[39m] Agent run started {"runId":"0c772d56-93ad-4ef1-bf07-6cb09bcb6cc2","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what day is today?"}
+2026-05-03 13:39:35 [[32minfo[39m] Tokens: 2500 (in:2484 out:16) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"0c772d56-93ad-4ef1-bf07-6cb09bcb6cc2"}
+2026-05-03 13:39:35 [[32minfo[39m] Agent run complete {"runId":"0c772d56-93ad-4ef1-bf07-6cb09bcb6cc2","totalTokens":2500,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:39:36 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833573953\"}"}
+2026-05-03 13:39:36 [[32minfo[39m] Tokens: 121 (in:93 out:28) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"0c772d56-93ad-4ef1-bf07-6cb09bcb6cc2"}
+2026-05-03 13:39:36 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":98}
+2026-05-03 13:44:22 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"what does J.R. Boehlke do?"}
+2026-05-03 13:44:23 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833860925\"}"}
+2026-05-03 13:44:23 [[32minfo[39m] Agent run started {"runId":"6daa769b-1a75-465f-9ca6-40a527b8bc3f","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what does J.R. Boehlke do?"}
+2026-05-03 13:44:25 [[32minfo[39m] Tokens: 2639 (in:2507 out:132) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"6daa769b-1a75-465f-9ca6-40a527b8bc3f"}
+2026-05-03 13:44:25 [[32minfo[39m] Agent run complete {"runId":"6daa769b-1a75-465f-9ca6-40a527b8bc3f","totalTokens":2639,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:44:26 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833863842\"}"}
+2026-05-03 13:44:26 [[32minfo[39m] Tokens: 311 (in:226 out:85) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"6daa769b-1a75-465f-9ca6-40a527b8bc3f"}
+2026-05-03 13:44:27 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":361}
+2026-05-03 13:45:12 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 13:45:23 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"what does J.R. Boehlke do?"}
+2026-05-03 13:45:24 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833922344\"}"}
+2026-05-03 13:45:24 [[32minfo[39m] Agent run started {"runId":"28bef354-1aae-49c2-92ff-42f5222ab643","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what does J.R. Boehlke do?"}
+2026-05-03 13:45:26 [[32minfo[39m] Tokens: 2690 (in:2576 out:114) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"28bef354-1aae-49c2-92ff-42f5222ab643"}
+2026-05-03 13:45:26 [[32minfo[39m] Agent run complete {"runId":"28bef354-1aae-49c2-92ff-42f5222ab643","totalTokens":2690,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 13:45:26 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777833924563\"}"}
+2026-05-03 13:45:27 [[32minfo[39m] Tokens: 288 (in:203 out:85) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"28bef354-1aae-49c2-92ff-42f5222ab643"}
+2026-05-03 13:45:27 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":351}
+2026-05-03 14:03:50 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:04:01 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"who is the packer's quarterback?"}
+2026-05-03 14:04:02 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777835040430\"}"}
+2026-05-03 14:04:02 [[32minfo[39m] Agent run started {"runId":"588928c4-5814-4cda-b329-5a42bc460f50","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the packer's quarterback?"}
+2026-05-03 14:04:04 [[32minfo[39m] Tool call {"tool":"web_search","runId":"588928c4-5814-4cda-b329-5a42bc460f50"}
+2026-05-03 14:04:04 [[31merror[39m] Tool error {"tool":"web_search","err":"Unknown tool: web_search"}
+2026-05-03 14:04:05 [[32minfo[39m] Tokens: 5647 (in:5446 out:201) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"588928c4-5814-4cda-b329-5a42bc460f50"}
+2026-05-03 14:04:05 [[32minfo[39m] Agent run complete {"runId":"588928c4-5814-4cda-b329-5a42bc460f50","totalTokens":5647,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:04:06 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777835043839\"}"}
+2026-05-03 14:04:06 [[32minfo[39m] Tokens: 444 (in:364 out:80) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"588928c4-5814-4cda-b329-5a42bc460f50"}
+2026-05-03 14:04:07 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":335}
+2026-05-03 14:07:19 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:07:31 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"who is the packers quarterback?"}
+2026-05-03 14:07:32 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777835249810\"}"}
+2026-05-03 14:07:32 [[32minfo[39m] Agent run started {"runId":"99b8ef5c-b5bc-45dc-b4ca-67d2fa05b418","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the packers quarterback?"}
+2026-05-03 14:07:33 [[32minfo[39m] Tool call {"tool":"web_search","runId":"99b8ef5c-b5bc-45dc-b4ca-67d2fa05b418"}
+2026-05-03 14:07:33 [[31merror[39m] Tool error {"tool":"web_search","err":"Unknown tool: web_search"}
+2026-05-03 14:07:34 [[32minfo[39m] Tokens: 5606 (in:5436 out:170) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"99b8ef5c-b5bc-45dc-b4ca-67d2fa05b418"}
+2026-05-03 14:07:34 [[32minfo[39m] Agent run complete {"runId":"99b8ef5c-b5bc-45dc-b4ca-67d2fa05b418","totalTokens":5606,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:07:34 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777835252531\"}"}
+2026-05-03 14:07:35 [[32minfo[39m] Tokens: 406 (in:327 out:79) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"99b8ef5c-b5bc-45dc-b4ca-67d2fa05b418"}
+2026-05-03 14:07:35 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":330}
+2026-05-03 14:08:51 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"who is the packers quarterback?"}
+2026-05-03 14:08:52 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777835330011\"}"}
+2026-05-03 14:08:52 [[32minfo[39m] Agent run started {"runId":"4d26fcb5-62c7-4ce0-8a13-214302bf66a5","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the packers quarterback?"}
+2026-05-03 14:08:53 [[32minfo[39m] Tool call {"tool":"web_search","runId":"4d26fcb5-62c7-4ce0-8a13-214302bf66a5"}
+2026-05-03 14:08:53 [[31merror[39m] Tool error {"tool":"web_search","err":"Unknown tool: web_search"}
+2026-05-03 14:08:54 [[32minfo[39m] Tokens: 5603 (in:5408 out:195) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"4d26fcb5-62c7-4ce0-8a13-214302bf66a5"}
+2026-05-03 14:08:54 [[32minfo[39m] Agent run complete {"runId":"4d26fcb5-62c7-4ce0-8a13-214302bf66a5","totalTokens":5603,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:08:54 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777835332675\"}"}
+2026-05-03 14:08:55 [[32minfo[39m] Tokens: 442 (in:355 out:87) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"4d26fcb5-62c7-4ce0-8a13-214302bf66a5"}
+2026-05-03 14:08:56 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":357}
+2026-05-03 14:20:54 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"who is the Vikings quarterback?"}
+2026-05-03 14:20:54 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836052413\"}"}
+2026-05-03 14:20:54 [[32minfo[39m] Agent run started {"runId":"dbb010e7-6c36-42b7-8bfc-c2d8cd1e3f1e","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the Vikings quarterback?"}
+2026-05-03 14:20:56 [[32minfo[39m] Tool call {"tool":"web_search","runId":"dbb010e7-6c36-42b7-8bfc-c2d8cd1e3f1e"}
+2026-05-03 14:20:56 [[31merror[39m] Tool error {"tool":"web_search","err":"Unknown tool: web_search"}
+2026-05-03 14:20:57 [[32minfo[39m] Tokens: 5725 (in:5517 out:208) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"dbb010e7-6c36-42b7-8bfc-c2d8cd1e3f1e"}
+2026-05-03 14:20:58 [[32minfo[39m] Agent run complete {"runId":"dbb010e7-6c36-42b7-8bfc-c2d8cd1e3f1e","totalTokens":5725,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:20:58 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836056134\"}"}
+2026-05-03 14:20:59 [[32minfo[39m] Tokens: 448 (in:358 out:90) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"dbb010e7-6c36-42b7-8bfc-c2d8cd1e3f1e"}
+2026-05-03 14:20:59 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":441}
+2026-05-03 14:21:08 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:21:16 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"who is the bears quarterback?"}
+2026-05-03 14:21:17 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836075359\"}"}
+2026-05-03 14:21:17 [[32minfo[39m] Agent run started {"runId":"00e3f910-954d-4bc2-88b5-f87348d01055","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the bears quarterback?"}
+2026-05-03 14:21:18 [[32minfo[39m] Tool call {"tool":"web_search","runId":"00e3f910-954d-4bc2-88b5-f87348d01055"}
+2026-05-03 14:21:20 [[32minfo[39m] Tokens: 5685 (in:5523 out:162) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"00e3f910-954d-4bc2-88b5-f87348d01055"}
+2026-05-03 14:21:20 [[32minfo[39m] Agent run complete {"runId":"00e3f910-954d-4bc2-88b5-f87348d01055","totalTokens":5685,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:21:20 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836078354\"}"}
+2026-05-03 14:21:21 [[32minfo[39m] Tokens: 380 (in:314 out:66) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"00e3f910-954d-4bc2-88b5-f87348d01055"}
+2026-05-03 14:21:21 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":298}
+2026-05-03 14:22:09 [[32minfo[39m] Agent run started {"runId":"8643a241-df26-4057-b609-8b4b2a56155a","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what is my BRAVE_SEARCH_API_KEY env var set to"}
+2026-05-03 14:22:11 [[32minfo[39m] Tool call {"tool":"run_script","runId":"8643a241-df26-4057-b609-8b4b2a56155a"}
+2026-05-03 14:22:11 [[32minfo[39m] Running script {"cmd":"node C:\\bin\\sh -c echo $BRAVE_SEARCH_API_KEY"}
+2026-05-03 14:22:12 [[32minfo[39m] Tool call {"tool":"run_script","runId":"8643a241-df26-4057-b609-8b4b2a56155a"}
+2026-05-03 14:22:12 [[32minfo[39m] Running script {"cmd":"node C:\\Users\\Assistant\\JRBAgent\\agent\\-c import os; print(os.getenv('BRAVE_SEARCH_API_KEY', 'Not set'))"}
+2026-05-03 14:22:13 [[32minfo[39m] Tool call {"tool":"write_file","runId":"8643a241-df26-4057-b609-8b4b2a56155a"}
+2026-05-03 14:22:13 [[32minfo[39m] File written {"path":"C:\\Users\\Assistant\\JRBAgent\\agent\\check_env.js"}
+2026-05-03 14:22:14 [[32minfo[39m] Tool call {"tool":"run_script","runId":"8643a241-df26-4057-b609-8b4b2a56155a"}
+2026-05-03 14:22:14 [[32minfo[39m] Running script {"cmd":"node C:\\Users\\Assistant\\JRBAgent\\agent\\check_env.js"}
+2026-05-03 14:22:15 [[32minfo[39m] Tokens: 16313 (in:15853 out:460) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"8643a241-df26-4057-b609-8b4b2a56155a"}
+2026-05-03 14:22:15 [[32minfo[39m] Agent run complete {"runId":"8643a241-df26-4057-b609-8b4b2a56155a","totalTokens":16313,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:22:53 [[32minfo[39m] Agent run started {"runId":"633582ed-ca23-475e-8c26-96c78908475f","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what is my BRAVE_SEARCH_API_KEY env var set to"}
+2026-05-03 14:22:55 [[32minfo[39m] Tool call {"tool":"run_script","runId":"633582ed-ca23-475e-8c26-96c78908475f"}
+2026-05-03 14:22:55 [[32minfo[39m] Running script {"cmd":"node C:\\Users\\Assistant\\JRBAgent\\agent\\-c echo $BRAVE_SEARCH_API_KEY"}
+2026-05-03 14:22:56 [[32minfo[39m] Tool call {"tool":"run_script","runId":"633582ed-ca23-475e-8c26-96c78908475f"}
+2026-05-03 14:22:56 [[32minfo[39m] Running script {"cmd":"node C:\\Users\\Assistant\\JRBAgent\\agent\\- import os; print(os.environ.get('BRAVE_SEARCH_API_KEY', 'NOT SET'))"}
+2026-05-03 14:22:57 [[32minfo[39m] Tool call {"tool":"write_file","runId":"633582ed-ca23-475e-8c26-96c78908475f"}
+2026-05-03 14:22:57 [[32minfo[39m] File written {"path":"C:\\Users\\Assistant\\JRBAgent\\agent\\check_env.py"}
+2026-05-03 14:22:58 [[32minfo[39m] Tool call {"tool":"run_script","runId":"633582ed-ca23-475e-8c26-96c78908475f"}
+2026-05-03 14:22:58 [[32minfo[39m] Running script {"cmd":"python3 C:\\Users\\Assistant\\JRBAgent\\agent\\check_env.py"}
+2026-05-03 14:22:59 [[32minfo[39m] Tool call {"tool":"write_file","runId":"633582ed-ca23-475e-8c26-96c78908475f"}
+2026-05-03 14:23:00 [[32minfo[39m] Tool call {"tool":"write_file","runId":"633582ed-ca23-475e-8c26-96c78908475f"}
+2026-05-03 14:23:00 [[32minfo[39m] File written {"path":"C:\\Users\\Assistant\\JRBAgent\\agent\\check_env.js"}
+2026-05-03 14:23:01 [[32minfo[39m] Tool call {"tool":"run_script","runId":"633582ed-ca23-475e-8c26-96c78908475f"}
+2026-05-03 14:23:01 [[32minfo[39m] Running script {"cmd":"node C:\\Users\\Assistant\\JRBAgent\\agent\\check_env.js"}
+2026-05-03 14:23:02 [[32minfo[39m] Tokens: 30438 (in:29661 out:777) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"633582ed-ca23-475e-8c26-96c78908475f"}
+2026-05-03 14:23:02 [[32minfo[39m] Agent run complete {"runId":"633582ed-ca23-475e-8c26-96c78908475f","totalTokens":30438,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:27:28 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:27:37 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"who is the lions quarterback"}
+2026-05-03 14:27:37 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836455637\"}"}
+2026-05-03 14:27:37 [[32minfo[39m] Agent run started {"runId":"dd80ce9a-a564-49c8-aa4b-039e8fd5f7d1","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the lions quarterback"}
+2026-05-03 14:27:39 [[32minfo[39m] Tool call {"tool":"web_search","runId":"dd80ce9a-a564-49c8-aa4b-039e8fd5f7d1"}
+2026-05-03 14:27:41 [[32minfo[39m] Tokens: 5645 (in:5483 out:162) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"dd80ce9a-a564-49c8-aa4b-039e8fd5f7d1"}
+2026-05-03 14:27:41 [[32minfo[39m] Agent run complete {"runId":"dd80ce9a-a564-49c8-aa4b-039e8fd5f7d1","totalTokens":5645,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:27:41 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836459194\"}"}
+2026-05-03 14:27:42 [[32minfo[39m] Tokens: 373 (in:311 out:62) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"dd80ce9a-a564-49c8-aa4b-039e8fd5f7d1"}
+2026-05-03 14:27:42 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":268}
+2026-05-03 14:28:54 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:29:07 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"who is the bears quarterback?"}
+2026-05-03 14:29:08 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836545906\"}"}
+2026-05-03 14:29:08 [[32minfo[39m] Agent run started {"runId":"5385eb8f-91a1-49e8-bc11-ac5080f26b17","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the bears quarterback?"}
+2026-05-03 14:29:09 [[32minfo[39m] Tool call {"tool":"web_search","runId":"5385eb8f-91a1-49e8-bc11-ac5080f26b17"}
+2026-05-03 14:29:10 [[32minfo[39m] Tokens: 5628 (in:5449 out:179) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"5385eb8f-91a1-49e8-bc11-ac5080f26b17"}
+2026-05-03 14:29:10 [[32minfo[39m] Agent run complete {"runId":"5385eb8f-91a1-49e8-bc11-ac5080f26b17","totalTokens":5628,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:29:11 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836549024\"}"}
+2026-05-03 14:29:12 [[32minfo[39m] Tokens: 413 (in:330 out:83) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"5385eb8f-91a1-49e8-bc11-ac5080f26b17"}
+2026-05-03 14:29:12 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":409}
+2026-05-03 14:30:18 [[32minfo[39m] Agent run started {"runId":"8b70e997-7729-446c-a2ad-647c7487df29","taskType":"general","model":"claude-haiku-4-5-20251001","task":"print the first 5 characters of the BRAVE_SEARCH_API_KEY environment variable"}
+2026-05-03 14:30:19 [[32minfo[39m] Tool call {"tool":"run_script","runId":"8b70e997-7729-446c-a2ad-647c7487df29"}
+2026-05-03 14:30:19 [[32minfo[39m] Running script {"cmd":"node C:\\Users\\Assistant\\JRBAgent\\agent\\script.js --eval console.log(process.env.BRAVE_SEARCH_API_KEY?.substring(0, 5) || 'Not set')"}
+2026-05-03 14:30:20 [[32minfo[39m] Tool call {"tool":"write_file","runId":"8b70e997-7729-446c-a2ad-647c7487df29"}
+2026-05-03 14:30:21 [[32minfo[39m] Tool call {"tool":"write_file","runId":"8b70e997-7729-446c-a2ad-647c7487df29"}
+2026-05-03 14:30:21 [[32minfo[39m] File written {"path":"C:\\Users\\Assistant\\JRBAgent\\agent\\check_env.js"}
+2026-05-03 14:30:22 [[32minfo[39m] Tool call {"tool":"run_script","runId":"8b70e997-7729-446c-a2ad-647c7487df29"}
+2026-05-03 14:30:22 [[32minfo[39m] Running script {"cmd":"node C:\\Users\\Assistant\\JRBAgent\\agent\\check_env.js"}
+2026-05-03 14:30:23 [[32minfo[39m] Tokens: 16731 (in:16266 out:465) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"8b70e997-7729-446c-a2ad-647c7487df29"}
+2026-05-03 14:30:23 [[32minfo[39m] Agent run complete {"runId":"8b70e997-7729-446c-a2ad-647c7487df29","totalTokens":16731,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:31:36 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:31:50 [[32minfo[39m] Teams message received {"serviceUrl":"https://smba.trafficmanager.net/amer/9299991a-3e06-48e4-8ba8-f3f7d3aada32/","from":"Michael Reardon","text":"who is the packer's quarterback?"}
+2026-05-03 14:31:51 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836709147\"}"}
+2026-05-03 14:31:51 [[32minfo[39m] Agent run started {"runId":"3c812e26-ca17-4311-8b8f-9b15fe61ab92","taskType":"general","model":"claude-haiku-4-5-20251001","task":"who is the packer's quarterback?"}
+2026-05-03 14:31:52 [[32minfo[39m] Tool call {"tool":"web_search","runId":"3c812e26-ca17-4311-8b8f-9b15fe61ab92"}
+2026-05-03 14:31:54 [[32minfo[39m] Tokens: 5938 (in:5812 out:126) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"3c812e26-ca17-4311-8b8f-9b15fe61ab92"}
+2026-05-03 14:31:54 [[32minfo[39m] Agent run complete {"runId":"3c812e26-ca17-4311-8b8f-9b15fe61ab92","totalTokens":5938,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 14:31:54 [[32minfo[39m] Reply status {"status":201,"body":"{\"id\":\"1777836712306\"}"}
+2026-05-03 14:31:55 [[32minfo[39m] Tokens: 740 (in:630 out:110) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"3c812e26-ca17-4311-8b8f-9b15fe61ab92"}
+2026-05-03 14:31:55 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":408}
+2026-05-03 14:39:31 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:40:29 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:40:39 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:41:48 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:42:00 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:42:02 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:44:55 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:45:45 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:46:34 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 14:57:37 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","weekly_crm_report","invoice_aging_check","email_poller"]}
+2026-05-03 14:57:37 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-03 15:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-03 15:00:00 [[32minfo[39m] Email poller: processing email from team@mail.airtable.com {"subject":"Introducing Hyperagent, by Airtable"}
+2026-05-03 15:00:00 [[32minfo[39m] Agent run started {"runId":"03658e86-2310-4cbd-bc81-afda0d8f5469","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from team@mail.airtable.com with subject \"Introducing Hype"}
+2026-05-03 15:00:03 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"03658e86-2310-4cbd-bc81-afda0d8f5469"}
+2026-05-03 15:00:04 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAUSYDJAAA=","subject":"Re: Introducing Hyperagent, by Airtable"}
+2026-05-03 15:00:05 [[32minfo[39m] Tokens: 5186 (in:4860 out:326) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"03658e86-2310-4cbd-bc81-afda0d8f5469"}
+2026-05-03 15:00:05 [[32minfo[39m] Agent run complete {"runId":"03658e86-2310-4cbd-bc81-afda0d8f5469","totalTokens":5186,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:06 [[32minfo[39m] Email poller: replied to team@mail.airtable.com
+2026-05-03 15:00:06 [[32minfo[39m] Email poller: processing email from do-not-reply@cloud-protect.net {"subject":"Quarantine List - GoDaddy's Advanced Email Security"}
+2026-05-03 15:00:06 [[32minfo[39m] Agent run started {"runId":"8a683d91-5dec-428a-9cd0-eeb70105b79b","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from do-not-reply@cloud-protect.net with subject \"Quaranti"}
+2026-05-03 15:00:10 [[32minfo[39m] Tokens: 2307 (in:2043 out:264) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"8a683d91-5dec-428a-9cd0-eeb70105b79b"}
+2026-05-03 15:00:10 [[32minfo[39m] Agent run complete {"runId":"8a683d91-5dec-428a-9cd0-eeb70105b79b","totalTokens":2307,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:10 [[32minfo[39m] Email poller: replied to do-not-reply@cloud-protect.net
+2026-05-03 15:00:10 [[32minfo[39m] Email poller: processing email from do-not-reply@cloud-protect.net {"subject":"Quarantine List - GoDaddy's Advanced Email Security"}
+2026-05-03 15:00:11 [[32minfo[39m] Agent run started {"runId":"c2fccf2c-43ae-4f16-9668-971a60a75331","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from do-not-reply@cloud-protect.net with subject \"Quaranti"}
+2026-05-03 15:00:13 [[32minfo[39m] Tokens: 2232 (in:2034 out:198) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"c2fccf2c-43ae-4f16-9668-971a60a75331"}
+2026-05-03 15:00:13 [[32minfo[39m] Agent run complete {"runId":"c2fccf2c-43ae-4f16-9668-971a60a75331","totalTokens":2232,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:14 [[32minfo[39m] Email poller: replied to do-not-reply@cloud-protect.net
+2026-05-03 15:00:14 [[32minfo[39m] Email poller: processing email from team@mail.airtable.com {"subject":"Collect the info you need — from anyone, anywhere."}
+2026-05-03 15:00:14 [[32minfo[39m] Agent run started {"runId":"8ca7d8d4-a99a-4467-9139-c7abe266f3b5","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from team@mail.airtable.com with subject \"Collect the info"}
+2026-05-03 15:00:16 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"8ca7d8d4-a99a-4467-9139-c7abe266f3b5"}
+2026-05-03 15:00:16 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAUSYDNAAA=","subject":"Re: Collect the info you need — from anyone, anywhere."}
+2026-05-03 15:00:18 [[32minfo[39m] Tokens: 4914 (in:4640 out:274) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"8ca7d8d4-a99a-4467-9139-c7abe266f3b5"}
+2026-05-03 15:00:18 [[32minfo[39m] Agent run complete {"runId":"8ca7d8d4-a99a-4467-9139-c7abe266f3b5","totalTokens":4914,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:18 [[32minfo[39m] Email poller: replied to team@mail.airtable.com
+2026-05-03 15:00:18 [[32minfo[39m] Email poller: processing email from o365mc@microsoft.com {"subject":"Weekly digest: Microsoft service updates"}
+2026-05-03 15:00:18 [[32minfo[39m] Agent run started {"runId":"96e78a59-1505-44cb-89c6-d1d754ac39c3","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from o365mc@microsoft.com with subject \"Weekly digest: Mic"}
+2026-05-03 15:00:21 [[32minfo[39m] Tokens: 3291 (in:3123 out:168) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"96e78a59-1505-44cb-89c6-d1d754ac39c3"}
+2026-05-03 15:00:21 [[32minfo[39m] Agent run complete {"runId":"96e78a59-1505-44cb-89c6-d1d754ac39c3","totalTokens":3291,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:22 [[32minfo[39m] Email poller: replied to o365mc@microsoft.com
+2026-05-03 15:00:22 [[32minfo[39m] Email poller: processing email from do-not-reply@cloud-protect.net {"subject":"Quarantine List - GoDaddy's Advanced Email Security"}
+2026-05-03 15:00:22 [[32minfo[39m] Agent run started {"runId":"fce80bfc-0cda-416e-b888-bbfc9f89cfc8","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from do-not-reply@cloud-protect.net with subject \"Quaranti"}
+2026-05-03 15:00:25 [[32minfo[39m] Tokens: 2241 (in:1985 out:256) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"fce80bfc-0cda-416e-b888-bbfc9f89cfc8"}
+2026-05-03 15:00:25 [[32minfo[39m] Agent run complete {"runId":"fce80bfc-0cda-416e-b888-bbfc9f89cfc8","totalTokens":2241,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:25 [[32minfo[39m] Email poller: replied to do-not-reply@cloud-protect.net
+2026-05-03 15:00:25 [[32minfo[39m] Email poller: processing email from do-not-reply@cloud-protect.net {"subject":"Quarantine List - GoDaddy's Advanced Email Security"}
+2026-05-03 15:00:25 [[32minfo[39m] Agent run started {"runId":"fe7c7991-1a42-4e26-966c-85c283b085ab","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from do-not-reply@cloud-protect.net with subject \"Quaranti"}
+2026-05-03 15:00:28 [[32minfo[39m] Tokens: 2230 (in:1986 out:244) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"fe7c7991-1a42-4e26-966c-85c283b085ab"}
+2026-05-03 15:00:28 [[32minfo[39m] Agent run complete {"runId":"fe7c7991-1a42-4e26-966c-85c283b085ab","totalTokens":2230,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:29 [[32minfo[39m] Email poller: replied to do-not-reply@cloud-protect.net
+2026-05-03 15:00:29 [[32minfo[39m] Email poller: processing email from team@mail.airtable.com {"subject":"Build a better experience with Interfaces"}
+2026-05-03 15:00:29 [[32minfo[39m] Agent run started {"runId":"8e330f4f-b591-4d0f-8728-f66f14b5d7b6","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from team@mail.airtable.com with subject \"Build a better e"}
+2026-05-03 15:00:31 [[32minfo[39m] Tokens: 2234 (in:2108 out:126) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"8e330f4f-b591-4d0f-8728-f66f14b5d7b6"}
+2026-05-03 15:00:31 [[32minfo[39m] Agent run complete {"runId":"8e330f4f-b591-4d0f-8728-f66f14b5d7b6","totalTokens":2234,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:31 [[32minfo[39m] Email poller: replied to team@mail.airtable.com
+2026-05-03 15:00:31 [[32minfo[39m] Email poller: processing email from do-not-reply@cloud-protect.net {"subject":"Quarantine List - GoDaddy's Advanced Email Security"}
+2026-05-03 15:00:31 [[32minfo[39m] Agent run started {"runId":"bc495291-9e35-4360-ad23-f10dba33170c","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from do-not-reply@cloud-protect.net with subject \"Quaranti"}
+2026-05-03 15:00:34 [[32minfo[39m] Tokens: 2218 (in:1974 out:244) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"bc495291-9e35-4360-ad23-f10dba33170c"}
+2026-05-03 15:00:34 [[32minfo[39m] Agent run complete {"runId":"bc495291-9e35-4360-ad23-f10dba33170c","totalTokens":2218,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:35 [[32minfo[39m] Email poller: replied to do-not-reply@cloud-protect.net
+2026-05-03 15:00:35 [[32minfo[39m] Email poller: processing email from team@mail.airtable.com {"subject":"Last chance: New Feature Spotlight - April 2026"}
+2026-05-03 15:00:35 [[32minfo[39m] Agent run started {"runId":"658be26e-c692-4c52-9f2a-8bcc1facc6ac","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from team@mail.airtable.com with subject \"Last chance: New"}
+2026-05-03 15:00:37 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"658be26e-c692-4c52-9f2a-8bcc1facc6ac"}
+2026-05-03 15:00:37 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAUSYDUAAA=","subject":"Re: Last chance: New Feature Spotlight - April 2026"}
+2026-05-03 15:00:38 [[32minfo[39m] Tokens: 4766 (in:4458 out:308) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"658be26e-c692-4c52-9f2a-8bcc1facc6ac"}
+2026-05-03 15:00:38 [[32minfo[39m] Agent run complete {"runId":"658be26e-c692-4c52-9f2a-8bcc1facc6ac","totalTokens":4766,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:00:39 [[32minfo[39m] Email poller: replied to team@mail.airtable.com
+2026-05-03 15:00:39 [[31merror[39m] Scheduled task failed: email_poller {"err":"Cannot destructure property 'result' of '(intermediate value)' as it is undefined."}
+2026-05-03 15:03:27 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","weekly_crm_report","invoice_aging_check","email_poller"]}
+2026-05-03 15:03:27 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-03 15:03:52 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","weekly_crm_report","invoice_aging_check","email_poller"]}
+2026-05-03 15:03:52 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-03 15:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-03 15:05:01 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"Test 123"}
+2026-05-03 15:05:01 [[32minfo[39m] Agent run started {"runId":"0949fa1d-77b3-4853-8175-688ff5ceb754","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from michael@jrboehlke.com with subject \"Test 123\". Here i"}
+2026-05-03 15:05:03 [[32minfo[39m] Tool call {"tool":"send_email","runId":"0949fa1d-77b3-4853-8175-688ff5ceb754"}
+2026-05-03 15:05:04 [[32minfo[39m] Tokens: 4114 (in:3975 out:139) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"0949fa1d-77b3-4853-8175-688ff5ceb754"}
+2026-05-03 15:05:04 [[32minfo[39m] Agent run complete {"runId":"0949fa1d-77b3-4853-8175-688ff5ceb754","totalTokens":4114,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:05:04 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-03 15:05:05 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"Michael Reardon shared the folder \"Claude Folder\" with you"}
+2026-05-03 15:05:05 [[32minfo[39m] Agent run started {"runId":"d4696151-6ea2-4706-90cf-bca073ee03c4","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from michael@jrboehlke.com with subject \"Michael Reardon s"}
+2026-05-03 15:05:06 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"d4696151-6ea2-4706-90cf-bca073ee03c4"}
+2026-05-03 15:05:07 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAUSYDYAAA=","subject":"Re: Michael Reardon shared the folder \"Claude Folder\" with you"}
+2026-05-03 15:05:08 [[32minfo[39m] Tokens: 4376 (in:4117 out:259) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"d4696151-6ea2-4706-90cf-bca073ee03c4"}
+2026-05-03 15:05:08 [[32minfo[39m] Agent run complete {"runId":"d4696151-6ea2-4706-90cf-bca073ee03c4","totalTokens":4376,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:05:09 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-03 15:05:09 [[31merror[39m] Scheduled task failed: email_poller {"err":"Cannot destructure property 'result' of '(intermediate value)' as it is undefined."}
+2026-05-03 15:22:27 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","weekly_crm_report","invoice_aging_check","email_poller"]}
+2026-05-03 15:22:27 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-03 15:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-03 15:25:00 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"RE: test 789"}
+2026-05-03 15:25:00 [[32minfo[39m] Agent run started {"runId":"1b6618e2-5cc4-436f-9a24-65ed733e5056","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from michael@jrboehlke.com with subject \"RE: test 789\". Em"}
+2026-05-03 15:25:02 [[32minfo[39m] Tokens: 1996 (in:1971 out:25) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"1b6618e2-5cc4-436f-9a24-65ed733e5056"}
+2026-05-03 15:25:02 [[32minfo[39m] Agent run complete {"runId":"1b6618e2-5cc4-436f-9a24-65ed733e5056","totalTokens":1996,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:25:02 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-03 15:25:02 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"test 789"}
+2026-05-03 15:25:02 [[32minfo[39m] Agent run started {"runId":"f60004cd-1071-471a-b4ae-c19ad6285b03","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from michael@jrboehlke.com with subject \"test 789\". Email "}
+2026-05-03 15:25:03 [[32minfo[39m] Tokens: 1919 (in:1902 out:17) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"f60004cd-1071-471a-b4ae-c19ad6285b03"}
+2026-05-03 15:25:03 [[32minfo[39m] Agent run complete {"runId":"f60004cd-1071-471a-b4ae-c19ad6285b03","totalTokens":1919,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:25:04 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-03 15:25:04 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"Test 456"}
+2026-05-03 15:25:04 [[32minfo[39m] Agent run started {"runId":"0cb42129-7ceb-438c-a872-0561cb6fff2e","taskType":"email","model":"claude-haiku-4-5-20251001","task":"You received an email from michael@jrboehlke.com with subject \"Test 456\". Email "}
+2026-05-03 15:25:04 [[32minfo[39m] Tokens: 1920 (in:1909 out:11) {"task":"email","model":"claude-haiku-4-5-20251001","runId":"0cb42129-7ceb-438c-a872-0561cb6fff2e"}
+2026-05-03 15:25:04 [[32minfo[39m] Agent run complete {"runId":"0cb42129-7ceb-438c-a872-0561cb6fff2e","totalTokens":1920,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:25:05 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-03 15:25:06 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-03 15:28:56 [[32minfo[39m] Agent run started {"runId":"2512facf-d113-45d4-b875-2bd32503e3a4","taskType":"general","model":"claude-haiku-4-5-20251001","task":"Create a calendar reminder on July 1, 2026 titled 'Renew QuickBooks OAuth Refres"}
+2026-05-03 15:28:58 [[32minfo[39m] Tool call {"tool":"create_reminder","runId":"2512facf-d113-45d4-b875-2bd32503e3a4"}
+2026-05-03 15:29:01 [[32minfo[39m] Tokens: 6209 (in:5881 out:328) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"2512facf-d113-45d4-b875-2bd32503e3a4"}
+2026-05-03 15:29:01 [[32minfo[39m] Agent run complete {"runId":"2512facf-d113-45d4-b875-2bd32503e3a4","totalTokens":6209,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-03 15:30:03 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-03 15:30:15 [[32minfo[39m] Agent run started {"runId":"d1585b8c-eb45-4d27-a991-d488c19faf65","taskType":"general","model":"claude-haiku-4-5-20251001","task":"Check my Outlook calendar for any events on July 1, 2026 and list them."}
+2026-05-03 15:30:18 [[32minfo[39m] Tokens: 2919 (in:2723 out:196) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"d1585b8c-eb45-4d27-a991-d488c19faf65"}
+2026-05-03 15:30:18 [[32minfo[39m] Agent run complete {"runId":"d1585b8c-eb45-4d27-a991-d488c19faf65","totalTokens":2919,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:32:19 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-03 15:32:22 [[32minfo[39m] Agent run started {"runId":"7ca31cbb-7425-40c3-bf3b-386b69b22b35","taskType":"general","model":"claude-haiku-4-5-20251001","task":"Create a calendar event on July 1, 2026 from 9am to 9:30am titled 'Renew QuickBo"}
+2026-05-03 15:32:24 [[32minfo[39m] Tool call {"tool":"create_reminder","runId":"7ca31cbb-7425-40c3-bf3b-386b69b22b35"}
+2026-05-03 15:32:25 [[32minfo[39m] Tokens: 6093 (in:5887 out:206) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"7ca31cbb-7425-40c3-bf3b-386b69b22b35"}
+2026-05-03 15:32:26 [[32minfo[39m] Agent run complete {"runId":"7ca31cbb-7425-40c3-bf3b-386b69b22b35","totalTokens":6093,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:34:20 [[32minfo[39m] Agent run started {"runId":"5e617571-72ae-491a-8151-9a2969ed9f6a","taskType":"general","model":"claude-haiku-4-5-20251001","task":"Create a calendar event on July 1, 2026 from 9am to 9:30am titled 'Renew QuickBo"}
+2026-05-03 15:34:21 [[32minfo[39m] Tool call {"tool":"create_calendar_event","runId":"5e617571-72ae-491a-8151-9a2969ed9f6a"}
+2026-05-03 15:34:23 [[32minfo[39m] Tokens: 6533 (in:6303 out:230) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"5e617571-72ae-491a-8151-9a2969ed9f6a"}
+2026-05-03 15:34:23 [[32minfo[39m] Agent run complete {"runId":"5e617571-72ae-491a-8151-9a2969ed9f6a","totalTokens":6533,"model":"claude-haiku-4-5-20251001"}
+2026-05-03 15:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-03 15:35:02 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-03 15:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-03 15:40:02 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-03 15:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-03 15:45:00 [[32minfo[39m] Scheduled task complete: email_poller
