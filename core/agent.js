@@ -1,4 +1,4 @@
-﻿// core/agent.js — Main agent runner
+// core/agent.js — Main agent runner
 // NOTE: No dotenv import. Secrets come from the OS environment,
 // injected by launcher/start-agent.ps1 at startup.
 
@@ -8,6 +8,7 @@ import { loadContext, saveMemory } from '../memory/memory.js';
 import { getTools } from '../tools/registry.js';
 import { dispatchTool } from '../tools/dispatcher.js';
 import { randomUUID } from 'crypto';
+import { buildContextBlock, logObservation, runWeeklySynthesis } from '../tools/impl/feedback.js';
 
 const REQUIRED_ENV = [
     'ANTHROPIC_API_KEY',
@@ -64,7 +65,7 @@ export async function runAgent({
     const memoryContext = await loadContext({ topic: taskType });
     const tools = getTools(taskType);
     const messages = [...extraMessages, { role: 'user', content: task }];
-    const systemPrompt = systemPromptOverride ?? buildSystemPrompt(memoryContext, taskType);
+    const systemPrompt = systemPromptOverride ?? await buildSystemPrompt(memoryContext, taskType);
 
     let totalInput = 0, totalOutput = 0, finalText = '';
 
