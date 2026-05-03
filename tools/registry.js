@@ -166,7 +166,7 @@ const CODE_TOOLS = [
   },
   {
     name: 'write_file',
-    description: 'Write a file to the local filesystem. Use for creating scripts, configs, or reports.',
+    description: 'Write a file to the local filesystem at C:\\Users\\Assistant\\JRBAgent\\. Use for creating scripts, configs, or reports.',
     input_schema: {
       type: 'object',
       properties: {
@@ -177,32 +177,99 @@ const CODE_TOOLS = [
       required: ['path', 'content'],
     },
   },
+  // ── GitHub tools ─────────────────────────────────────────────────────────────
   {
-    name: 'github_push',
-    description: 'Commit and push a file to GitHub.',
+    name: 'github_read',
+    description: 'Read a file from an approved GitHub repo. Approved repos: jrb-assistant-scripts, FleetOps, FieldOps, AuditMatchingEngine.',
     input_schema: {
       type: 'object',
       properties: {
-        repo: { type: 'string', description: 'Repo name (org/repo format or just name for default org)' },
-        path: { type: 'string', description: 'File path in the repo' },
-        content: { type: 'string', description: 'File content' },
-        message: { type: 'string', description: 'Commit message' },
-        branch: { type: 'string', default: 'main' },
+        repo:   { type: 'string', description: 'Repo name (e.g. "jrb-assistant-scripts") or owner/repo format' },
+        path:   { type: 'string', description: 'File path in the repo, e.g. "tools/impl/github.js"' },
+        branch: { type: 'string', description: 'Branch name', default: 'main' },
       },
-      required: ['path', 'content', 'message'],
+      required: ['path'],
     },
   },
   {
-    name: 'github_read',
-    description: 'Read a file from a GitHub repo.',
+    name: 'github_list',
+    description: 'List files and directories in a GitHub repo path.',
     input_schema: {
       type: 'object',
       properties: {
-        repo: { type: 'string' },
-        path: { type: 'string' },
+        repo:   { type: 'string', description: 'Repo name or owner/repo' },
+        path:   { type: 'string', description: 'Directory path (empty string for root)', default: '' },
         branch: { type: 'string', default: 'main' },
       },
-      required: ['path'],
+      required: [],
+    },
+  },
+  {
+    name: 'github_create_branch',
+    description: 'Create a new branch in a GitHub repo. Branch name must start with "claude/". Always do this before pushing any code.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        repo:        { type: 'string', description: 'Repo name or owner/repo' },
+        branch:      { type: 'string', description: 'New branch name, must start with "claude/" e.g. "claude/invoice-export"' },
+        from_branch: { type: 'string', description: 'Source branch to create from', default: 'main' },
+      },
+      required: ['branch'],
+    },
+  },
+  {
+    name: 'github_push',
+    description: 'Commit and push a file to a GitHub branch. Never push directly to main — always push to a claude/ branch.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        repo:    { type: 'string', description: 'Repo name or owner/repo' },
+        path:    { type: 'string', description: 'File path in the repo' },
+        content: { type: 'string', description: 'Full file content' },
+        message: { type: 'string', description: 'Commit message' },
+        branch:  { type: 'string', description: 'Branch to push to — must be a claude/ branch' },
+      },
+      required: ['path', 'content', 'message', 'branch'],
+    },
+  },
+  {
+    name: 'github_open_pr',
+    description: 'Open a Pull Request from a claude/ branch into main. Call this when code is ready for Michael to review.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        repo:   { type: 'string', description: 'Repo name or owner/repo' },
+        title:  { type: 'string', description: 'PR title in plain English' },
+        body:   { type: 'string', description: 'PR description — what it does, what files changed, how to test' },
+        branch: { type: 'string', description: 'The claude/ branch to merge from' },
+        base:   { type: 'string', description: 'Base branch to merge into', default: 'main' },
+      },
+      required: ['title', 'body', 'branch'],
+    },
+  },
+  {
+    name: 'github_merge_pr',
+    description: 'Merge an approved Pull Request. Only call this after Michael has explicitly approved the PR.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        repo:          { type: 'string', description: 'Repo name or owner/repo' },
+        pr_number:     { type: 'number', description: 'PR number to merge' },
+        merge_message: { type: 'string', description: 'Optional merge commit message' },
+      },
+      required: ['pr_number'],
+    },
+  },
+  {
+    name: 'github_list_prs',
+    description: 'List open (or closed) Pull Requests in a repo.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        repo:  { type: 'string', description: 'Repo name or owner/repo' },
+        state: { type: 'string', enum: ['open', 'closed', 'all'], default: 'open' },
+      },
+      required: [],
     },
   },
 ];
