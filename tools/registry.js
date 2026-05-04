@@ -274,13 +274,37 @@ const CODE_TOOLS = [
   },
 ];
 
+
+const VERCEL_TOOLS = [
+  {
+    name: 'vercel_api',
+    description: 'Manage Vercel deployments, domains, and environment variables. Projects: fleet-ops (FleetOps app), fieldops (FieldOps app). Actions: list_projects, list_deployments, get_deployment, redeploy, add_domain, list_domains, set_env, get_env.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['list_projects', 'list_deployments', 'get_deployment', 'redeploy', 'add_domain', 'list_domains', 'set_env', 'get_env'],
+          description: 'Action to perform',
+        },
+        project:      { type: 'string', description: 'Project name (fleet-ops, fieldops) or project ID' },
+        domain:       { type: 'string', description: 'Domain name for add_domain or list_domains' },
+        envKey:       { type: 'string', description: 'Env var key for set_env or get_env' },
+        envValue:     { type: 'string', description: 'Env var value for set_env' },
+        envTarget:    { type: 'string', description: 'Deployment target: production, preview, or development' },
+        deploymentId: { type: 'string', description: 'Deployment UID for get_deployment' },
+      },
+      required: ['action'],
+    },
+  },
+];
 const TOOL_MAP = {
   email:   [...EMAIL_TOOLS],
   crm:     [...QB_TOOLS],
   report:  [...QB_TOOLS, ...FILE_TOOLS],
   code:    [...CODE_TOOLS, ...FILE_TOOLS],
   file:    [...FILE_TOOLS],
-  general: [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS],
+  general: [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS],
 };
 
 export function getTools(taskType) {
