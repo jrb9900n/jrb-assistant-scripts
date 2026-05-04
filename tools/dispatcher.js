@@ -16,6 +16,7 @@ import * as qb      from './impl/quickbooks.js';
 import * as files   from './impl/files.js';
 import * as github  from './impl/github.js';
 import * as scripts from './impl/scripts.js';
+import * as vercel  from './impl/vercel.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 
 const HANDLERS = {
@@ -37,7 +38,8 @@ const HANDLERS = {
   write_file:           (i) => files.writeFile(i),
 
   // Code / Scripts
-  run_script:           (i) => scripts.runScript(i),
+  vercel_api:   (i) => vercel.vercelApi(i),
+    run_script:           (i) => scripts.runScript(i),
 
   // GitHub
   github_read:          (i) => github.readFile(i),
