@@ -34,7 +34,7 @@ function routeModel(taskPrompt, forceModel) {
     const words = taskPrompt.split(/\s+/).length;
     const isComplex =
         words > HAIKU_THRESHOLD ||
-        /analys|strateg|compar|synthesiz|report|draft email|write script|explain why/i.test(taskPrompt);
+        /analys|strateg|compar|synthesiz|report|draft email|write script|write file|patch|commit|create script|build |explain why|debug|refactor|implement/i.test(taskPrompt);
     return isComplex ? SONNET : HAIKU;
 }
 
@@ -128,6 +128,13 @@ export async function runAgent({
 
     await trackTokens({ task: taskType, model, input: totalInput, output: totalOutput, runId });
     logger.info('Agent run complete', { runId, totalTokens: totalInput + totalOutput, model });
+    // Feedback loop: log this agent action to knowledge_log
+    logObservation({
+      agentName: taskType,
+      actionTaken: finalText.slice(0, 500),
+      rawContext: task.slice(0, 300),
+    }).catch(err => logger.warn('logObservation failed', { err: err.message }));
+
     if (saveContext) saveMemory({ messages, topic: taskType, runId }).catch(err => logger.warn('Memory save failed', { err: err.message }));
     return { result: finalText, messages, usage: { input: totalInput, output: totalOutput, model } };
 }
