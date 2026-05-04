@@ -280,7 +280,8 @@ const TOOL_MAP = {
   report:  [...QB_TOOLS, ...FILE_TOOLS],
   code:    [...CODE_TOOLS, ...FILE_TOOLS],
   file:    [...FILE_TOOLS],
-  general: [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS],
+  general: [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS  'vercel_api',
+],
 };
 
 export function getTools(taskType) {
