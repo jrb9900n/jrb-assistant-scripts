@@ -170,3 +170,4 @@ for (const task of SCHEDULED_TASKS) {
   });
 }
 logger.info('All schedules registered. Scheduler running.');
+import './task-poller.js';
