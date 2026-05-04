@@ -36,9 +36,9 @@ function buildMcpServer() {
     async ({ task, task_type }) => {
       logger.info('MCP run_task', { task: task.slice(0, 80), task_type });
       try {
-        const result = await runAgent({ task, taskType: task_type || 'general' });
+        const { result: agentResult } = await runAgent({ task, taskType: task_type || 'general' });
         return {
-          content: [{ type: 'text', text: result }],
+          content: [{ type: 'text', text: agentResult || '' }],
         };
       } catch (err) {
         logger.error('MCP run_task error', { err: err.message });
