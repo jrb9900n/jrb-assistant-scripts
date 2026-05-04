@@ -1,4 +1,4 @@
-﻿# launcher/start-agent.ps1
+# launcher/start-agent.ps1
 $AgentDir = "C:\Users\Assistant\JRBAgent\agent"
 
 Add-Type -AssemblyName System.Security
@@ -74,6 +74,9 @@ $secrets = @{
     "TEAMS_PORT"           = "3978"
     "TEAMS_PUBLIC_URL"    = "https://agent.jrboehlke.com"
     "BRAVE_SEARCH_API_KEY" = Get-Secret "BRAVE_SEARCH_API_KEY"
+    "CLAUDE_EXECUTE_SECRET" = Get-Secret "CLAUDE_EXECUTE_SECRET"
+    "OAUTH_CLIENT_ID"       = "jrb-agent-claude"
+    "OAUTH_CLIENT_SECRET"   = Get-Secret "OAUTH_CLIENT_SECRET"
     "SA_EMAIL"             = Get-Secret "SA_EMAIL"
     "SA_PASSWORD"          = Get-Secret "SA_PASSWORD"
     "SA_EMAIL_OLD"         = Get-Secret "SA_EMAIL_OLD"
@@ -91,6 +94,7 @@ foreach ($kv in $secrets.GetEnumerator()) {
     }
 }
 
+$env:PATH = "C:\Users\Assistant\scoop\apps\nodejs\current;$env:PATH"
 $mode = $args[0]
 switch ($mode) {
     "teams"     { Set-Location $AgentDir; node teams/bot.js }
