@@ -1,9 +1,6 @@
 // mcp/server.js — JRB Agent MCP server
 // Uses @modelcontextprotocol/sdk StreamableHTTPServerTransport
-// Single endpoint: POST/GET /mcp  (mounted by bot.js)
-// Auth: static Bearer token from env CLAUDE_MCP_TOKEN
-//
-// REBUILT 2026-05-04 — clean SDK-based implementation
+// REBUILT 2026-05-04 — restart-resilient: auto-recovers sessions after pm2 restart
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -18,14 +15,9 @@ const MCP_TOKEN = process.env.CLAUDE_MCP_TOKEN || process.env.CLAUDE_EXECUTE_SEC
 // Session store: sessionId → transport
 const transports = new Map();
 
-// ── Build the MCP server with tools ──────────────────────────────────────────
 function buildMcpServer() {
-  const server = new McpServer({
-    name: 'jrb-agent',
-    version: '1.0.0',
-  });
+  const server = new McpServer({ name: 'jrb-agent', version: '1.0.0' });
 
-  // Tool: run_task
   server.tool(
     'run_task',
     'Run any task on the JRB Executive Agent — email triage, QuickBooks reports, Service Autopilot data, GitHub operations, Vercel deployments, calendar events, or any business question. Returns the agent response as a string.',
@@ -36,59 +28,59 @@ function buildMcpServer() {
     async ({ task, task_type }) => {
       logger.info('MCP run_task', { task: task.slice(0, 80), task_type });
       try {
-        const result = await runAgent(task, task_type || 'general');
-        return {
-          content: [{ type: 'text', text: result }],
-        };
+        const result = await runAgent({ task, taskType: task_type || 'general' });
+        const text = typeof result === 'string' ? result : (result?.result || result?.response || result?.text || JSON.stringify(result));
+        return { content: [{ type: 'text', text: text }] };
       } catch (err) {
         logger.error('MCP run_task error', { err: err.message });
-        return {
-          content: [{ type: 'text', text: `Error: ${err.message}` }],
-          isError: true,
-        };
+        return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
       }
     }
   );
 
-  // Tool: get_status
-  server.tool(
-    'get_status',
-    'Get the current status of the JRB Agent — uptime, loaded tools, and basic health info.',
-    {},
-    async () => {
-      return {
-        content: [{
-          type: 'text',
-          text: JSON.stringify({
-            status: 'ok',
-            agent: 'JRB Executive Agent',
-            uptime_seconds: Math.floor(process.uptime()),
-            timestamp: new Date().toISOString(),
-            node_version: process.version,
-          }, null, 2),
-        }],
-      };
-    }
-  );
+  server.tool('get_status', 'Get the current status of the JRB Agent — uptime, loaded tools, and basic health info.', {}, async () => {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({ status: 'ok', agent: 'JRB Executive Agent', uptime_seconds: Math.floor(process.uptime()), timestamp: new Date().toISOString(), node_version: process.version }, null, 2),
+      }],
+    };
+  });
 
   return server;
 }
 
-// ── Auth check ────────────────────────────────────────────────────────────────
 function isAuthorized(req) {
-  if (!MCP_TOKEN) return true; // no token configured = open (dev mode)
+  if (!MCP_TOKEN) return true;
   const auth = req.headers['authorization'];
   if (!auth) return false;
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : auth;
   return token === MCP_TOKEN;
 }
 
-// ── Main request handler (called by bot.js for /mcp) ─────────────────────────
+// Create a new transport+server session and store it
+async function createSession(sessionId) {
+  const id = sessionId || randomUUID();
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => id,
+    onsessioninitialized: (sid) => {
+      transports.set(sid, transport);
+      logger.info('MCP session initialized', { sessionId: sid });
+    },
+  });
+  transport.onclose = () => {
+    transports.delete(id);
+    logger.info('MCP session closed', { sessionId: id });
+  };
+  const server = buildMcpServer();
+  await server.connect(transport);
+  return transport;
+}
+
 export async function handleMcpRequest(req, res) {
-  // Auth
   if (!isAuthorized(req)) {
     res.writeHead(401, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Unauthorized', hint: 'Provide Authorization: Bearer <CLAUDE_MCP_TOKEN>' }));
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
     return;
   }
 
@@ -105,59 +97,48 @@ export async function handleMcpRequest(req, res) {
         return;
       }
 
-      // New session or existing session
       const sessionId = req.headers['mcp-session-id'];
 
-      if (!sessionId || !transports.has(sessionId)) {
-        // Must be an initialize request to start a new session
-        if (!isInitializeRequest(message)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'No session — send initialize first' }));
-          return;
-        }
-
-        const newSessionId = randomUUID();
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => newSessionId,
-          onsessioninitialized: (id) => {
-            transports.set(id, transport);
-            logger.info('MCP session initialized', { sessionId: id });
-          },
-        });
-
-        // Clean up on close
-        transport.onclose = () => {
-          transports.delete(newSessionId);
-          logger.info('MCP session closed', { sessionId: newSessionId });
-        };
-
-        const server = buildMcpServer();
-        await server.connect(transport);
+      if (sessionId && transports.has(sessionId)) {
+        // Known session — use existing transport
+        await transports.get(sessionId).handleRequest(req, res, message);
+      } else if (isInitializeRequest(message)) {
+        // New session — initialize
+        const transport = await createSession(null);
         await transport.handleRequest(req, res, message);
-        return;
+      } else if (sessionId) {
+        // RESTART RECOVERY: Claude.ai has an old session ID but server restarted.
+        // Re-create the session with the same ID so Claude.ai doesn't need to reconnect.
+        logger.info('MCP session recovery after restart', { sessionId });
+        const transport = await createSession(sessionId);
+        transports.set(sessionId, transport);
+        await transport.handleRequest(req, res, message);
+      } else {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'No session — send initialize first' }));
       }
-
-      // Existing session
-      const transport = transports.get(sessionId);
-      await transport.handleRequest(req, res, message);
 
     } else if (req.method === 'GET') {
-      // SSE stream for existing session
       const sessionId = req.headers['mcp-session-id'];
-      if (!sessionId || !transports.has(sessionId)) {
+      if (!sessionId) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: 'No session — POST initialize first' }));
+        res.end(JSON.stringify({ error: 'No mcp-session-id header' }));
         return;
       }
-      const transport = transports.get(sessionId);
-      await transport.handleRequest(req, res);
+      if (!transports.has(sessionId)) {
+        // Recovery: create session for GET too
+        logger.info('MCP GET session recovery', { sessionId });
+        const transport = await createSession(sessionId);
+        transports.set(sessionId, transport);
+        await transport.handleRequest(req, res);
+      } else {
+        await transports.get(sessionId).handleRequest(req, res);
+      }
 
     } else if (req.method === 'DELETE') {
-      // Session teardown
       const sessionId = req.headers['mcp-session-id'];
       if (sessionId && transports.has(sessionId)) {
-        const transport = transports.get(sessionId);
-        await transport.close();
+        await transports.get(sessionId).close();
         transports.delete(sessionId);
         logger.info('MCP session deleted', { sessionId });
       }

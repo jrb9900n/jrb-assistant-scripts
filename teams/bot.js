@@ -185,6 +185,15 @@ const server = http.createServer(async (req, res) => {
     await handleOAuthToken(req, res); return;
   }
 
+    // MCP Reconnect helper
+  if (req.method === 'GET' && url === '/mcp-reconnect') {
+    const s = new URL(req.url, 'https://agent.jrboehlke.com').searchParams.get('secret');
+    if (!s || s !== EXECUTE_SECRET) { res.writeHead(401); res.end('Unauthorized'); return; }
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<!DOCTYPE html><html><head><title>JRB Reconnect</title><style>body{font-family:sans-serif;max-width:480px;margin:80px auto;text-align:center;padding:0 20px}.btn{display:inline-block;background:#2563eb;color:white;text-decoration:none;padding:14px 36px;border-radius:8px;font-size:16px;margin-top:24px}</style></head><body><h2>JRB Executive Agent</h2><p style="color:#16a34a;font-weight:600">Agent is running</p><p style="margin-top:16px">Click below then disconnect and reconnect the JRB Assistant connector.</p><a href="https://claude.ai/settings/integrations" class="btn">Open Claude.ai Connector Settings</a><p style="margin-top:28px;color:#6b7280;font-size:13px">Bookmark this page for one-click reconnect after restarts.</p></body></html>');
+    return;
+  }
+
     // MCP endpoint — delegate entirely to mcp/server.js
   if (url === '/mcp') {
     if (mcpHandler) {
