@@ -1,0 +1,7 @@
+node_modules/
+logs/
+*.log
+scheduler/logs/
+teams/logs/
+core/logs/
+*.backup-*
