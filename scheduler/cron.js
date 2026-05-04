@@ -170,4 +170,48 @@ for (const task of SCHEDULED_TASKS) {
   });
 }
 logger.info('All schedules registered. Scheduler running.');
+
+// MCP keepalive — ping our own MCP endpoint every 4 minutes to prevent
+// Claude.ai connector from timing out the session
+const MCP_TOKEN = process.env.CLAUDE_MCP_TOKEN || process.env.CLAUDE_EXECUTE_SECRET;
+let mcpKeepaliveFailures = 0;
+
+async function pingMcpKeepalive() {
+  try {
+    const res = await fetch('http://localhost:3978/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(MCP_TOKEN ? { 'Authorization': `Bearer ${MCP_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'keepalive', version: '1.0.0' },
+        },
+      }),
+    });
+    if (res.ok || res.status === 200) {
+      mcpKeepaliveFailures = 0;
+      logger.info('MCP keepalive ok', { status: res.status });
+    } else {
+      mcpKeepaliveFailures++;
+      logger.warn('MCP keepalive non-200', { status: res.status, failures: mcpKeepaliveFailures });
+    }
+  } catch (err) {
+    mcpKeepaliveFailures++;
+    logger.warn('MCP keepalive failed', { err: err.message, failures: mcpKeepaliveFailures });
+  }
+}
+
+// Ping every 4 minutes (240000ms)
+setInterval(pingMcpKeepalive, 240000);
+// Also ping once at startup after 30 seconds
+setTimeout(pingMcpKeepalive, 30000);
+logger.info('MCP keepalive scheduled (every 4 min)');
+
 import './task-poller.js';
