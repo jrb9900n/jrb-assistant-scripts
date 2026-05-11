@@ -21,8 +21,8 @@ const EMAIL_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        folder: { type: 'string', description: 'Folder name (Inbox, Sent, etc.)', default: 'Inbox' },
-        limit: { type: 'number', description: 'Max emails to return', default: 20 },
+        folder:      { type: 'string',  description: 'Folder name (Inbox, Sent, etc.)', default: 'Inbox' },
+        limit:       { type: 'number',  description: 'Max emails to return', default: 20 },
         unread_only: { type: 'boolean', description: 'Filter to unread only', default: false },
       },
       required: [],
@@ -45,10 +45,10 @@ const EMAIL_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        to: { type: 'array', items: { type: 'string' }, description: 'Recipient email addresses' },
+        to:      { type: 'array', items: { type: 'string' }, description: 'Recipient email addresses' },
         subject: { type: 'string' },
-        body: { type: 'string', description: 'Plain text or HTML body' },
-        cc: { type: 'array', items: { type: 'string' } },
+        body:    { type: 'string', description: 'Plain text or HTML body' },
+        cc:      { type: 'array', items: { type: 'string' } },
       },
       required: ['to', 'subject', 'body'],
     },
@@ -60,9 +60,9 @@ const EMAIL_TOOLS = [
       type: 'object',
       properties: {
         draft_id: { type: 'string', description: 'Draft ID to send (from draft_email)' },
-        to: { type: 'array', items: { type: 'string' } },
-        subject: { type: 'string' },
-        body: { type: 'string' },
+        to:       { type: 'array', items: { type: 'string' } },
+        subject:  { type: 'string' },
+        body:     { type: 'string' },
       },
       required: [],
     },
@@ -73,9 +73,9 @@ const EMAIL_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        title: { type: 'string' },
+        title:    { type: 'string' },
         due_date: { type: 'string', description: 'ISO 8601 datetime' },
-        notes: { type: 'string' },
+        notes:    { type: 'string' },
       },
       required: ['title', 'due_date'],
     },
@@ -118,10 +118,10 @@ const FILE_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'OneDrive path, e.g. /Reports/Q2-2025.pdf' },
-        content: { type: 'string', description: 'File content (text/base64)' },
-        encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8' },
-        overwrite: { type: 'boolean', default: false },
+        path:     { type: 'string',  description: 'OneDrive path, e.g. /Reports/Q2-2025.pdf' },
+        content:  { type: 'string',  description: 'File content (text/base64)' },
+        encoding: { type: 'string',  enum: ['utf8', 'base64'], default: 'utf8' },
+        overwrite:{ type: 'boolean', default: false },
       },
       required: ['path', 'content'],
     },
@@ -158,8 +158,8 @@ const CODE_TOOLS = [
       type: 'object',
       properties: {
         script_path: { type: 'string', description: 'Absolute or relative path to script' },
-        args: { type: 'array', items: { type: 'string' }, description: 'CLI arguments' },
-        timeout_ms: { type: 'number', default: 30000 },
+        args:        { type: 'array', items: { type: 'string' }, description: 'CLI arguments' },
+        timeout_ms:  { type: 'number', default: 30000 },
       },
       required: ['script_path'],
     },
@@ -170,14 +170,14 @@ const CODE_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'Absolute or relative file path' },
-        content: { type: 'string' },
+        path:      { type: 'string',  description: 'Absolute or relative file path' },
+        content:   { type: 'string' },
         overwrite: { type: 'boolean', default: false },
       },
       required: ['path', 'content'],
     },
   },
-  // ── GitHub tools ─────────────────────────────────────────────────────────────
+  // ── GitHub tools ───────────────────────────────────────────────────────────────
   {
     name: 'github_read',
     description: 'Read a file from an approved GitHub repo. Approved repos: jrb-assistant-scripts, FleetOps, FieldOps, AuditMatchingEngine.',
@@ -274,7 +274,6 @@ const CODE_TOOLS = [
   },
 ];
 
-
 const VERCEL_TOOLS = [
   {
     name: 'vercel_api',
@@ -282,29 +281,100 @@ const VERCEL_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        action: {
-          type: 'string',
-          enum: ['list_projects', 'list_deployments', 'get_deployment', 'redeploy', 'add_domain', 'list_domains', 'set_env', 'get_env'],
-          description: 'Action to perform',
-        },
+        action:       { type: 'string', enum: ['list_projects','list_deployments','get_deployment','redeploy','add_domain','list_domains','set_env','get_env'] },
         project:      { type: 'string', description: 'Project name (fleet-ops, fieldops) or project ID' },
-        domain:       { type: 'string', description: 'Domain name for add_domain or list_domains' },
-        envKey:       { type: 'string', description: 'Env var key for set_env or get_env' },
-        envValue:     { type: 'string', description: 'Env var value for set_env' },
-        envTarget:    { type: 'string', description: 'Deployment target: production, preview, or development' },
-        deploymentId: { type: 'string', description: 'Deployment UID for get_deployment' },
+        domain:       { type: 'string' },
+        envKey:       { type: 'string' },
+        envValue:     { type: 'string' },
+        envTarget:    { type: 'string' },
+        deploymentId: { type: 'string' },
       },
       required: ['action'],
     },
   },
 ];
+
+const SCHEDULING_TOOLS = [
+  {
+    name: 'get_crews',
+    description: 'Get all active field crews with their work types, daily capacity, and crew color. Use this first when building any schedule.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_waiting_list',
+    description: 'Get jobs from the SA waiting list sorted by date added (oldest first). Each job includes days_waiting. Optionally filter by service type keyword (e.g. "app 3", "fertiliz", "mosquito").',
+    input_schema: {
+      type: 'object',
+      properties: {
+        service_filter: { type: 'string', description: 'Filter keyword, e.g. "app 3" or "mosquito"' },
+        limit:          { type: 'number', description: 'Max results (default 200)', default: 200 },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_treatment_history',
+    description: 'Check completed treatment history per customer to enforce the 14-day minimum interval between applications. Returns last completed date per service keyword per customer. ALWAYS call this before scheduling fertilization or mosquito jobs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_ids:     { type: 'array', items: { type: 'string' }, description: 'Customer IDs to check' },
+        service_keywords: { type: 'array', items: { type: 'string' }, description: 'Keywords to match, e.g. ["app 1","app 2","app 3","fertiliz","mosquito"]' },
+      },
+      required: ['customer_ids'],
+    },
+  },
+  {
+    name: 'get_weather_forecast',
+    description: 'Get up to 14-day weather forecast for SE Wisconsin (Milwaukee area). Returns daily high/low temp (°F), precipitation probability (%), wind speed, and safe_for_fert flag. Use to avoid scheduling weather-sensitive work on rainy or extreme-temp days.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        days: { type: 'number', description: 'Forecast days 1-14 (default 14)', default: 14 },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'save_schedule_draft',
+    description: 'Save or update the current schedule proposal to Supabase. Always call this after building or modifying a schedule so the FieldOps board updates in real time. Pass draft_id to update an existing draft.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        session_id:    { type: 'string', description: 'Chat session ID (provided in system prompt)' },
+        directive:     { type: 'string', description: 'The original scheduling request' },
+        week_start:    { type: 'string', description: 'ISO date of the target Monday, e.g. 2026-05-11' },
+        schedule_data: {
+          type: 'object',
+          description: 'Schedule structure: { days: { "YYYY-MM-DD": { "Crew Name": [{ job_id, client, address, city, service, days_waiting, interval_ok, notes }] } }, summary: string }',
+        },
+        draft_id: { type: 'string', description: 'Existing draft UUID to update (omit to create new)' },
+      },
+      required: ['session_id', 'directive', 'schedule_data'],
+    },
+  },
+  {
+    name: 'get_schedule_draft',
+    description: 'Load the latest schedule draft for the current session. Use this before making edits so you have the current data.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string' },
+        draft_id:   { type: 'string', description: 'Specific draft UUID (optional, defaults to latest for session)' },
+      },
+      required: ['session_id'],
+    },
+  },
+];
+
 const TOOL_MAP = {
-  email:   [...EMAIL_TOOLS],
-  crm:     [...QB_TOOLS],
-  report:  [...QB_TOOLS, ...FILE_TOOLS],
-  code:    [...CODE_TOOLS, ...FILE_TOOLS],
-  file:    [...FILE_TOOLS],
-  general: [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS],
+  email:      [...EMAIL_TOOLS],
+  crm:        [...QB_TOOLS],
+  report:     [...QB_TOOLS, ...FILE_TOOLS],
+  code:       [...CODE_TOOLS, ...FILE_TOOLS],
+  file:       [...FILE_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...SEARCH_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS],
 };
 
 export function getTools(taskType) {
