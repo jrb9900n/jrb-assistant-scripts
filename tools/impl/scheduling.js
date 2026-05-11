@@ -1,4 +1,4 @@
-// tools/impl/scheduling.js â€” Field operations scheduling tools
+// tools/impl/scheduling.js — Field operations scheduling tools
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 
@@ -22,7 +22,7 @@ export async function getCrews() {
 export async function getWaitingList({ service_filter, limit = 100 } = {}) {
   const { data, error } = await db()
     .from('sa_waiting_list')
-    .select('job_id,client_id,client_name,address,city,zip,service_code,category,date_added,amount,budgeted_hours')
+    .select('job_id,client_id,client_name,address,city,zip,service_code,category,date_added,days_waiting,amount,budgeted_hours')
     .order('date_added', { ascending: true })
     .limit(limit);
   if (error) throw new Error(`get_waiting_list: ${error.message}`);
@@ -46,14 +46,14 @@ export async function getWaitingList({ service_filter, limit = 100 } = {}) {
   return results;
 }
 
-export async function getTreatmentHistory({ customer_ids, service_keywords } = {}) {
-  if (!customer_ids?.length) return {};
+export async function getTreatmentHistory({ client_names, service_keywords } = {}) {
+  if (!client_names?.length) return {};
   const keywords = service_keywords ?? ['app 1','app 2','app 3','app 4','app 5','fertiliz','mosquito'];
 
   const { data, error } = await db()
     .from('sa_jobs')
-    .select('customer_id, client, service, start_date')
-    .in('customer_id', customer_ids)
+    .select('client, service, start_date')
+    .in('client', client_names)
     .eq('status', 3)
     .order('start_date', { ascending: false });
   if (error) throw new Error(`get_treatment_history: ${error.message}`);
@@ -64,9 +64,9 @@ export async function getTreatmentHistory({ customer_ids, service_keywords } = {
     const svc = (job.service || '').toLowerCase();
     const matchedKw = keywords.find(kw => svc.includes(kw.toLowerCase()));
     if (!matchedKw) continue;
-    if (!history[job.customer_id]) history[job.customer_id] = {};
-    if (!history[job.customer_id][matchedKw]) {
-      history[job.customer_id][matchedKw] = {
+    if (!history[job.client]) history[job.client] = {};
+    if (!history[job.client][matchedKw]) {
+      history[job.client][matchedKw] = {
         last_date: job.start_date,
         service:   job.service,
         days_ago:  Math.floor((today - new Date(job.start_date)) / 86_400_000),

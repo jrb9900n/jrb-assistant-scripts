@@ -177,7 +177,7 @@ const CODE_TOOLS = [
       required: ['path', 'content'],
     },
   },
-  // â”€â”€ GitHub tools â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ── GitHub tools ─────────────────────────────────────────────────────────────
   {
     name: 'github_read',
     description: 'Read a file from an approved GitHub repo. Approved repos: jrb-assistant-scripts, FleetOps, FieldOps, AuditMatchingEngine.',
@@ -219,7 +219,7 @@ const CODE_TOOLS = [
   },
   {
     name: 'github_push',
-    description: 'Commit and push a file to a GitHub branch. Never push directly to main â€” always push to a claude/ branch.',
+    description: 'Commit and push a file to a GitHub branch. Never push directly to main — always push to a claude/ branch.',
     input_schema: {
       type: 'object',
       properties: {
@@ -227,7 +227,7 @@ const CODE_TOOLS = [
         path:    { type: 'string', description: 'File path in the repo' },
         content: { type: 'string', description: 'Full file content' },
         message: { type: 'string', description: 'Commit message' },
-        branch:  { type: 'string', description: 'Branch to push to â€” must be a claude/ branch' },
+        branch:  { type: 'string', description: 'Branch to push to — must be a claude/ branch' },
       },
       required: ['path', 'content', 'message', 'branch'],
     },
@@ -240,7 +240,7 @@ const CODE_TOOLS = [
       properties: {
         repo:   { type: 'string', description: 'Repo name or owner/repo' },
         title:  { type: 'string', description: 'PR title in plain English' },
-        body:   { type: 'string', description: 'PR description â€” what it does, what files changed, how to test' },
+        body:   { type: 'string', description: 'PR description — what it does, what files changed, how to test' },
         branch: { type: 'string', description: 'The claude/ branch to merge from' },
         base:   { type: 'string', description: 'Base branch to merge into', default: 'main' },
       },
@@ -318,14 +318,14 @@ const SCHEDULING_TOOLS = [
   },
   {
     name: 'get_treatment_history',
-    description: 'Get last completed treatment per keyword for a list of customer IDs. Use before scheduling fertilization/mosquito to enforce the 14-day interval rule.',
+    description: 'Get last completed treatment per keyword for a list of client names. Use before scheduling fertilization/mosquito to enforce the 14-day interval rule. Pass client_name values from get_waiting_list results.',
     input_schema: {
       type: 'object',
       properties: {
-        customer_ids: { type: 'array', items: { type: 'number' }, description: 'List of SA customer IDs' },
+        client_names: { type: 'array', items: { type: 'string' }, description: 'List of client names exactly as returned by get_waiting_list (e.g. ["Jim Trubshaw", "Peter Wagner"])' },
         service_keywords: { type: 'array', items: { type: 'string' }, description: 'Keywords to match against service name, e.g. ["app 1","app 2","app 3"]' },
       },
-      required: ['customer_ids'],
+      required: ['client_names'],
     },
   },
   {

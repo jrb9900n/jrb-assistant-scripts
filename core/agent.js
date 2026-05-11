@@ -99,7 +99,7 @@ export async function runAgent({
         const response = await anthropic.messages.create({
             model,
             max_tokens: model === SONNET
-                ? parseInt(process.env.MAX_TOKENS_SONNET ?? '4096')
+                ? parseInt(process.env.MAX_TOKENS_SONNET ?? '16000')
                 : parseInt(process.env.MAX_TOKENS_HAIKU ?? '1024'),
             system: systemPrompt, tools, messages,
         });

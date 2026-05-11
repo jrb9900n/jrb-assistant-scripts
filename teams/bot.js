@@ -49,7 +49,7 @@ Current date/time: ${new Date().toLocaleString('en-US', { timeZone: 'America/Chi
 ## Scheduling Process
 1. get_crews → understand who's available and their capacity
 2. get_waiting_list (filtered by requested service type)
-3. get_treatment_history (all customer_ids from step 2)
+3. get_treatment_history (pass client_names from step 2 — NOT customer_ids)
 4. get_weather_forecast (check target week)
 5. Build day-by-day assignments: group by geography (city/zip on same day), respect daily_capacity, avoid days where safe_for_fert=false
 6. Prioritize customers with highest days_waiting
