@@ -1,4 +1,4 @@
-// core/agent.js — Main agent runner
+// core/agent.js â€” Main agent runner
 // NOTE: No dotenv import. Secrets come from the OS environment,
 // injected by launcher/start-agent.ps1 at startup.
 
@@ -29,8 +29,11 @@ const SONNET = 'claude-sonnet-4-6';
 const HAIKU  = 'claude-haiku-4-5-20251001';
 const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 
-function routeModel(taskPrompt, forceModel) {
+const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report']);
+
+function routeModel(taskPrompt, forceModel, taskType) {
     if (forceModel) return forceModel;
+    if (SONNET_TASK_TYPES.has(taskType)) return SONNET;
     const words = taskPrompt.split(/\s+/).length;
     const isComplex =
         words > HAIKU_THRESHOLD ||
@@ -82,7 +85,7 @@ export async function runAgent({
     systemPromptOverride, extraMessages = [], saveContext = true,
 }) {
     const runId = randomUUID();
-    const model = routeModel(task, forceModel);
+    const model = routeModel(task, forceModel, taskType);
     logger.info('Agent run started', { runId, taskType, model, task: task.slice(0, 80) });
 
     const memoryContext = await loadContext({ topic: taskType });
