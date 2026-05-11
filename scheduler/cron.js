@@ -33,6 +33,16 @@ const SCHEDULED_TASKS = [
     }),
   },
   {
+    // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
+    schedule: '0 1 * * *',
+    name: 'sa_nightly_sync',
+    run: () => runAgent({
+      task: 'Run the SA nightly sync script. Use run_script with script_path "C:\\\\Users\\\\Assistant\\\\OneDrive - jrboehlke.com\\\\JR Boehlke - Claude Folder\\\\BTA Reporting\\\\sa-nightly-sync.js" and timeout_ms 600000 (10 minutes). Log the result including job counts for each sync.',
+      taskType: 'code',
+      saveContext: false,
+    }),
+  },
+  {
     schedule: '*/5 * * * *',
     name: 'email_poller',
     run: async () => {
