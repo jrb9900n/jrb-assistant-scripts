@@ -9,14 +9,15 @@ async function webSearch({ query }) {
   } catch (err) { return 'Web search error: ' + err.message; }
 }
 
-// tools/dispatcher.js — Routes tool calls to implementations
+// tools/dispatcher.js â€” Routes tool calls to implementations
 import { logger } from '../core/logger.js';
-import * as m365    from './impl/m365.js';
-import * as qb      from './impl/quickbooks.js';
-import * as files   from './impl/files.js';
-import * as github  from './impl/github.js';
-import * as scripts from './impl/scripts.js';
-import * as vercel  from './impl/vercel.js';
+import * as m365        from './impl/m365.js';
+import * as qb          from './impl/quickbooks.js';
+import * as files       from './impl/files.js';
+import * as github      from './impl/github.js';
+import * as scripts     from './impl/scripts.js';
+import * as vercel      from './impl/vercel.js';
+import * as scheduling  from './impl/scheduling.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 
 const HANDLERS = {
@@ -52,6 +53,14 @@ const HANDLERS = {
 
   // Search
   web_search:           (i) => webSearch(i),
+
+  // Scheduling
+  get_crews:            (i) => scheduling.getCrews(i),
+  get_waiting_list:     (i) => scheduling.getWaitingList(i),
+  get_treatment_history:(i) => scheduling.getTreatmentHistory(i),
+  get_weather_forecast: (i) => scheduling.getWeatherForecast(i),
+  save_schedule_draft:  (i) => scheduling.saveScheduleDraft(i),
+  get_schedule_draft:   (i) => scheduling.getScheduleDraft(i),
 };
 
 /**
