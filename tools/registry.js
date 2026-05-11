@@ -311,7 +311,7 @@ const SCHEDULING_TOOLS = [
       type: 'object',
       properties: {
         service_filter: { type: 'string', description: 'Keyword to filter by service type, e.g. "app 3" or "fert"' },
-        limit: { type: 'number', description: 'Max records to return', default: 200 },
+        limit: { type: 'number', description: 'Max records to return', default: 100 },
       },
       required: [],
     },
