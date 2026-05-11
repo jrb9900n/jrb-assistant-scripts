@@ -22,7 +22,7 @@ export async function getCrews() {
 export async function getWaitingList({ service_filter, limit = 100 } = {}) {
   const { data, error } = await db()
     .from('sa_waiting_list')
-    .select('job_id,client_id,client,address,city,zip,service_code,category,date_added,days_waiting,amount,budgeted_hours')
+    .select('job_id,client_id,client_name,address,city,zip,service_code,category,date_added,amount,budgeted_hours')
     .order('date_added', { ascending: true })
     .limit(limit);
   if (error) throw new Error(`get_waiting_list: ${error.message}`);
