@@ -177,7 +177,7 @@ const CODE_TOOLS = [
       required: ['path', 'content'],
     },
   },
-  // ── GitHub tools ─────────────────────────────────────────────────────────────
+  // â”€â”€ GitHub tools â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
   {
     name: 'github_read',
     description: 'Read a file from an approved GitHub repo. Approved repos: jrb-assistant-scripts, FleetOps, FieldOps, AuditMatchingEngine.',
@@ -219,7 +219,7 @@ const CODE_TOOLS = [
   },
   {
     name: 'github_push',
-    description: 'Commit and push a file to a GitHub branch. Never push directly to main — always push to a claude/ branch.',
+    description: 'Commit and push a file to a GitHub branch. Never push directly to main â€” always push to a claude/ branch.',
     input_schema: {
       type: 'object',
       properties: {
@@ -227,7 +227,7 @@ const CODE_TOOLS = [
         path:    { type: 'string', description: 'File path in the repo' },
         content: { type: 'string', description: 'Full file content' },
         message: { type: 'string', description: 'Commit message' },
-        branch:  { type: 'string', description: 'Branch to push to — must be a claude/ branch' },
+        branch:  { type: 'string', description: 'Branch to push to â€” must be a claude/ branch' },
       },
       required: ['path', 'content', 'message', 'branch'],
     },
@@ -240,7 +240,7 @@ const CODE_TOOLS = [
       properties: {
         repo:   { type: 'string', description: 'Repo name or owner/repo' },
         title:  { type: 'string', description: 'PR title in plain English' },
-        body:   { type: 'string', description: 'PR description — what it does, what files changed, how to test' },
+        body:   { type: 'string', description: 'PR description â€” what it does, what files changed, how to test' },
         branch: { type: 'string', description: 'The claude/ branch to merge from' },
         base:   { type: 'string', description: 'Base branch to merge into', default: 'main' },
       },
@@ -298,13 +298,84 @@ const VERCEL_TOOLS = [
     },
   },
 ];
+const SCHEDULING_TOOLS = [
+  {
+    name: 'get_crews',
+    description: 'Load active field crews with their capacities and work types.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_waiting_list',
+    description: 'Load unscheduled jobs from the SA waiting list. Optionally filter by service keyword.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        service_filter: { type: 'string', description: 'Keyword to filter by service type, e.g. "app 3" or "fert"' },
+        limit: { type: 'number', description: 'Max records to return', default: 200 },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_treatment_history',
+    description: 'Get last completed treatment per keyword for a list of customer IDs. Use before scheduling fertilization/mosquito to enforce the 14-day interval rule.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        customer_ids: { type: 'array', items: { type: 'number' }, description: 'List of SA customer IDs' },
+        service_keywords: { type: 'array', items: { type: 'string' }, description: 'Keywords to match against service name, e.g. ["app 1","app 2","app 3"]' },
+      },
+      required: ['customer_ids'],
+    },
+  },
+  {
+    name: 'get_weather_forecast',
+    description: 'Get 14-day weather forecast for SE Wisconsin including safe_for_fert flag per day.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        days: { type: 'number', description: 'Number of forecast days (1-14)', default: 14 },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'save_schedule_draft',
+    description: 'Persist a schedule draft to Supabase. The FieldOps board reads this in real time. Pass draft_id to update an existing draft.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        session_id:     { type: 'string', description: 'Chat session ID' },
+        directive:      { type: 'string', description: 'The scheduling instruction from Michael' },
+        week_start:     { type: 'string', description: 'ISO date of the Monday for this week' },
+        schedule_data:  { type: 'object', description: 'Schedule data: { days: { "YYYY-MM-DD": { "Crew Name": [...jobs] } }, summary: "..." }' },
+        draft_id:       { type: 'string', description: 'Existing draft ID to update (omit to create new)' },
+      },
+      required: ['session_id', 'directive', 'schedule_data'],
+    },
+  },
+  {
+    name: 'get_schedule_draft',
+    description: 'Load an existing schedule draft by session_id or draft_id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Chat session ID' },
+        draft_id:   { type: 'string', description: 'Specific draft ID' },
+      },
+      required: [],
+    },
+  },
+];
+
 const TOOL_MAP = {
-  email:   [...EMAIL_TOOLS],
-  crm:     [...QB_TOOLS],
-  report:  [...QB_TOOLS, ...FILE_TOOLS],
-  code:    [...CODE_TOOLS, ...FILE_TOOLS],
-  file:    [...FILE_TOOLS],
-  general: [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS],
+  email:      [...EMAIL_TOOLS],
+  crm:        [...QB_TOOLS],
+  report:     [...QB_TOOLS, ...FILE_TOOLS],
+  code:       [...CODE_TOOLS, ...FILE_TOOLS],
+  file:       [...FILE_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS],
 };
 
 export function getTools(taskType) {
