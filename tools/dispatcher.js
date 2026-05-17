@@ -18,6 +18,7 @@ import * as github      from './impl/github.js';
 import * as scripts     from './impl/scripts.js';
 import * as vercel      from './impl/vercel.js';
 import * as scheduling  from './impl/scheduling.js';
+import * as sa          from './impl/serviceautopilot.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 
 const HANDLERS = {
@@ -53,6 +54,11 @@ const HANDLERS = {
 
   // Search
   web_search:           (i) => webSearch(i),
+
+  // Service Autopilot
+  sa_search_clients:    (i) => sa.searchClients(i),
+  sa_create_client:     (i) => sa.createClient(i),
+  sa_add_note:          (i) => sa.addNote(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),
