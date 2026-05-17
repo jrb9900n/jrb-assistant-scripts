@@ -81,25 +81,24 @@ async function processNewPurchase(purchaseId) {
 
   const { data: card } = await supabase
     .from('credit_cards')
-    .select('*, profiles(id, full_name, phone_number)')
+    .select('*')
     .eq('last_four', cardLastFour)
     .eq('is_active', true)
     .maybeSingle();
 
-  if (!card?.profiles) {
+  if (!card) {
     logger.warn('No active cardholder found for last four', { cardLastFour });
     return;
   }
-
-  const profile = card.profiles;
 
   const { data: report, error } = await supabase
     .from('expense_reports')
     .insert({
       qbo_transaction_id: purchaseId,
-      profile_id: profile.id,
+      profile_id: card.profile_id ?? null,
       card_last_four: cardLastFour,
-      employee_name: profile.full_name,
+      employee_name: card.employee_name,
+      phone_number: card.phone_number,
       amount,
       vendor,
       transaction_date: date,
@@ -113,17 +112,17 @@ async function processNewPurchase(purchaseId) {
     return;
   }
 
-  if (profile.phone_number) {
-    await sendExpenseSms(profile.phone_number, { report, amount, vendor, date, cardLastFour });
+  if (card.phone_number) {
+    await sendExpenseSms(card.phone_number, { report, amount, vendor, date, cardLastFour });
     await supabase
       .from('expense_reports')
       .update({ sms_sent_at: new Date().toISOString() })
       .eq('id', report.id);
   } else {
-    logger.warn('Cardholder has no phone number', { profileId: profile.id });
+    logger.warn('Cardholder has no phone number', { card: cardLastFour });
   }
 
-  logger.info('Expense report created', { reportId: report.id, employee: profile.full_name, vendor, amount });
+  logger.info('Expense report created', { reportId: report.id, employee: card.employee_name, vendor, amount });
 }
 
 function parsePurchase(purchase) {
@@ -319,14 +318,13 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
   }
 
   // Find matching pending expense report by card last four
-  let query = supabase
+  const { data: candidates } = await supabase
     .from('expense_reports')
-    .select('*, profiles(id, full_name, phone_number)')
+    .select('*')
     .eq('card_last_four', cardLastFour)
     .eq('status', 'pending_employee')
     .order('created_at', { ascending: false });
 
-  const { data: candidates } = await query;
   if (!candidates?.length) {
     await sendEmail({
       to: [email.from],
@@ -342,8 +340,6 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
     const match = candidates.find(r => Math.abs(Number(r.amount) - amount) < 0.02);
     if (match) report = match;
   }
-
-  const profile = report.profiles;
 
   // Download and upload to Supabase Storage
   const bytes = await getEmailAttachmentBytes({ email_id: email.id, attachment_id: receiptAttachment.id });
@@ -371,8 +367,8 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
   const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
 
   // Confirmation SMS to the cardholder's phone
-  if (profile?.phone_number) {
-    await sendSms(profile.phone_number,
+  if (report.phone_number) {
+    await sendSms(report.phone_number,
       `JRB: Got your receipt for ${fmtAmount} at ${fmtVendor}. Please complete the form: ${portalUrl}`
     );
   }
@@ -435,7 +431,7 @@ export async function sendExpenseReminders() {
 
   const { data: reports, error } = await supabase
     .from('expense_reports')
-    .select('id, amount, vendor, transaction_date, card_last_four, sms_sent_at, reminder_count, last_reminder_sent_at, profile_id, profiles(phone_number)')
+    .select('id, amount, vendor, transaction_date, card_last_four, phone_number, sms_sent_at, reminder_count, last_reminder_sent_at, profile_id')
     .eq('status', 'pending_employee')
     .not('sms_sent_at', 'is', null)
     .lt('reminder_count', MAX_REMINDERS);
@@ -452,7 +448,7 @@ export async function sendExpenseReminders() {
 
     if (hoursSince < waitHours) continue;
 
-    const phone = report.profiles?.phone_number;
+    const phone = report.phone_number;
     if (!phone) continue;
 
     const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
