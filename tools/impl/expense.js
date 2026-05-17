@@ -1,9 +1,9 @@
 // tools/impl/expense.js — Credit card expense capture system
 import crypto from 'crypto';
-import axios from 'axios';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getPurchase } from './quickbooks.js';
+import { sendEmail } from './m365.js';
 
 const supabase = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
@@ -99,6 +99,7 @@ async function processNewPurchase(purchaseId) {
       card_last_four: cardLastFour,
       employee_name: card.employee_name,
       phone_number: card.phone_number,
+      sms_gateway: card.sms_gateway,
       amount,
       vendor,
       transaction_date: date,
@@ -112,14 +113,14 @@ async function processNewPurchase(purchaseId) {
     return;
   }
 
-  if (card.phone_number) {
-    await sendExpenseSms(card.phone_number, { report, amount, vendor, date, cardLastFour });
+  if (card.sms_gateway) {
+    await sendExpenseSms(card.sms_gateway, { report, amount, vendor, date, cardLastFour });
     await supabase
       .from('expense_reports')
       .update({ sms_sent_at: new Date().toISOString() })
       .eq('id', report.id);
   } else {
-    logger.warn('Cardholder has no phone number', { card: cardLastFour });
+    logger.warn('Cardholder has no SMS gateway', { card: cardLastFour });
   }
 
   logger.info('Expense report created', { reportId: report.id, employee: card.employee_name, vendor, amount });
@@ -140,34 +141,16 @@ function parsePurchase(purchase) {
   return { amount, vendor, date, cardLastFour };
 }
 
-// ── SMS via Twilio ─────────────────────────────────────────────
+// ── SMS via email-to-carrier gateway ──────────────────────────
 
-async function sendExpenseSms(phoneNumber, { report, amount, vendor, date, cardLastFour }) {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken  = process.env.TWILIO_AUTH_TOKEN;
-  const fromNumber = process.env.TWILIO_FROM_NUMBER;
-
-  if (!accountSid || !authToken || !fromNumber) {
-    logger.warn('Twilio not configured — SMS skipped', { phoneNumber });
-    return;
-  }
-
+async function sendExpenseSms(gateway, { report, amount, vendor, date, cardLastFour }) {
   const fmtAmount = `$${Number(amount).toFixed(2)}`;
   const fmtDate   = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const link      = `${PORTAL_BASE}/expense/${report.id}`;
+  const text      = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link} Or email photo to assistant@jrboehlke.com (include card/amount in subject).`;
 
-  const body = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link}\nOr email photo to assistant@jrboehlke.com (include this text in subject).`;
-
-  await axios.post(
-    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
-    new URLSearchParams({ To: phoneNumber, From: fromNumber, Body: body }).toString(),
-    {
-      auth: { username: accountSid, password: authToken },
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    }
-  );
-
-  logger.info('SMS sent', { to: phoneNumber, reportId: report.id });
+  await sendEmail({ to: [gateway], subject: '', body: text, contentType: 'Text' });
+  logger.info('SMS sent via gateway', { gateway, reportId: report.id });
 }
 
 // ── Expense Data (read) ────────────────────────────────────────
@@ -295,7 +278,7 @@ const RECEIPT_MIME_TYPES = new Set([
  * Returns true if the email was handled as a receipt, false if it should
  * fall through to normal email processing.
  */
-export async function processEmailedReceipt(email, { listEmailAttachments, getEmailAttachmentBytes, sendEmail, sendSms }) {
+export async function processEmailedReceipt(email, { listEmailAttachments, getEmailAttachmentBytes, sendEmail }) {
   // Check for image/PDF attachments first — no attachment = not a receipt email
   const attachments = await listEmailAttachments({ email_id: email.id });
   const receiptAttachment = attachments.find(a => RECEIPT_MIME_TYPES.has(a.contentType?.toLowerCase()));
@@ -366,11 +349,10 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
   const fmtVendor = report.vendor || 'your recent charge';
   const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
 
-  // Confirmation SMS to the cardholder's phone
-  if (report.phone_number) {
-    await sendSms(report.phone_number,
-      `JRB: Got your receipt for ${fmtAmount} at ${fmtVendor}. Please complete the form: ${portalUrl}`
-    );
+  // Confirmation SMS to the cardholder via gateway
+  if (report.sms_gateway) {
+    const confirmText = `JRB: Got your receipt for ${fmtAmount} at ${fmtVendor}. Please complete the form: ${portalUrl}`;
+    await sendEmail({ to: [report.sms_gateway], subject: '', body: confirmText, contentType: 'Text' });
   }
 
   // Reply email (back to whoever sent it)
@@ -401,24 +383,6 @@ function parseCardAndAmount(text) {
   return { cardLastFour, amount };
 }
 
-/**
- * Send an SMS directly (used by processEmailedReceipt).
- */
-export async function sendSmsNotification(phoneNumber, message) {
-  const accountSid = process.env.TWILIO_ACCOUNT_SID;
-  const authToken  = process.env.TWILIO_AUTH_TOKEN;
-  const fromNumber = process.env.TWILIO_FROM_NUMBER;
-  if (!accountSid || !authToken || !fromNumber) return;
-
-  await axios.post(
-    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
-    new URLSearchParams({ To: phoneNumber, From: fromNumber, Body: message }).toString(),
-    {
-      auth: { username: accountSid, password: authToken },
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    }
-  );
-}
 
 // ── Reminder Flow ─────────────────────────────────────────────
 
@@ -431,7 +395,7 @@ export async function sendExpenseReminders() {
 
   const { data: reports, error } = await supabase
     .from('expense_reports')
-    .select('id, amount, vendor, transaction_date, card_last_four, phone_number, sms_sent_at, reminder_count, last_reminder_sent_at, profile_id')
+    .select('id, amount, vendor, transaction_date, card_last_four, sms_gateway, sms_sent_at, reminder_count, last_reminder_sent_at')
     .eq('status', 'pending_employee')
     .not('sms_sent_at', 'is', null)
     .lt('reminder_count', MAX_REMINDERS);
@@ -448,8 +412,8 @@ export async function sendExpenseReminders() {
 
     if (hoursSince < waitHours) continue;
 
-    const phone = report.phone_number;
-    if (!phone) continue;
+    const gateway = report.sms_gateway;
+    if (!gateway) continue;
 
     const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
     const fmtDate   = report.transaction_date
@@ -460,7 +424,7 @@ export async function sendExpenseReminders() {
     const message = `The expense report for the ${fmtAmount} charge ${fmtDate} is not complete. Please follow this link to complete: ${portalUrl}`;
 
     try {
-      await sendSmsNotification(phone, message);
+      await sendEmail({ to: [gateway], subject: '', body: message, contentType: 'Text' });
       await supabase
         .from('expense_reports')
         .update({

@@ -73,19 +73,16 @@ const SCHEDULED_TASKS = [
     name: 'email_poller',
     run: async () => {
       const { listEmails, getEmail, sendEmail, markEmailRead, listEmailAttachments, getEmailAttachmentBytes } = await import('../tools/impl/m365.js');
-      const { processEmailedReceipt, sendSmsNotification } = await import('../tools/impl/expense.js');
+      const { processEmailedReceipt } = await import('../tools/impl/expense.js');
       const emails = await listEmails({ folder: 'Inbox', limit: 10, unread_only: true });
 
       for (const email of emails) {
         // ── Receipt email check (runs before michael-only filter) ──
-        // Any employee can email a receipt image to assistant@jrboehlke.com.
-        // processEmailedReceipt returns true if it handled the email.
         try {
           const handled = await processEmailedReceipt(email, {
             listEmailAttachments,
             getEmailAttachmentBytes,
             sendEmail,
-            sendSms: sendSmsNotification,
           });
           if (handled) {
             await markEmailRead({ email_id: email.id });

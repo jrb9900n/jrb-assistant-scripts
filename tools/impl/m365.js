@@ -81,19 +81,18 @@ export async function draftEmail({ to, subject, body, cc = [] }) {
   return { draft_id: data.id, subject, message: 'Draft created — not sent.' };
 }
 
-export async function sendEmail({ draft_id, to, subject, body }) {
+export async function sendEmail({ draft_id, to, subject, body, contentType = 'HTML' }) {
   if (draft_id) {
     await graph('POST', `/users/${USER()}/messages/${draft_id}/send`);
     return { sent: true, draft_id };
   }
-  // Send directly without drafting
   const message = {
     message: {
-      subject,
-      body: { contentType: 'HTML', content: body },
+      subject: subject ?? '',
+      body: { contentType, content: body },
       toRecipients: to.map(a => ({ emailAddress: { address: a } })),
     },
-    saveToSentItems: true,
+    saveToSentItems: false,
   };
   await graph('POST', `/users/${USER()}/sendMail`, message);
   return { sent: true };

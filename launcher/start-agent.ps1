@@ -7,7 +7,6 @@ function Get-Secret {
     param([string]$Name)
     $target = "JRBAgent:$Name"
     try {
-        $cred = [System.Net.CredentialCache]::DefaultNetworkCredentials
         # Read via Windows Credential Manager using native API
         $source = @"
 using System;
@@ -81,9 +80,6 @@ $secrets = @{
     # Expense capture
     "FLEETOPS_SUPABASE_URL"          = "https://mzywmgesulyalevtzudw.supabase.co"
     "FLEETOPS_SUPABASE_SERVICE_KEY"  = Get-Secret "FLEETOPS_SUPABASE_SERVICE_KEY"
-    "TWILIO_ACCOUNT_SID"             = Get-Secret "TWILIO_ACCOUNT_SID"
-    "TWILIO_AUTH_TOKEN"              = Get-Secret "TWILIO_AUTH_TOKEN"
-    "TWILIO_FROM_NUMBER"             = Get-Secret "TWILIO_FROM_NUMBER"
     "QB_WEBHOOK_VERIFIER_TOKEN"      = Get-Secret "QB_WEBHOOK_VERIFIER_TOKEN"
     "EXPENSE_PORTAL_BASE"            = "https://fieldops.jrboehlke.com/expense"
     # Menards rebate automation
