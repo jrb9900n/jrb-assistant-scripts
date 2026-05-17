@@ -76,3 +76,52 @@ export async function getPurchase(id) {
   );
   return res.data?.Purchase ?? null;
 }
+
+/**
+ * Upload a receipt image/PDF and attach it to a QBO Purchase transaction.
+ * @param {string} transactionId  - QBO Purchase entity ID
+ * @param {Buffer} fileBuffer     - raw file bytes
+ * @param {string} contentType    - MIME type (e.g. 'image/jpeg')
+ * @param {string} fileName       - display filename in QBO
+ * @returns {string} QBO Attachable ID
+ */
+export async function uploadReceiptToQbo(transactionId, fileBuffer, contentType, fileName) {
+  const token = await getToken();
+  const boundary = `JRBBoundary${Date.now()}`;
+
+  const metadata = JSON.stringify({
+    AttachableRef: [{ EntityRef: { type: 'Purchase', value: String(transactionId) } }],
+    ContentType: contentType,
+    FileName: fileName,
+  });
+
+  // Build multipart/form-data manually — axios FormData doesn't handle mixed JSON+binary well
+  const part1 = Buffer.from(
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="file_metadata_01"\r\n` +
+    `Content-Type: application/json\r\n\r\n` +
+    `${metadata}\r\n`
+  );
+  const part2Header = Buffer.from(
+    `--${boundary}\r\n` +
+    `Content-Disposition: form-data; name="file_content_01"; filename="${fileName}"\r\n` +
+    `Content-Type: ${contentType}\r\n\r\n`
+  );
+  const end = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const body = Buffer.concat([part1, part2Header, fileBuffer, end]);
+
+  const res = await axios.post(`${BASE}/upload`, body, {
+    params: { minorversion: 65 },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': `multipart/form-data; boundary=${boundary}`,
+      Accept: 'application/json',
+    },
+    maxBodyLength: Infinity,
+  });
+
+  const attachable = res.data?.AttachableResponse?.[0]?.Attachable;
+  if (!attachable?.Id) throw new Error('QBO upload returned no Attachable ID');
+  logger.info('Receipt attached to QBO purchase', { transactionId, attachableId: attachable.Id, fileName });
+  return attachable.Id;
+}

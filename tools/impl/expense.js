@@ -2,7 +2,7 @@
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
-import { getPurchase } from './quickbooks.js';
+import { getPurchase, uploadReceiptToQbo } from './quickbooks.js';
 import { sendEmail } from './m365.js';
 
 const supabase = createClient(
@@ -240,6 +240,12 @@ export async function submitExpenseReport(token, fields) {
       .catch(err => logger.error('Menards rebate trigger failed', { err: err.message }));
   }
 
+  // Backload receipt to QBO — fire-and-forget so it never blocks the submission
+  const receiptStoragePath = receipt_path || report.receipt_path;
+  if (receiptStoragePath && report.qbo_transaction_id) {
+    uploadReceiptToQboAsync(report.id, report.qbo_transaction_id, receiptStoragePath);
+  }
+
   const maintLogUrl = maintenance_log_id
     ? `${PORTAL_BASE}/log?log=${maintenance_log_id}`
     : null;
@@ -252,6 +258,32 @@ export async function submitExpenseReport(token, fields) {
   });
 
   return { success: true, status: newStatus, maintenance_log_id, maintenance_log_url: maintLogUrl };
+}
+
+async function uploadReceiptToQboAsync(reportId, qboTransactionId, storagePath) {
+  try {
+    const { data: blob, error } = await supabase.storage
+      .from('expense-receipts')
+      .download(storagePath);
+    if (error) throw error;
+
+    const arrayBuffer = await blob.arrayBuffer();
+    const fileBuffer  = Buffer.from(arrayBuffer);
+    const fileName    = storagePath.split('/').pop();
+    const ext         = fileName.split('.').pop().toLowerCase();
+    const contentType = ext === 'pdf' ? 'application/pdf'
+                      : ext === 'png' ? 'image/png'
+                      : 'image/jpeg';
+
+    const attachableId = await uploadReceiptToQbo(qboTransactionId, fileBuffer, contentType, fileName);
+
+    await supabase
+      .from('expense_reports')
+      .update({ qbo_attachment_id: attachableId })
+      .eq('id', reportId);
+  } catch (err) {
+    logger.error('QBO receipt upload failed', { reportId, err: err.message });
+  }
 }
 
 function inferMaintenanceType(category) {
@@ -342,6 +374,11 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
     .from('expense_reports')
     .update({ receipt_path: storagePath })
     .eq('id', report.id);
+
+  // Backload to QBO immediately — receipt is now in Storage
+  if (report.qbo_transaction_id) {
+    uploadReceiptToQboAsync(report.id, report.qbo_transaction_id, storagePath);
+  }
 
   logger.info('Emailed receipt uploaded', { reportId: report.id, card: cardLastFour, amount });
 
