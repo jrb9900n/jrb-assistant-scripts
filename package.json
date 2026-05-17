@@ -19,6 +19,7 @@
     "node-cron": "^3.0.3",
     "dotenv": "^16.4.0",
     "winston": "^3.17.0",
-    "p-limit": "^6.2.0"
+    "p-limit": "^6.2.0",
+    "puppeteer-core": "^22.0.0"
   }
 }
