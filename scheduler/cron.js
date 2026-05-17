@@ -15,6 +15,16 @@ const SCHEDULED_TASKS = [
     }),
   },
   {
+    // Daily 8 AM — send follow-up SMS to employees with incomplete expense reports
+    schedule: '0 8 * * *',
+    name: 'expense_reminders',
+    run: async () => {
+      const { sendExpenseReminders } = await import('../tools/impl/expense.js');
+      const result = await sendExpenseReminders();
+      logger.info('Expense reminders complete', result);
+    },
+  },
+  {
     // Monday 7 AM — prior week credit card expense summary to Michael
     schedule: '0 7 * * 1',
     name: 'weekly_expense_report',

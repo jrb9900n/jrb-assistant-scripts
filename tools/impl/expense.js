@@ -424,6 +424,65 @@ export async function sendSmsNotification(phoneNumber, message) {
   );
 }
 
+// ── Reminder Flow ─────────────────────────────────────────────
+
+const FIRST_REMINDER_AFTER_HOURS      = 24;   // 1 day after initial SMS
+const SUBSEQUENT_REMINDER_AFTER_HOURS = 72;   // 3 days between follow-ups
+const MAX_REMINDERS                   = 3;    // stop after 3 reminders (escalate via weekly report)
+
+export async function sendExpenseReminders() {
+  const now = new Date();
+
+  const { data: reports, error } = await supabase
+    .from('expense_reports')
+    .select('id, amount, vendor, transaction_date, card_last_four, sms_sent_at, reminder_count, last_reminder_sent_at, profile_id, profiles(phone_number)')
+    .eq('status', 'pending_employee')
+    .not('sms_sent_at', 'is', null)
+    .lt('reminder_count', MAX_REMINDERS);
+
+  if (error) { logger.error('sendExpenseReminders query failed', { err: error.message }); return; }
+
+  let sent = 0;
+  for (const report of reports ?? []) {
+    const lastContact = report.last_reminder_sent_at ?? report.sms_sent_at;
+    const hoursSince  = (now - new Date(lastContact)) / 3_600_000;
+    const waitHours   = report.reminder_count === 0
+      ? FIRST_REMINDER_AFTER_HOURS
+      : SUBSEQUENT_REMINDER_AFTER_HOURS;
+
+    if (hoursSince < waitHours) continue;
+
+    const phone = report.profiles?.phone_number;
+    if (!phone) continue;
+
+    const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
+    const fmtDate   = report.transaction_date
+      ? new Date(`${report.transaction_date}T12:00:00`).toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
+      : 'recent';
+    const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
+
+    const message = `The expense report for the ${fmtAmount} charge ${fmtDate} is not complete. Please follow this link to complete: ${portalUrl}`;
+
+    try {
+      await sendSmsNotification(phone, message);
+      await supabase
+        .from('expense_reports')
+        .update({
+          last_reminder_sent_at: now.toISOString(),
+          reminder_count: (report.reminder_count ?? 0) + 1,
+        })
+        .eq('id', report.id);
+      sent++;
+      logger.info('Expense reminder sent', { reportId: report.id, reminderCount: report.reminder_count + 1 });
+    } catch (err) {
+      logger.error('Failed to send expense reminder', { reportId: report.id, err: err.message });
+    }
+  }
+
+  logger.info('Expense reminder run complete', { sent, checked: reports?.length ?? 0 });
+  return { sent, checked: reports?.length ?? 0 };
+}
+
 // ── Weekly Expense Report ──────────────────────────────────────
 
 export async function generateWeeklyExpenseReport() {
