@@ -32,12 +32,25 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  * @param {number} [opts.limit] - Max summaries to load (default 5)
  */
 export async function loadContext({ topic, limit = 5 }) {
-  // 1. Load recent summaries ordered by relevance (simple keyword match on topic)
-  const { data: summaries } = await supabase
+  // Load recent summaries for this topic, falling back to all recent if none found
+  let query = supabase
     .from('agent_memory')
     .select('summary, created_at, topics')
     .order('created_at', { ascending: false })
     .limit(limit);
+
+  if (topic) query = query.contains('topics', [topic]);
+
+  let { data: summaries } = await query;
+
+  // Fallback: if no topic-specific memories yet, load the most recent across all topics
+  if (!summaries?.length && topic) {
+    ({ data: summaries } = await supabase
+      .from('agent_memory')
+      .select('summary, created_at, topics')
+      .order('created_at', { ascending: false })
+      .limit(limit));
+  }
 
   if (!summaries?.length) return '';
 
