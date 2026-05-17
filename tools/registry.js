@@ -298,6 +298,50 @@ const VERCEL_TOOLS = [
     },
   },
 ];
+const SA_TOOLS = [
+  {
+    name: 'sa_search_clients',
+    description: 'Search for clients in Service Autopilot by name. Returns matching client IDs, names, and addresses.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name:  { type: 'string', description: 'Client name or partial name to search for' },
+        limit: { type: 'number', description: 'Max results to return', default: 10 },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'sa_create_client',
+    description: 'Create a new client record in Service Autopilot.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        firstName: { type: 'string', description: 'First name' },
+        lastName:  { type: 'string', description: 'Last name' },
+        address:   { type: 'string', description: 'Street address' },
+        city:      { type: 'string', description: 'City' },
+        zip:       { type: 'string', description: 'ZIP code' },
+        email:     { type: 'string', description: 'Email address' },
+        phone:     { type: 'string', description: 'Primary phone number' },
+      },
+      required: ['firstName', 'lastName'],
+    },
+  },
+  {
+    name: 'sa_add_note',
+    description: 'Add a note to a Service Autopilot client record. Use clientId from sa_search_clients.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA Client ID (GUID) from sa_search_clients' },
+        noteText: { type: 'string', description: 'Note body text' },
+      },
+      required: ['clientId', 'noteText'],
+    },
+  },
+];
+
 const SCHEDULING_TOOLS = [
   {
     name: 'get_crews',
@@ -370,12 +414,12 @@ const SCHEDULING_TOOLS = [
 
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS],
-  crm:        [...QB_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS],
   file:       [...FILE_TOOLS],
   scheduling: [...SCHEDULING_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS],
 };
 
 export function getTools(taskType) {
