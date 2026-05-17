@@ -60,3 +60,19 @@ export async function query({ query: qStr }) {
   await cacheSet(cacheKey, result);
   return result;
 }
+
+/**
+ * Fetch a single Purchase entity by ID from QBO.
+ * Used by the expense capture webhook handler.
+ */
+export async function getPurchase(id) {
+  const token = await getToken();
+  const res = await axios.get(
+    `${BASE}/purchase/${id}`,
+    {
+      params: { minorversion: 65 },
+      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    }
+  );
+  return res.data?.Purchase ?? null;
+}
