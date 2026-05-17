@@ -41,6 +41,15 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Sunday 11 PM — synthesize week's observations into reusable patterns
+    schedule: '0 23 * * 0',
+    name: 'weekly_synthesis',
+    run: async () => {
+      const { runWeeklySynthesis } = await import('../tools/impl/feedback.js');
+      await runWeeklySynthesis();
+    },
+  },
+  {
     schedule: '0 7 * * 1',
     name: 'weekly_crm_report',
     run: () => runAgent({

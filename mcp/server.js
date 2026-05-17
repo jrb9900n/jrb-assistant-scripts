@@ -31,7 +31,7 @@ function buildMcpServer() {
     'Run any task on the JRB Executive Agent — email triage, QuickBooks reports, Service Autopilot data, GitHub operations, Vercel deployments, calendar events, or any business question. Returns the agent response as a string.',
     {
       task: z.string().describe('The task or question to run. Be specific.'),
-      task_type: z.enum(['general', 'finance', 'ops', 'dev']).optional().describe('Task category for model routing. Defaults to general.'),
+      task_type: z.enum(['general', 'email', 'report', 'code', 'crm', 'file', 'scheduling']).optional().describe('Task category for model routing. Use code/report/email/crm for complex tasks — they always use the full model. Defaults to general.'),
     },
     async ({ task, task_type }) => {
       logger.info('MCP run_task', { task: task.slice(0, 80), task_type });
@@ -109,10 +109,12 @@ export async function handleMcpRequest(req, res) {
       const sessionId = req.headers['mcp-session-id'];
 
       if (!sessionId || !transports.has(sessionId)) {
-        // Must be an initialize request to start a new session
+        // Must be an initialize request to start a new session.
+        // Return 404 (not 400) for unknown session IDs — this is the MCP spec
+        // signal that tells Claude.ai to automatically re-initialize the session.
         if (!isInitializeRequest(message)) {
-          res.writeHead(400, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: 'No session — send initialize first' }));
+          res.writeHead(404, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Session not found — re-initialize required' }));
           return;
         }
 

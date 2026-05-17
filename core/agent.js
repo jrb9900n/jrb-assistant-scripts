@@ -29,7 +29,8 @@ const SONNET = 'claude-sonnet-4-6';
 const HAIKU  = 'claude-haiku-4-5-20251001';
 const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 
-const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report']);
+// These task types always use Sonnet — they involve writing, analysis, or multi-step work
+const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm']);
 
 function routeModel(taskPrompt, forceModel, taskType) {
     if (forceModel) return forceModel;
@@ -37,7 +38,14 @@ function routeModel(taskPrompt, forceModel, taskType) {
     const words = taskPrompt.split(/\s+/).length;
     const isComplex =
         words > HAIKU_THRESHOLD ||
-        /analys|strateg|compar|synthesiz|report|draft email|write script|write file|patch|commit|create script|build |explain why|debug|refactor|implement/i.test(taskPrompt);
+        // Writing / saving anything
+        /\b(write|draft|save|upload|create|generate|compose|summarize|reply|send)\b/i.test(taskPrompt) ||
+        // Code or file operations
+        /\b(commit|push|deploy|build|implement|refactor|debug|patch|script|function)\b/i.test(taskPrompt) ||
+        // Analysis or multi-step reasoning
+        /\b(analys|strateg|compar|synthesiz|report|forecast|explain why|plan|review)\b/i.test(taskPrompt) ||
+        // Anything touching external systems with side effects
+        /\b(invoice|payment|schedule|invoice|estimate|quickbooks|hubspot)\b/i.test(taskPrompt);
     return isComplex ? SONNET : HAIKU;
 }
 
