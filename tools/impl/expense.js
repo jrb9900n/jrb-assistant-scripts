@@ -157,7 +157,7 @@ async function sendExpenseSms(phoneNumber, { report, amount, vendor, date, cardL
   const fmtDate   = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const link      = `${PORTAL_BASE}/expense/${report.id}`;
 
-  const body = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit your receipt: ${link}  (or email receipt to assistant@jrboehlke.com)`;
+  const body = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link}\nOr email photo to assistant@jrboehlke.com (include this text in subject).`;
 
   await axios.post(
     `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
@@ -288,110 +288,121 @@ const RECEIPT_MIME_TYPES = new Set([
 
 /**
  * Called by the email poller when an employee emails a receipt to
- * assistant@jrboehlke.com. Finds their pending expense report, uploads
- * the attachment to Supabase Storage, and sends a confirmation SMS + email reply.
+ * assistant@jrboehlke.com. Matches by card last four + dollar amount
+ * parsed from the email subject/body (both are in the original SMS the
+ * employee received). Uploads the attachment, then sends a confirmation
+ * SMS + email reply with the portal link.
  *
  * Returns true if the email was handled as a receipt, false if it should
  * fall through to normal email processing.
  */
 export async function processEmailedReceipt(email, { listEmailAttachments, getEmailAttachmentBytes, sendEmail, sendSms }) {
-  const senderEmail = email.from?.toLowerCase();
-  if (!senderEmail) return false;
+  // Check for image/PDF attachments first — no attachment = not a receipt email
+  const attachments = await listEmailAttachments({ email_id: email.id });
+  const receiptAttachment = attachments.find(a => RECEIPT_MIME_TYPES.has(a.contentType?.toLowerCase()));
+  if (!receiptAttachment) return false;
 
-  // Look up the sender in fleetops profiles
-  const { data: profile } = await supabase
-    .from('profiles')
-    .select('id, full_name, phone_number')
-    .ilike('email', senderEmail)
-    .maybeSingle();
+  // Parse card last four and dollar amount from subject + snippet
+  // The original SMS contains both: "card ...1234: $45.99 at Vendor"
+  // Employees typically forward/quote the SMS, so these are reliably present.
+  const searchText = `${email.subject ?? ''} ${email.snippet ?? ''}`;
+  const { cardLastFour, amount } = parseCardAndAmount(searchText);
 
-  if (!profile) return false; // sender is not a known cardholder
-
-  // Get their pending expense reports
-  const { data: pendingReports } = await supabase
-    .from('expense_reports')
-    .select('id, amount, vendor, transaction_date, card_last_four')
-    .eq('profile_id', profile.id)
-    .eq('status', 'pending_employee')
-    .order('created_at', { ascending: false });
-
-  if (!pendingReports?.length) {
-    // No pending reports — reply to let them know
+  if (!cardLastFour) {
+    // Can't identify which card — reply asking for more info
     await sendEmail({
-      to: [senderEmail],
+      to: [email.from],
       subject: `Re: ${email.subject}`,
-      body: `<p>Hi ${profile.full_name?.split(' ')[0] || 'there'},</p>
-<p>We received your email but couldn't find an open expense report associated with your card. If you have a recent charge that hasn't shown up yet, please try again in a few minutes or contact your manager.</p>
-<p><em>— JRB Assistant</em></p>`,
+      body: `<p>Thanks for sending your receipt. To match it to the right expense, please reply and include the last 4 digits of the card and the charge amount (both are in the original text we sent you).</p><p><em>— JRB Assistant</em></p>`,
     });
     return true;
   }
 
-  // Check for image/PDF attachments
-  const attachments = await listEmailAttachments({ email_id: email.id });
-  const receiptAttachment = attachments.find(a => RECEIPT_MIME_TYPES.has(a.contentType?.toLowerCase()));
+  // Find matching pending expense report by card last four
+  let query = supabase
+    .from('expense_reports')
+    .select('*, profiles(id, full_name, phone_number)')
+    .eq('card_last_four', cardLastFour)
+    .eq('status', 'pending_employee')
+    .order('created_at', { ascending: false });
 
-  if (!receiptAttachment) return false; // no receipt attachment — not a receipt email
-
-  // Match to the right expense report
-  // If multiple pending: try to match by amount mentioned in subject, else take most recent
-  let report = pendingReports[0];
-  if (pendingReports.length > 1) {
-    const amountMatch = email.subject?.match(/\$?([\d,]+\.?\d{0,2})/);
-    if (amountMatch) {
-      const subjectAmount = parseFloat(amountMatch[1].replace(',', ''));
-      const match = pendingReports.find(r => Math.abs(Number(r.amount) - subjectAmount) < 0.02);
-      if (match) report = match;
-    }
+  const { data: candidates } = await query;
+  if (!candidates?.length) {
+    await sendEmail({
+      to: [email.from],
+      subject: `Re: ${email.subject}`,
+      body: `<p>We received your receipt but couldn't find a pending expense report for card ending ${cardLastFour}. If the charge was just made, please try again in a few minutes.</p><p><em>— JRB Assistant</em></p>`,
+    });
+    return true;
   }
 
-  // Download attachment and upload to Supabase Storage
+  // Narrow by amount if parsed; otherwise take most recent
+  let report = candidates[0];
+  if (amount !== null && candidates.length > 1) {
+    const match = candidates.find(r => Math.abs(Number(r.amount) - amount) < 0.02);
+    if (match) report = match;
+  }
+
+  const profile = report.profiles;
+
+  // Download and upload to Supabase Storage
   const bytes = await getEmailAttachmentBytes({ email_id: email.id, attachment_id: receiptAttachment.id });
   const ext   = receiptAttachment.name?.split('.').pop() || 'jpg';
-  const path  = `${report.id}/${Date.now()}-email.${ext}`;
+  const storagePath = `${report.id}/${Date.now()}-email.${ext}`;
 
   const { error: uploadErr } = await supabase.storage
     .from('expense-receipts')
-    .upload(path, bytes, { contentType: receiptAttachment.contentType, upsert: false });
+    .upload(storagePath, bytes, { contentType: receiptAttachment.contentType, upsert: false });
 
   if (uploadErr) {
     logger.error('Failed to upload emailed receipt', { err: uploadErr.message, reportId: report.id });
-    return true; // still handled — just failed upload
+    return true;
   }
 
-  // Save the receipt path to the expense report
   await supabase
     .from('expense_reports')
-    .update({ receipt_path: path })
+    .update({ receipt_path: storagePath })
     .eq('id', report.id);
 
-  logger.info('Emailed receipt uploaded', { reportId: report.id, employee: profile.full_name });
+  logger.info('Emailed receipt uploaded', { reportId: report.id, card: cardLastFour, amount });
 
-  // Format confirmation details
   const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
   const fmtVendor = report.vendor || 'your recent charge';
   const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
-  const firstName = profile.full_name?.split(' ')[0] || 'there';
 
-  // Send confirmation SMS
-  if (profile.phone_number) {
+  // Confirmation SMS to the cardholder's phone
+  if (profile?.phone_number) {
     await sendSms(profile.phone_number,
-      `JRB: We received your receipt for ${fmtAmount} at ${fmtVendor}. Please complete the form to finish your expense report: ${portalUrl}`
+      `JRB: Got your receipt for ${fmtAmount} at ${fmtVendor}. Please complete the form: ${portalUrl}`
     );
   }
 
-  // Reply to the email
+  // Reply email (back to whoever sent it)
   await sendEmail({
-    to: [senderEmail],
+    to: [email.from],
     subject: `Re: ${email.subject}`,
-    body: `<p>Hi ${firstName},</p>
-<p>We received your receipt for <strong>${fmtAmount} at ${fmtVendor}</strong>. It has been attached to your expense report.</p>
-<p>Please complete the remaining fields (cost category, description, etc.) by tapping the link below:</p>
+    body: `<p>Got it — your receipt for <strong>${fmtAmount} at ${fmtVendor}</strong> has been received and attached to the expense report for card ending ${cardLastFour}.</p>
+<p>Please tap below to complete the remaining fields (what the purchase was for, description, etc.):</p>
 <p><a href="${portalUrl}" style="display:inline-block;background:#1d4ed8;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Complete Expense Report →</a></p>
 <p><em>— JRB Assistant</em></p>`,
   });
 
   return true;
+}
+
+function parseCardAndAmount(text) {
+  // Card last four: "...1234", "****1234", "card ending 1234", "card ending in 1234",
+  // "card ...1234", "last 4: 1234", or just a bare 4-digit group after common keywords
+  const cardMatch = text.match(
+    /(?:\.{2,3}|[*]{3,4}|card\s+ending(?:\s+in)?\s+|last\s*(?:4|four)(?:\s+digits?)?:?\s*)(\d{4})/i
+  );
+  const cardLastFour = cardMatch?.[1] ?? null;
+
+  // Dollar amount: "$45.99", "$ 45.99", "$1,200", "45.99" near "charge" or "amount"
+  const amountMatch = text.match(/\$\s*([\d,]+\.?\d{0,2})/);
+  const amount = amountMatch ? parseFloat(amountMatch[1].replace(',', '')) : null;
+
+  return { cardLastFour, amount };
 }
 
 /**
