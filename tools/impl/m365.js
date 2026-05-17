@@ -160,6 +160,29 @@ export async function markEmailRead({ email_id }) {
   return { marked_read: true, email_id };
 }
 
+/**
+ * List attachments on an email. Returns metadata only (no content bytes).
+ */
+export async function listEmailAttachments({ email_id }) {
+  const data = await graph('GET', `/users/${USER()}/messages/${email_id}/attachments?$select=id,name,contentType,size`);
+  return (data.value ?? []).map(a => ({
+    id:          a.id,
+    name:        a.name,
+    contentType: a.contentType,
+    size:        a.size,
+  }));
+}
+
+/**
+ * Download a single attachment as a Buffer.
+ * Graph returns contentBytes as base64 for small files (< 3 MB).
+ */
+export async function getEmailAttachmentBytes({ email_id, attachment_id }) {
+  const data = await graph('GET', `/users/${USER()}/messages/${email_id}/attachments/${attachment_id}`);
+  if (!data.contentBytes) throw new Error('Attachment has no content bytes (may be a reference attachment)');
+  return Buffer.from(data.contentBytes, 'base64');
+}
+
 export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago' }) {
   const event = {
     subject,

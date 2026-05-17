@@ -157,7 +157,7 @@ async function sendExpenseSms(phoneNumber, { report, amount, vendor, date, cardL
   const fmtDate   = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const link      = `${PORTAL_BASE}/expense/${report.id}`;
 
-  const body = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit your receipt: ${link}`;
+  const body = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit your receipt: ${link}  (or email receipt to assistant@jrboehlke.com)`;
 
   await axios.post(
     `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
@@ -277,6 +277,140 @@ function inferMaintenanceType(category) {
   if (category.includes('fuel') || category.includes('Fuel')) return 'preventive';
   if (category.includes('supplies or parts') || category.includes('consumables')) return 'preventive';
   return 'other';
+}
+
+// ── Email Receipt Processing ───────────────────────────────────
+
+const RECEIPT_MIME_TYPES = new Set([
+  'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
+  'image/heic', 'image/heif', 'application/pdf',
+]);
+
+/**
+ * Called by the email poller when an employee emails a receipt to
+ * assistant@jrboehlke.com. Finds their pending expense report, uploads
+ * the attachment to Supabase Storage, and sends a confirmation SMS + email reply.
+ *
+ * Returns true if the email was handled as a receipt, false if it should
+ * fall through to normal email processing.
+ */
+export async function processEmailedReceipt(email, { listEmailAttachments, getEmailAttachmentBytes, sendEmail, sendSms }) {
+  const senderEmail = email.from?.toLowerCase();
+  if (!senderEmail) return false;
+
+  // Look up the sender in fleetops profiles
+  const { data: profile } = await supabase
+    .from('profiles')
+    .select('id, full_name, phone_number')
+    .ilike('email', senderEmail)
+    .maybeSingle();
+
+  if (!profile) return false; // sender is not a known cardholder
+
+  // Get their pending expense reports
+  const { data: pendingReports } = await supabase
+    .from('expense_reports')
+    .select('id, amount, vendor, transaction_date, card_last_four')
+    .eq('profile_id', profile.id)
+    .eq('status', 'pending_employee')
+    .order('created_at', { ascending: false });
+
+  if (!pendingReports?.length) {
+    // No pending reports — reply to let them know
+    await sendEmail({
+      to: [senderEmail],
+      subject: `Re: ${email.subject}`,
+      body: `<p>Hi ${profile.full_name?.split(' ')[0] || 'there'},</p>
+<p>We received your email but couldn't find an open expense report associated with your card. If you have a recent charge that hasn't shown up yet, please try again in a few minutes or contact your manager.</p>
+<p><em>— JRB Assistant</em></p>`,
+    });
+    return true;
+  }
+
+  // Check for image/PDF attachments
+  const attachments = await listEmailAttachments({ email_id: email.id });
+  const receiptAttachment = attachments.find(a => RECEIPT_MIME_TYPES.has(a.contentType?.toLowerCase()));
+
+  if (!receiptAttachment) return false; // no receipt attachment — not a receipt email
+
+  // Match to the right expense report
+  // If multiple pending: try to match by amount mentioned in subject, else take most recent
+  let report = pendingReports[0];
+  if (pendingReports.length > 1) {
+    const amountMatch = email.subject?.match(/\$?([\d,]+\.?\d{0,2})/);
+    if (amountMatch) {
+      const subjectAmount = parseFloat(amountMatch[1].replace(',', ''));
+      const match = pendingReports.find(r => Math.abs(Number(r.amount) - subjectAmount) < 0.02);
+      if (match) report = match;
+    }
+  }
+
+  // Download attachment and upload to Supabase Storage
+  const bytes = await getEmailAttachmentBytes({ email_id: email.id, attachment_id: receiptAttachment.id });
+  const ext   = receiptAttachment.name?.split('.').pop() || 'jpg';
+  const path  = `${report.id}/${Date.now()}-email.${ext}`;
+
+  const { error: uploadErr } = await supabase.storage
+    .from('expense-receipts')
+    .upload(path, bytes, { contentType: receiptAttachment.contentType, upsert: false });
+
+  if (uploadErr) {
+    logger.error('Failed to upload emailed receipt', { err: uploadErr.message, reportId: report.id });
+    return true; // still handled — just failed upload
+  }
+
+  // Save the receipt path to the expense report
+  await supabase
+    .from('expense_reports')
+    .update({ receipt_path: path })
+    .eq('id', report.id);
+
+  logger.info('Emailed receipt uploaded', { reportId: report.id, employee: profile.full_name });
+
+  // Format confirmation details
+  const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
+  const fmtVendor = report.vendor || 'your recent charge';
+  const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
+  const firstName = profile.full_name?.split(' ')[0] || 'there';
+
+  // Send confirmation SMS
+  if (profile.phone_number) {
+    await sendSms(profile.phone_number,
+      `JRB: We received your receipt for ${fmtAmount} at ${fmtVendor}. Please complete the form to finish your expense report: ${portalUrl}`
+    );
+  }
+
+  // Reply to the email
+  await sendEmail({
+    to: [senderEmail],
+    subject: `Re: ${email.subject}`,
+    body: `<p>Hi ${firstName},</p>
+<p>We received your receipt for <strong>${fmtAmount} at ${fmtVendor}</strong>. It has been attached to your expense report.</p>
+<p>Please complete the remaining fields (cost category, description, etc.) by tapping the link below:</p>
+<p><a href="${portalUrl}" style="display:inline-block;background:#1d4ed8;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Complete Expense Report →</a></p>
+<p><em>— JRB Assistant</em></p>`,
+  });
+
+  return true;
+}
+
+/**
+ * Send an SMS directly (used by processEmailedReceipt).
+ */
+export async function sendSmsNotification(phoneNumber, message) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken  = process.env.TWILIO_AUTH_TOKEN;
+  const fromNumber = process.env.TWILIO_FROM_NUMBER;
+  if (!accountSid || !authToken || !fromNumber) return;
+
+  await axios.post(
+    `https://api.twilio.com/2010-04-01/Accounts/${accountSid}/Messages.json`,
+    new URLSearchParams({ To: phoneNumber, From: fromNumber, Body: message }).toString(),
+    {
+      auth: { username: accountSid, password: authToken },
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    }
+  );
 }
 
 // ── Weekly Expense Report ──────────────────────────────────────
