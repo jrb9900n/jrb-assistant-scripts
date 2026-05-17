@@ -15,6 +15,22 @@ const SCHEDULED_TASKS = [
     }),
   },
   {
+    // Monday 7 AM — prior week credit card expense summary to Michael
+    schedule: '0 7 * * 1',
+    name: 'weekly_expense_report',
+    run: async () => {
+      const { generateWeeklyExpenseReport } = await import('../tools/impl/expense.js');
+      const { sendEmail } = await import('../tools/impl/m365.js');
+      const report = await generateWeeklyExpenseReport();
+      await sendEmail({
+        to: ['michael@jrboehlke.com'],
+        subject: report.subject,
+        body: report.body,
+      });
+      logger.info('Weekly expense report sent', { subject: report.subject });
+    },
+  },
+  {
     schedule: '0 7 * * 1',
     name: 'weekly_crm_report',
     run: () => runAgent({

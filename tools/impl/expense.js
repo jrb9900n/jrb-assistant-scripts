@@ -278,3 +278,215 @@ function inferMaintenanceType(category) {
   if (category.includes('supplies or parts') || category.includes('consumables')) return 'preventive';
   return 'other';
 }
+
+// ── Weekly Expense Report ──────────────────────────────────────
+
+export async function generateWeeklyExpenseReport() {
+  // Build Mon–Sun window for the prior week
+  const now = new Date();
+  const dayOfWeek = now.getDay(); // 0=Sun, 1=Mon
+  const daysToLastMonday = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
+  const thisMonday = new Date(now); thisMonday.setDate(now.getDate() - daysToLastMonday); thisMonday.setHours(0, 0, 0, 0);
+  const lastMonday = new Date(thisMonday); lastMonday.setDate(thisMonday.getDate() - 7);
+  const lastSunday = new Date(thisMonday); lastSunday.setDate(thisMonday.getDate() - 1); lastSunday.setHours(23, 59, 59, 999);
+
+  const weekLabel = lastMonday.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) +
+    ' – ' + lastSunday.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+  const { data: reports, error } = await supabase
+    .from('expense_reports')
+    .select('*')
+    .gte('created_at', lastMonday.toISOString())
+    .lte('created_at', lastSunday.toISOString())
+    .order('created_at', { ascending: true });
+
+  if (error) throw new Error(`Supabase query failed: ${error.message}`);
+  if (!reports?.length) return { subject: `Weekly Expense Report — ${weekLabel}`, body: `<p>No credit card charges were detected this week (${weekLabel}).</p>` };
+
+  // Group by employee
+  const byEmployee = {};
+  for (const r of reports) {
+    const name = r.employee_name || r.card_last_four || 'Unknown';
+    if (!byEmployee[name]) byEmployee[name] = [];
+    byEmployee[name].push(r);
+  }
+
+  const totalAmount = reports.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+  const submitted   = reports.filter(r => r.status !== 'pending_employee');
+  const pending     = reports.filter(r => r.status === 'pending_employee');
+  const pendingMaint = reports.filter(r => r.status === 'pending_maintenance_log');
+
+  // Red flag detection
+  const flags = detectRedFlags(reports);
+
+  // ── Build HTML email ───────────────────────────────────────
+  const css = `
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #0f172a; max-width: 700px; margin: 0 auto; padding: 24px 16px; }
+    h1 { font-size: 20px; margin: 0 0 4px; } .sub { color: #64748b; font-size: 14px; margin: 0 0 24px; }
+    h2 { font-size: 14px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #64748b; margin: 28px 0 10px; border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { background: #f8fafc; text-align: left; padding: 8px 10px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .05em; color: #64748b; border-bottom: 2px solid #e2e8f0; }
+    td { padding: 8px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    .kpi { display: inline-block; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 18px; margin: 0 8px 8px 0; text-align: center; }
+    .kpi-val { font-size: 22px; font-weight: 800; color: #0f172a; display: block; }
+    .kpi-lbl { font-size: 11px; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: .06em; }
+    .badge-ok { color: #16a34a; font-weight: 700; } .badge-warn { color: #d97706; font-weight: 700; } .badge-err { color: #dc2626; font-weight: 700; }
+    .flag-box { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 12px 14px; margin: 8px 0; }
+    .flag-item { font-size: 13px; color: #dc2626; margin: 4px 0; }
+    .footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #e2e8f0; font-size: 11px; color: #94a3b8; }
+  `;
+
+  const f$ = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const fD = iso => iso ? new Date(iso + (iso.length === 10 ? 'T12:00:00' : '')).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) : '—';
+
+  const statusBadge = s => {
+    if (s === 'complete')               return '<span class="badge-ok">✅ Complete</span>';
+    if (s === 'pending_maintenance_log') return '<span class="badge-warn">🔧 Needs Maint Log</span>';
+    if (s === 'pending_employee')        return '<span class="badge-err">⏳ Not Submitted</span>';
+    if (s === 'flagged')                 return '<span class="badge-err">🚩 Flagged</span>';
+    return s;
+  };
+
+  // Summary KPIs
+  let html = `<style>${css}</style>
+<h1>Weekly Expense Report</h1>
+<p class="sub">Week of ${weekLabel}</p>
+
+<div>
+  <div class="kpi"><span class="kpi-val">${f$(totalAmount)}</span><span class="kpi-lbl">Total Spend</span></div>
+  <div class="kpi"><span class="kpi-val">${reports.length}</span><span class="kpi-lbl">Charges</span></div>
+  <div class="kpi"><span class="kpi-val">${submitted.length}/${reports.length}</span><span class="kpi-lbl">Submitted</span></div>
+  ${pending.length ? `<div class="kpi" style="border-color:#fca5a5"><span class="kpi-val" style="color:#dc2626">${pending.length}</span><span class="kpi-lbl">Pending</span></div>` : ''}
+  ${flags.length ? `<div class="kpi" style="border-color:#fca5a5"><span class="kpi-val" style="color:#dc2626">${flags.length}</span><span class="kpi-lbl">Red Flags</span></div>` : ''}
+</div>`;
+
+  // Red flags
+  if (flags.length) {
+    html += `<h2>⚠️ Red Flags</h2><div class="flag-box">`;
+    for (const f of flags) html += `<div class="flag-item">• ${f}</div>`;
+    html += `</div>`;
+  }
+
+  // Per-employee breakdown
+  html += `<h2>By Employee</h2>
+<table>
+  <thead><tr><th>Employee</th><th>Charges</th><th>Amount</th><th>Submitted</th><th>Pending</th></tr></thead>
+  <tbody>`;
+  for (const [name, rows] of Object.entries(byEmployee)) {
+    const tot = rows.reduce((s, r) => s + (Number(r.amount) || 0), 0);
+    const sub = rows.filter(r => r.status !== 'pending_employee').length;
+    const pnd = rows.filter(r => r.status === 'pending_employee').length;
+    html += `<tr>
+      <td><strong>${name}</strong></td>
+      <td>${rows.length}</td>
+      <td>${f$(tot)}</td>
+      <td class="${sub === rows.length ? 'badge-ok' : ''}">${sub}</td>
+      <td class="${pnd > 0 ? 'badge-err' : ''}">${pnd}</td>
+    </tr>`;
+  }
+  html += `</tbody></table>`;
+
+  // Submitted expense detail
+  if (submitted.length) {
+    html += `<h2>Submitted Expenses</h2>
+<table>
+  <thead><tr><th>Date</th><th>Employee</th><th>Vendor</th><th>Amount</th><th>Category</th><th>Job / Asset</th><th>Status</th></tr></thead>
+  <tbody>`;
+    for (const r of submitted) {
+      const jobAsset = r.job_number || r.asset_id || '—';
+      html += `<tr>
+        <td>${fD(r.transaction_date)}</td>
+        <td>${r.employee_name || '—'}</td>
+        <td>${r.vendor || '—'}</td>
+        <td>${f$(r.amount)}</td>
+        <td style="font-size:11px">${r.category ? r.category.slice(0, 50) + (r.category.length > 50 ? '…' : '') : '—'}</td>
+        <td style="font-size:11px">${jobAsset}</td>
+        <td>${statusBadge(r.status)}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // Pending (not submitted)
+  if (pending.length) {
+    html += `<h2>Not Yet Submitted</h2>
+<table>
+  <thead><tr><th>Employee</th><th>Date</th><th>Vendor</th><th>Amount</th><th>SMS Sent</th></tr></thead>
+  <tbody>`;
+    for (const r of pending) {
+      html += `<tr>
+        <td>${r.employee_name || '—'}</td>
+        <td>${fD(r.transaction_date)}</td>
+        <td>${r.vendor || '—'}</td>
+        <td>${f$(r.amount)}</td>
+        <td>${r.sms_sent_at ? fD(r.sms_sent_at.slice(0, 10)) : '<span class="badge-err">Not sent</span>'}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  // Needs maintenance log
+  if (pendingMaint.length) {
+    html += `<h2>Maintenance Logs Needed</h2>
+<table>
+  <thead><tr><th>Employee</th><th>Vendor</th><th>Amount</th><th>Asset</th></tr></thead>
+  <tbody>`;
+    for (const r of pendingMaint) {
+      html += `<tr>
+        <td>${r.employee_name || '—'}</td>
+        <td>${r.vendor || '—'}</td>
+        <td>${f$(r.amount)}</td>
+        <td>${r.asset_id || '—'}</td>
+      </tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  html += `<p class="footer">Generated by JRB Executive Agent &middot; ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })}</p>`;
+
+  return {
+    subject: `Weekly Expense Report — ${weekLabel} (${f$(totalAmount)}, ${reports.length} charges)`,
+    body: html,
+  };
+}
+
+function detectRedFlags(reports) {
+  const flags = [];
+  const THREE_DAYS_MS = 3 * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  // Charge over $500
+  for (const r of reports) {
+    if (Number(r.amount) > 500) {
+      flags.push(`Large charge: ${r.employee_name || r.card_last_four} — ${r.vendor} ${formatDollar(r.amount)}`);
+    }
+  }
+
+  // Pending > 3 days
+  for (const r of reports) {
+    if (r.status === 'pending_employee' && r.sms_sent_at) {
+      const age = now - new Date(r.sms_sent_at).getTime();
+      if (age > THREE_DAYS_MS) {
+        flags.push(`No submission after ${Math.floor(age / 86400000)} days: ${r.employee_name || r.card_last_four} — ${r.vendor} ${formatDollar(r.amount)} (sent ${new Date(r.sms_sent_at).toLocaleDateString()})`);
+      }
+    }
+  }
+
+  // Same employee, same vendor, same day — possible duplicate
+  const seen = new Map();
+  for (const r of reports) {
+    const key = `${r.profile_id}|${(r.vendor || '').toLowerCase()}|${r.transaction_date}`;
+    if (seen.has(key)) {
+      flags.push(`Possible duplicate: ${r.employee_name || r.card_last_four} has 2+ charges at ${r.vendor} on ${r.transaction_date}`);
+    } else {
+      seen.set(key, true);
+    }
+  }
+
+  return flags;
+}
+
+function formatDollar(n) {
+  return '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
