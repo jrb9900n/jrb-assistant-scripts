@@ -17,13 +17,13 @@ const SEARCH_TOOLS = [
 const EMAIL_TOOLS = [
   {
     name: 'list_emails',
-    description: 'List recent emails from the Microsoft 365 inbox. Returns sender, subject, date, snippet.',
+    description: 'List recent emails from a Microsoft 365 inbox. Defaults to assistant inbox. Pass userEmail to access another mailbox (e.g. michael@jrboehlke.com).',
     input_schema: {
       type: 'object',
       properties: {
-        folder: { type: 'string', description: 'Folder name (Inbox, Sent, etc.)', default: 'Inbox' },
-        limit: { type: 'number', description: 'Max emails to return', default: 20 },
-        unread_only: { type: 'boolean', description: 'Filter to unread only', default: false },
+        folder:     { type: 'string', description: 'Folder name (Inbox, Sent, etc.)', default: 'Inbox' },
+        limit:      { type: 'number', description: 'Max emails to return', default: 20 },
+        unread_only:{ type: 'boolean', description: 'Filter to unread only', default: false },
       },
       required: [],
     },
@@ -34,21 +34,39 @@ const EMAIL_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        email_id: { type: 'string', description: 'Email ID from list_emails' },
+        email_id: { type: 'string', description: 'Email ID from list_emails or search_emails' },
       },
       required: ['email_id'],
     },
   },
   {
-    name: 'draft_email',
-    description: 'Create a draft email in Microsoft 365. Does NOT send - returns draft ID for review.',
+    name: 'search_emails',
+    description: 'Search emails in any mailbox by keyword, sender, or date range. Pass userEmail for Michael\'s mailbox.',
     input_schema: {
       type: 'object',
       properties: {
-        to: { type: 'array', items: { type: 'string' }, description: 'Recipient email addresses' },
+        userEmail:  { type: 'string', description: 'Mailbox to search. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+        query:      { type: 'string', description: 'Full-text search string' },
+        from:       { type: 'string', description: 'Filter by sender email address' },
+        subject:    { type: 'string', description: 'Filter by subject keyword' },
+        afterDate:  { type: 'string', description: 'ISO 8601 date — only emails after this date' },
+        beforeDate: { type: 'string', description: 'ISO 8601 date — only emails before this date' },
+        folder:     { type: 'string', description: 'Restrict to a specific folder ID or name' },
+        limit:      { type: 'number', description: 'Max results', default: 20 },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'draft_email',
+    description: 'Create a draft email in Microsoft 365. Does NOT send — returns draft ID for review.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        to:      { type: 'array', items: { type: 'string' }, description: 'Recipient email addresses' },
         subject: { type: 'string' },
-        body: { type: 'string', description: 'Plain text or HTML body' },
-        cc: { type: 'array', items: { type: 'string' } },
+        body:    { type: 'string', description: 'Plain text or HTML body' },
+        cc:      { type: 'array', items: { type: 'string' } },
       },
       required: ['to', 'subject', 'body'],
     },
@@ -60,39 +78,151 @@ const EMAIL_TOOLS = [
       type: 'object',
       properties: {
         draft_id: { type: 'string', description: 'Draft ID to send (from draft_email)' },
-        to: { type: 'array', items: { type: 'string' } },
-        subject: { type: 'string' },
-        body: { type: 'string' },
+        to:       { type: 'array', items: { type: 'string' } },
+        subject:  { type: 'string' },
+        body:     { type: 'string' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'list_mail_folders',
+    description: 'List all mail folders in a mailbox. Returns folder IDs, names, and item counts.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        userEmail: { type: 'string', description: 'Mailbox owner. Omit for assistant, use michael@jrboehlke.com for Michael.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'create_mail_folder',
+    description: 'Create a new mail folder in a mailbox. Optionally nest under a parent folder.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name:           { type: 'string', description: 'Folder display name' },
+        userEmail:      { type: 'string', description: 'Mailbox owner. Omit for assistant.' },
+        parentFolderId: { type: 'string', description: 'Parent folder ID from list_mail_folders (omit for top-level)' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'move_email',
+    description: 'Move an email to a different folder. Use list_mail_folders to get destination folder IDs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email_id:             { type: 'string', description: 'Email ID to move' },
+        destination_folder_id:{ type: 'string', description: 'Destination folder ID from list_mail_folders' },
+        userEmail:            { type: 'string', description: 'Mailbox owner. Omit for assistant.' },
+      },
+      required: ['email_id', 'destination_folder_id'],
+    },
+  },
+  {
+    name: 'catalog_email',
+    description: 'Log an email to the persistent catalog in Supabase with a category and action taken. Use after processing any significant email.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email_id:     { type: 'string', description: 'Email ID to catalog' },
+        userEmail:    { type: 'string', description: 'Mailbox owner. Omit for assistant.' },
+        category:     { type: 'string', description: 'Category: invoice, quote_request, crew, vendor, customer, admin, personal, spam, other' },
+        action_taken: { type: 'string', description: 'Action: none, moved, archived, replied, forwarded, flagged', default: 'none' },
+        action_notes: { type: 'string', description: 'Optional notes about what was done' },
+        folder_name:  { type: 'string', description: 'Human-readable folder name for reference' },
+      },
+      required: ['email_id', 'category'],
+    },
+  },
+  {
+    name: 'get_email_catalog',
+    description: 'Query the persistent email catalog. Filter by mailbox or category.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        mailbox:  { type: 'string', description: 'Filter to a specific mailbox email address' },
+        category: { type: 'string', description: 'Filter to a specific category' },
+        limit:    { type: 'number', default: 50 },
+        offset:   { type: 'number', default: 0 },
       },
       required: [],
     },
   },
   {
     name: 'create_reminder',
-    description: 'Create a calendar reminder or task in Microsoft 365.',
+    description: 'Create a To Do reminder or task in Microsoft 365.',
     input_schema: {
       type: 'object',
       properties: {
-        title: { type: 'string' },
+        title:    { type: 'string' },
         due_date: { type: 'string', description: 'ISO 8601 datetime' },
-        notes: { type: 'string' },
+        notes:    { type: 'string' },
       },
       required: ['title', 'due_date'],
     },
   },
   {
     name: 'create_calendar_event',
-    description: 'Create a calendar event in Microsoft 365 Outlook calendar.',
+    description: 'Create a calendar event. Defaults to assistant calendar. Pass userEmail to create on Michael\'s calendar.',
     input_schema: {
       type: 'object',
       properties: {
-        subject:  { type: 'string', description: 'Event title' },
-        start:    { type: 'string', description: 'Start datetime ISO 8601, e.g. 2026-07-01T09:00:00' },
-        end:      { type: 'string', description: 'End datetime ISO 8601, e.g. 2026-07-01T09:30:00' },
-        body:     { type: 'string', description: 'Event description/notes' },
-        timezone: { type: 'string', description: 'Timezone, default America/Chicago' },
+        subject:   { type: 'string', description: 'Event title' },
+        start:     { type: 'string', description: 'Start datetime ISO 8601, e.g. 2026-07-01T09:00:00' },
+        end:       { type: 'string', description: 'End datetime ISO 8601, e.g. 2026-07-01T09:30:00' },
+        body:      { type: 'string', description: 'Event description/notes' },
+        timezone:  { type: 'string', description: 'Timezone, default America/Chicago' },
+        userEmail: { type: 'string', description: 'Calendar owner. Omit for assistant, use michael@jrboehlke.com for Michael.' },
       },
       required: ['subject', 'start', 'end'],
+    },
+  },
+  {
+    name: 'list_calendar_events',
+    description: 'List calendar events in a date range. Defaults to assistant calendar. Pass userEmail for Michael\'s calendar.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        userEmail:     { type: 'string', description: 'Calendar owner. Omit for assistant, use michael@jrboehlke.com for Michael.' },
+        startDateTime: { type: 'string', description: 'ISO 8601 start of range (defaults to now)' },
+        endDateTime:   { type: 'string', description: 'ISO 8601 end of range (defaults to 30 days out)' },
+        query:         { type: 'string', description: 'Optional keyword search within events' },
+        limit:         { type: 'number', default: 20 },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'update_calendar_event',
+    description: 'Update an existing calendar event (subject, time, body). Get event IDs from list_calendar_events.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        event_id:  { type: 'string', description: 'Event ID from list_calendar_events' },
+        userEmail: { type: 'string', description: 'Calendar owner. Omit for assistant.' },
+        subject:   { type: 'string' },
+        start:     { type: 'string', description: 'ISO 8601 datetime' },
+        end:       { type: 'string', description: 'ISO 8601 datetime' },
+        body:      { type: 'string' },
+        timezone:  { type: 'string', default: 'America/Chicago' },
+      },
+      required: ['event_id'],
+    },
+  },
+  {
+    name: 'delete_calendar_event',
+    description: 'Delete a calendar event. Get event IDs from list_calendar_events.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        event_id:  { type: 'string', description: 'Event ID from list_calendar_events' },
+        userEmail: { type: 'string', description: 'Calendar owner. Omit for assistant.' },
+      },
+      required: ['event_id'],
     },
   },
 ];
@@ -132,9 +262,9 @@ const FILE_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        path: { type: 'string', description: 'OneDrive path, e.g. /Reports/Q2-2025.pdf' },
-        content: { type: 'string', description: 'File content (text/base64)' },
-        encoding: { type: 'string', enum: ['utf8', 'base64'], default: 'utf8' },
+        path:      { type: 'string', description: 'OneDrive path, e.g. /Reports/Q2-2025.pdf' },
+        content:   { type: 'string', description: 'File content (text/base64)' },
+        encoding:  { type: 'string', enum: ['utf8', 'base64'], default: 'utf8' },
         overwrite: { type: 'boolean', default: false },
       },
       required: ['path', 'content'],
@@ -160,6 +290,56 @@ const FILE_TOOLS = [
         folder: { type: 'string', description: 'Folder path, e.g. /Reports' },
       },
       required: ['folder'],
+    },
+  },
+  {
+    name: 'search_sharepoint',
+    description: 'Search SharePoint/OneDrive for documents by keyword, file type, or site. Returns file names, URLs, and metadata. Use read_sharepoint_file to get content.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query:    { type: 'string', description: 'Search query string' },
+        fileType: { type: 'string', description: 'Optional file type filter, e.g. "pdf", "docx", "xlsx"' },
+        siteId:   { type: 'string', description: 'Optional SharePoint site ID to scope the search' },
+        limit:    { type: 'number', default: 20 },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'read_sharepoint_file',
+    description: 'Read the content of a SharePoint/OneDrive file. Get site_id, drive_id, item_id from search_sharepoint results.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        site_id:  { type: 'string', description: 'SharePoint site ID from search_sharepoint' },
+        drive_id: { type: 'string', description: 'Drive ID from search_sharepoint' },
+        item_id:  { type: 'string', description: 'Item ID from search_sharepoint' },
+      },
+      required: ['site_id', 'drive_id', 'item_id'],
+    },
+  },
+  {
+    name: 'list_sharepoint_folder',
+    description: 'List files and subfolders in a SharePoint site folder.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        site_id:     { type: 'string', description: 'SharePoint site ID from list_sharepoint_sites' },
+        folder_path: { type: 'string', description: 'Folder path relative to site root, e.g. "/Documents/Contracts". Use "/" for root.', default: '/' },
+      },
+      required: ['site_id'],
+    },
+  },
+  {
+    name: 'list_sharepoint_sites',
+    description: 'List available SharePoint sites. Optionally filter by name keyword.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Optional site name keyword to filter results' },
+      },
+      required: [],
     },
   },
 ];
@@ -354,6 +534,79 @@ const SA_TOOLS = [
       required: ['clientId', 'noteText'],
     },
   },
+  {
+    name: 'sa_search_service_types',
+    description: 'Search Service Autopilot service types by name keyword. Returns serviceTypeId, name, fullPath. Use before sa_create_estimate to resolve service type IDs.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Keyword to search, e.g. "sealcoat" or "striping"' },
+        limit: { type: 'number', description: 'Max results', default: 20 },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'sa_create_estimate',
+    description: "Create a new estimate (quote) in Service Autopilot with one or more line items. Line items preserve the service type's default description; pass notes to override. Returns quoteId, line item IDs, and any [placeholder] tokens found in descriptions that need PM clarification.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId:      { type: 'string', description: 'SA Client ID (GUID) from sa_search_clients' },
+        salesPersonId: { type: 'string', description: 'SA resource GUID for the salesperson/PM. Omit to use account default.' },
+        title:         { type: 'string', description: 'Estimate title / description shown on the estimate header' },
+        jobNotes:      { type: 'string', description: 'Text for the Job Notes tab — use for PM follow-up questions and job-specific notes' },
+        lineItems: {
+          type: 'array',
+          description: 'Services to include in the estimate',
+          items: {
+            type: 'object',
+            properties: {
+              serviceTypeId: { type: 'string', description: 'SA service type GUID from sa_search_service_types' },
+              rate:          { type: 'number', description: 'Unit rate in dollars' },
+              qty:           { type: 'number', description: 'Quantity (default 1)' },
+              notes:         { type: 'string', description: "Override the line item description. Omit to keep the service type's default description." },
+            },
+            required: ['serviceTypeId', 'rate'],
+          },
+        },
+      },
+      required: ['clientId', 'lineItems'],
+    },
+  },
+  {
+    name: 'sa_create_job',
+    description: 'Create a scheduled job from an existing SA estimate. Supports WaitingList (unscheduled), OneTime, and Recurring job types. Returns scheduledServiceId.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        quoteId:       { type: 'string', description: 'SA Quote/Estimate ID from sa_create_estimate' },
+        lineItemIds:   { type: 'array', items: { type: 'string' }, description: 'Line item IDs to include in this job (from sa_create_estimate lineItems)' },
+        jobType:       { type: 'string', enum: ['WaitingList', 'OneTime', 'Recurring'], description: 'Job type', default: 'WaitingList' },
+        clientId:      { type: 'string', description: 'SA Client ID (GUID)' },
+        customerJobId: { type: 'string', description: 'SA CustomerJobID (GUID) — omit to auto-lookup' },
+        resourceIds:   { type: 'array', items: { type: 'string' }, description: 'SA resource GUIDs to assign to the job (crew/PM). Use empty array for unassigned.' },
+        salesPersonId: { type: 'string', description: 'SA salesperson/PM resource GUID. Defaults to value from estimate.' },
+        startDate:     { type: 'string', description: 'Target start date ISO 8601 (YYYY-MM-DD). Required for WaitingList/OneTime.' },
+        completeByDate:{ type: 'string', description: 'Complete-by deadline ISO 8601 (YYYY-MM-DD). Required for WaitingList.' },
+      },
+      required: ['quoteId', 'lineItemIds', 'clientId'],
+    },
+  },
+  {
+    name: 'sa_add_ticket',
+    description: 'Add a support ticket or follow-up task to a Service Autopilot client record. Ticket appears in the client timeline. Use for follow-ups, inquiries, or action items.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA Client ID (GUID) from sa_search_clients' },
+        subject:  { type: 'string', description: 'Ticket subject/title' },
+        notes:    { type: 'string', description: 'Ticket body / details' },
+        dueDate:  { type: 'string', description: 'Optional due date ISO 8601 (YYYY-MM-DD)' },
+      },
+      required: ['clientId', 'subject'],
+    },
+  },
 ];
 
 const SCHEDULING_TOOLS = [
@@ -433,6 +686,8 @@ const TOOL_MAP = {
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
   scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
+  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
+  sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],
 };
 
