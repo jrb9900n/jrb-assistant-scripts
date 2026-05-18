@@ -103,13 +103,19 @@ export async function runAgent({
 
     let totalInput = 0, totalOutput = 0, finalText = '';
 
+    // Cache system prompt + tools to reduce input tokens (cached reads count ~1/10th toward rate limits)
+    const cachedSystem = [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }];
+    const cachedTools = tools.length > 0
+        ? [...tools.slice(0, -1), { ...tools[tools.length - 1], cache_control: { type: 'ephemeral' } }]
+        : tools;
+
     while (true) {
         const response = await anthropic.messages.create({
             model,
             max_tokens: model === SONNET
                 ? parseInt(process.env.MAX_TOKENS_SONNET ?? '16000')
                 : parseInt(process.env.MAX_TOKENS_HAIKU ?? '1024'),
-            system: systemPrompt, tools, messages,
+            system: cachedSystem, tools: cachedTools, messages,
         });
 
         totalInput  += response.usage.input_tokens;

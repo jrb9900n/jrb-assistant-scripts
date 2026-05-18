@@ -9,7 +9,7 @@ async function webSearch({ query }) {
   } catch (err) { return 'Web search error: ' + err.message; }
 }
 
-// tools/dispatcher.js — Routes tool calls to implementations
+// tools/dispatcher.js â€” Routes tool calls to implementations
 import { logger } from '../core/logger.js';
 import * as m365        from './impl/m365.js';
 import * as qb          from './impl/quickbooks.js';
@@ -20,7 +20,6 @@ import * as vercel      from './impl/vercel.js';
 import * as scheduling  from './impl/scheduling.js';
 import * as sa          from './impl/serviceautopilot.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
-import { sendProactiveMessage } from '../teams/notify.js';
 
 const HANDLERS = {
   // Email
@@ -72,9 +71,6 @@ const HANDLERS = {
 
   // Search
   web_search:           (i) => webSearch(i),
-
-  // Teams
-  send_teams_message:   ({ message }) => sendProactiveMessage(message).then(() => 'Teams message sent.'),
 
   // Service Autopilot
   sa_search_clients:       (i) => sa.searchClients(i),

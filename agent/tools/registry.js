@@ -227,20 +227,6 @@ const EMAIL_TOOLS = [
   },
 ];
 
-const TEAMS_TOOLS = [
-  {
-    name: 'send_teams_message',
-    description: 'Send a proactive Teams message to Michael. Use this to notify him when a long-running task finishes, an error occurs mid-task, or any event worth flagging outside of the current reply. Requires that Michael has sent at least one message to the JRB bot in Teams to establish a conversation reference.',
-    input_schema: {
-      type: 'object',
-      properties: {
-        message: { type: 'string', description: 'The message to send to Michael in Teams.' },
-      },
-      required: ['message'],
-    },
-  },
-];
-
 const QB_TOOLS = [
   {
     name: 'qb_query',
@@ -680,15 +666,15 @@ const SCHEDULING_TOOLS = [
 ];
 
 const TOOL_MAP = {
-  email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
-  crm:        [...QB_TOOLS, ...SA_TOOLS, ...TEAMS_TOOLS],
-  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
-  code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
-  file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
-  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
-  sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],
+  email:      [...EMAIL_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS],
+  report:     [...QB_TOOLS, ...FILE_TOOLS],
+  code:       [...CODE_TOOLS, ...FILE_TOOLS],
+  file:       [...FILE_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS],
+  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder'))],
+  sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive'))],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS],
 };
 
 export function getTools(taskType) {

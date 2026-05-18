@@ -11,6 +11,7 @@ import { listAgents } from '../agents/library.js';
 import { listSkills } from '../skills/library.js';
 import { logger } from '../core/logger.js';
 import { buildContextBlock } from '../tools/impl/feedback.js';
+import { saveConversationRef, sendProactiveMessage } from './notify.js';
 import {
   handleOAuthAuthorize,
   handleOAuthApprove,
@@ -108,6 +109,44 @@ async function replyToTeams(activity, text) {
   }
 }
 
+// ── /notify endpoint — send a proactive Teams message to Michael ──────────────
+async function handleNotify(req, res) {
+  const auth = req.headers['x-execute-secret'] || req.headers['authorization']?.replace('Bearer ', '');
+  if (!EXECUTE_SECRET || auth !== EXECUTE_SECRET) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Unauthorized' }));
+    return;
+  }
+
+  let body = '';
+  req.on('data', d => body += d);
+  await new Promise(r => req.on('end', r));
+
+  let message;
+  try {
+    const parsed = JSON.parse(body);
+    message = parsed.message;
+  } catch {
+    message = null;
+  }
+
+  if (!message) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'message is required in JSON body' }));
+    return;
+  }
+
+  try {
+    await sendProactiveMessage(message);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ok: true }));
+  } catch (err) {
+    logger.error('Notify error', { err: err.message });
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: err.message }));
+  }
+}
+
 // ── /execute endpoint — Claude.ai chat can trigger agent tasks ────────────────
 async function handleExecute(req, res) {
   // Auth check
@@ -184,6 +223,9 @@ async function handleTeamsActivity(req, res) {
 
   const userText = (activity.text || '').replace(/<[^>]+>/g, '').trim();
   if (!userText) return;
+
+  // Persist conversation reference so we can send proactive messages later
+  saveConversationRef(activity);
 
   logger.info('Teams message', { text: userText.slice(0, 80) });
 
@@ -322,6 +364,11 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ error: 'MCP server not loaded' }));
     }
     return;
+  }
+
+  // Notify — send a proactive Teams message (usable from Claude Code, scripts, etc.)
+  if (req.method === 'POST' && url === '/notify') {
+    await handleNotify(req, res); return;
   }
 
   // Execute endpoint

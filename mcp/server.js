@@ -10,6 +10,7 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'crypto';
 import { runAgent } from '../core/agent.js';
+import { sendProactiveMessage } from '../teams/notify.js';
 import { logger } from '../core/logger.js';
 import { z } from 'zod';
 
@@ -46,6 +47,25 @@ function buildMcpServer() {
           content: [{ type: 'text', text: `Error: ${err.message}` }],
           isError: true,
         };
+      }
+    }
+  );
+
+  // Tool: send_teams_message
+  server.tool(
+    'send_teams_message',
+    'Send a proactive Teams message to Michael. Use this to notify him when a background task completes, an error occurs, or any event worth flagging. Requires that Michael has sent at least one message to the JRB bot in Teams to establish a conversation reference.',
+    {
+      message: z.string().describe('The message text to send to Michael in Teams.'),
+    },
+    async ({ message }) => {
+      logger.info('MCP send_teams_message', { preview: message.slice(0, 60) });
+      try {
+        await sendProactiveMessage(message);
+        return { content: [{ type: 'text', text: 'Teams message sent.' }] };
+      } catch (err) {
+        logger.error('MCP send_teams_message error', { err: err.message });
+        return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
       }
     }
   );
