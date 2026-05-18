@@ -3,6 +3,30 @@ import 'dotenv/config';
 import cron from 'node-cron';
 import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+
+// File-based lock to prevent duplicate runs when multiple scheduler instances are alive.
+// Returns true if this instance should proceed; false if another instance ran recently.
+function acquireRunLock(taskName, ttlMs = 60_000) {
+  const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
+  try {
+    if (existsSync(lockFile)) {
+      const ts = Number(readFileSync(lockFile, 'utf8'));
+      if (Date.now() - ts < ttlMs) return false; // another instance holds the lock
+    }
+    writeFileSync(lockFile, String(Date.now()), 'utf8');
+    return true;
+  } catch {
+    return true; // if we can't read/write the lock, proceed anyway
+  }
+}
+
+function releaseRunLock(taskName) {
+  const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
+  try { unlinkSync(lockFile); } catch { /* ignore */ }
+}
 
 const SCHEDULED_TASKS = [
   {
@@ -91,6 +115,11 @@ const SCHEDULED_TASKS = [
     schedule: '*/5 * * * *',
     name: 'email_poller',
     run: async () => {
+      if (!acquireRunLock('email_poller', 4 * 60_000)) {
+        logger.debug('email_poller: skipped (another instance running)');
+        return;
+      }
+      try {
       const { listEmails, getEmail, sendEmail, markEmailRead, listEmailAttachments, getEmailAttachmentBytes } = await import('../tools/impl/m365.js');
       const { processEmailedReceipt } = await import('../tools/impl/expense.js');
       const emails = await listEmails({ folder: 'Inbox', limit: 10, unread_only: true });
@@ -238,6 +267,9 @@ Instructions:
           body: `<p>${result.replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
         });
         logger.info(`Email poller: replied to ${email.from}`);
+      }
+      } finally {
+        releaseRunLock('email_poller');
       }
     },
   },
