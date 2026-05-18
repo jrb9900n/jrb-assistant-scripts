@@ -129,6 +129,37 @@ async function post(path, body, referer) {
   return res;
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function toSaBrowserDate(d) {
+  if (!d) return { Month: -1, Day: -1, Year: -1 };
+  const dt = d instanceof Date ? d : new Date(d);
+  return { Month: dt.getMonth() + 1, Day: dt.getDate(), Year: dt.getFullYear() };
+}
+
+function todayPlusDays(days) {
+  const d = new Date();
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function sanitizeDates(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(sanitizeDates);
+  if ('Month' in obj && 'Day' in obj && 'Year' in obj) {
+    return (obj.Month <= 0 || obj.Year <= 0) ? { Month: -1, Day: -1, Year: -1 } : obj;
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) out[k] = sanitizeDates(v);
+  return out;
+}
+
+function extractPlaceholders(text) {
+  if (!text) return [];
+  const matches = text.match(/\[[^\]]+\]/g);
+  return [...new Set(matches || [])];
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -223,6 +254,298 @@ export async function getClientDetails({ clientId }) {
 }
 
 /**
+ * Search SA service types by name.
+ * Returns [{ serviceTypeId, name }]
+ */
+export async function searchServiceTypes({ name, limit = 20 }) {
+  const res = await post('/WebServices/ListsWs.asmx/GetServiceTypes', {
+    InputData: { Filter: name || '' },
+  }, 'Clients.aspx');
+
+  const items = res.data?.d?.Result || res.data?.d || [];
+  const list = Array.isArray(items) ? items : (items.ServiceTypes || []);
+  return list
+    .filter(s => !name || s.Name?.toLowerCase().includes(name.toLowerCase()))
+    .slice(0, limit)
+    .map(s => ({ serviceTypeId: s.ID || s.ServiceTypeID, name: s.Name }));
+}
+
+/**
+ * Create an estimate in SA.
+ * lineItems: [{ serviceTypeId, qty, rate, note }]
+ * Returns { quoteId, quoteNumber, lineItems: [{serviceId, serviceTypeId, note}], placeholders: ['[x]', ...] }
+ */
+export async function createEstimate({ clientId, title = '', lineItems = [], validFromDate, validToDays = 30 }) {
+  // 1. Init blank quote
+  const initRes = await post('/WebServices/QuoteWs.asmx/Query', {
+    InputData: { ID: EMPTY_GUID, CustomerID: clientId, IsTemplate: false },
+  }, 'V3Estimate.aspx');
+  const quote = initRes.data?.d?.Result;
+  if (!quote) throw new Error(`SA createEstimate: failed to init quote — ${initRes.text?.slice(0, 200)}`);
+
+  // 2. Get default sales rep
+  const repRes = await post('/WebServices/QuoteWs.asmx/GetDefaultSalesRep', {
+    InputData: { CustomerID: clientId },
+  }, 'V3Estimate.aspx');
+  const salesRepId = repRes.data?.d?.Result?.SalesRepID || EMPTY_GUID;
+
+  // 3. Add each service line item
+  const builtItems = [];
+  const allPlaceholders = [];
+
+  for (const item of lineItems) {
+    const addRes = await post('/WebServices/QuoteWs.asmx/AddService', {
+      InputData: { ServiceTypeID: item.serviceTypeId, QuoteID: EMPTY_GUID },
+    }, 'V3Estimate.aspx');
+    const svc = addRes.data?.d?.Result;
+    if (!svc) throw new Error(`SA createEstimate: AddService failed for ${item.serviceTypeId}`);
+
+    const noteText = item.note || svc.EstimateNote || '';
+    const placeholders = extractPlaceholders(noteText);
+    allPlaceholders.push(...placeholders);
+
+    const sanitized = sanitizeDates(svc);
+    builtItems.push({
+      ...sanitized,
+      StatusEnum: 1,
+      Rate: item.rate ?? svc.Rate ?? 0,
+      Qty: item.qty ?? svc.Qty ?? 1,
+      Total: String((item.rate ?? svc.Rate ?? 0) * (item.qty ?? svc.Qty ?? 1)),
+      EstimateNote: noteText,
+    });
+  }
+
+  // 4. Build save payload
+  const fromDate = validFromDate ? toSaBrowserDate(validFromDate) : toSaBrowserDate(new Date());
+  const toDate   = toSaBrowserDate(todayPlusDays(validToDays));
+
+  const saveRes = await post('/WebServices/QuoteWs.asmx/Save', {
+    InputData: {
+      QuoteID:    EMPTY_GUID,
+      IsTemplate: false,
+      SaveAs:     false,
+      SaveAsType: '',
+      TemplateType: '1',
+      ProjectID:  EMPTY_GUID,
+      DetailsTab: {
+        ClientLeadID:           clientId,
+        Description:            title,
+        PONumber:               '',
+        WorkOrderNumber:        '',
+        NumberOfInstallments:   '1',
+        ValidFromDate:          fromDate,
+        ValidToDate:            toDate,
+        SalesRepID:             salesRepId,
+        SourceID:               EMPTY_GUID,
+        DocumentID:             EMPTY_GUID,
+        StatusEnum:             0,
+        QuoteStageID:           '44410183-e121-4313-93a1-7ea769bfee53',
+        ReasonID:               EMPTY_GUID,
+        ShowDiscountInGrid:     false,
+        ServiceLineItems:       builtItems.map(s => ({ Service: s })),
+        DeletedServiceLineItems:[],
+        PackageLineItems:       [],
+        KitLineItems:           [],
+        DirectCost:             { JobCostings: [], DeletedJobCostings: [] },
+      },
+      NotesTab: { Notes: '' },
+    },
+  }, 'V3Estimate.aspx');
+
+  const quoteId = saveRes.data?.d?.Result?.QuoteID || saveRes.data?.d?.QuoteID;
+  if (!quoteId || quoteId === EMPTY_GUID) {
+    const errs = saveRes.data?.d?.Errors;
+    throw new Error(`SA createEstimate save failed: ${errs ? JSON.stringify(errs) : saveRes.text?.slice(0, 300)}`);
+  }
+
+  // 5. Re-query to get assigned service IDs + quote number
+  const queryRes = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
+    InputData: { ID: quoteId },
+  }, 'V3Estimate.aspx');
+  const savedItems = queryRes.data?.d?.Result?.ServiceLineItems || [];
+
+  const returnedItems = savedItems.map((s, i) => ({
+    serviceId:     s.Service?.ID || s.ID,
+    serviceTypeId: s.Service?.ServiceTypeID || lineItems[i]?.serviceTypeId,
+    note:          s.Service?.EstimateNote || builtItems[i]?.EstimateNote || '',
+    rate:          s.Service?.Rate,
+    qty:           s.Service?.Qty,
+  }));
+
+  const quoteNumber = queryRes.data?.d?.Result?.QuoteNumber || saveRes.data?.d?.Result?.QuoteNumber || '';
+  const uniquePlaceholders = [...new Set(allPlaceholders)];
+  logger.info('SA: estimate created', { quoteId, quoteNumber, placeholders: uniquePlaceholders });
+  return { quoteId, quoteNumber, lineItems: returnedItems, placeholders: uniquePlaceholders };
+}
+
+/**
+ * Update an existing estimate's line item notes (for filling in placeholders).
+ * updates: [{ serviceId, note }]
+ * Returns { quoteId }
+ */
+export async function updateEstimateNotes({ quoteId, updates = [] }) {
+  const queryRes = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
+    InputData: { ID: quoteId },
+  }, 'V3Estimate.aspx');
+  const result = queryRes.data?.d?.Result;
+  if (!result) throw new Error(`SA updateEstimateNotes: could not load estimate ${quoteId}`);
+
+  const updatedItems = (result.ServiceLineItems || []).map(item => {
+    const svc = item.Service || item;
+    const match = updates.find(u => u.serviceId === svc.ID);
+    if (match) svc.EstimateNote = match.note;
+    return { Service: sanitizeDates(svc) };
+  });
+
+  const saveRes = await post('/WebServices/QuoteWs.asmx/Save', {
+    InputData: {
+      QuoteID:    quoteId,
+      IsTemplate: false,
+      SaveAs:     false,
+      SaveAsType: '',
+      TemplateType: '1',
+      ProjectID:  EMPTY_GUID,
+      DetailsTab: {
+        ClientLeadID:           result.ClientLeadID || result.CustomerID || EMPTY_GUID,
+        Description:            result.Description || '',
+        PONumber:               result.PONumber || '',
+        WorkOrderNumber:        result.WorkOrderNumber || '',
+        NumberOfInstallments:   String(result.NumberOfInstallments || '1'),
+        ValidFromDate:          sanitizeDates(result.ValidFromDate) || toSaBrowserDate(new Date()),
+        ValidToDate:            sanitizeDates(result.ValidToDate) || toSaBrowserDate(todayPlusDays(30)),
+        SalesRepID:             result.SalesRepID || EMPTY_GUID,
+        SourceID:               result.SourceID || EMPTY_GUID,
+        DocumentID:             result.DocumentID || EMPTY_GUID,
+        StatusEnum:             result.StatusEnum ?? 0,
+        QuoteStageID:           result.QuoteStageID || '44410183-e121-4313-93a1-7ea769bfee53',
+        ReasonID:               result.ReasonID || EMPTY_GUID,
+        ShowDiscountInGrid:     result.ShowDiscountInGrid || false,
+        ServiceLineItems:       updatedItems,
+        DeletedServiceLineItems:[],
+        PackageLineItems:       result.PackageLineItems || [],
+        KitLineItems:           result.KitLineItems || [],
+        DirectCost:             result.DirectCost || { JobCostings: [], DeletedJobCostings: [] },
+      },
+      NotesTab: { Notes: result.Notes || '' },
+    },
+  }, 'V3Estimate.aspx');
+
+  const savedId = saveRes.data?.d?.Result?.QuoteID || saveRes.data?.d?.QuoteID;
+  if (!savedId) {
+    const errs = saveRes.data?.d?.Errors;
+    throw new Error(`SA updateEstimateNotes failed: ${errs ? JSON.stringify(errs) : saveRes.text?.slice(0, 300)}`);
+  }
+  logger.info('SA: estimate notes updated', { quoteId });
+  return { quoteId };
+}
+
+/**
+ * Schedule a waiting-list job from an estimate.
+ * serviceIds: array of line-item service IDs to schedule (or omit to schedule all)
+ * Returns { jobId, clientId, quoteId }
+ */
+export async function createJob({ clientId, quoteId, serviceIds, startDate, invoiceNotes = '' }) {
+  // 1. Get line items if serviceIds not provided
+  let selectedIds = serviceIds;
+  if (!selectedIds || selectedIds.length === 0) {
+    const liRes = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
+      InputData: { ID: quoteId },
+    }, 'V3Estimate.aspx');
+    const items = liRes.data?.d?.Result?.ServiceLineItems || [];
+    selectedIds = items.map(i => i.Service?.ID || i.ID).filter(Boolean);
+  }
+  if (selectedIds.length === 0) throw new Error('SA createJob: no service line items found on estimate');
+
+  // 2. Get job template from SA
+  const templateRes = await post('/WebServices/ServiceEditorWs.asmx/CreateServiceJobFromQuote', {
+    InputData: {
+      QuoteID:            quoteId,
+      SelectedLineItemIds: selectedIds,
+      JobType:            'WaitingList',
+      CustomerID:         clientId,
+    },
+  }, 'V3Estimate.aspx');
+  const template = templateRes.data?.d;
+  if (!template) throw new Error(`SA createJob: CreateServiceJobFromQuote failed — ${templateRes.text?.slice(0, 200)}`);
+
+  // 3. Build ServiceDetails from template
+  const startBrowserDate = startDate ? toSaBrowserDate(startDate) : toSaBrowserDate(todayPlusDays(7));
+  const serviceDetails = (template.ServiceDetails || []).map(sd => {
+    const detail = sd.ServiceDetail || sd;
+    return {
+      ServiceDetail: {
+        ID:                    EMPTY_GUID,
+        ServiceTypeID:         detail.ServiceTypeID,
+        Quantity:              detail.Quantity ?? 1,
+        Rate:                  detail.Rate ?? 0,
+        Hours:                 detail.Hours ?? 0,
+        BillableHours:         detail.BillableHours ?? 0,
+        NumberOfMen:           detail.NumberOfMen ?? 0,
+        BudgetedNumberOfMen:   detail.BudgetedNumberOfMen ?? 0,
+        NumberOfDays:          detail.NumberOfDays ?? 0,
+        InvoiceNotes:          invoiceNotes || detail.InvoiceNotes || '',
+        StartDate:             startBrowserDate,
+        EndDate:               { Month: -1, Day: -1, Year: -1 },
+        Status:                1,
+        IsUpsell:              false,
+        AssignedResourceIDs:   [],
+        QuoteLineItemID:       detail.QuoteLineItemID || EMPTY_GUID,
+        EstimateLineItemID:    EMPTY_GUID,
+        RouteSheetNote:        '',
+        ProductsRate:          0,
+      },
+      Products:            sd.Products || [],
+      InstalledProducts:   sd.InstalledProducts || [],
+      BudgetedHourOverrides: sd.BudgetedHourOverrides || [],
+      Appointments:        sd.Appointments || [],
+      CustomPackageOrder:  sd.CustomPackageOrder ?? 0,
+    };
+  });
+
+  // 4. Save waiting list job
+  const saveRes = await post('/WebServices/ServiceEditorWs.asmx/SaveWaitingListService', {
+    Input: {
+      UserID:               EMPTY_GUID,
+      JobID:                EMPTY_GUID,
+      CustomerID:           clientId,
+      Timing:               'WaitingList',
+      QuoteID:              quoteId,
+      SalesPersonID:        EMPTY_GUID,
+      CSRID:                EMPTY_GUID,
+      InvoiceFrequency:     1,
+      InvoiceAsWorkOrder:   false,
+      PaymentType:          1,
+      CallAhead:            false,
+      ArrivalWindow:        0,
+      DontApplyMinimumAmount: false,
+      PONumber:             '',
+      CommissionType:       0,
+      PayUsingBudgetedHours: false,
+      GroupJobs:            false,
+      GroupName:            '',
+      RouteSheetNotes:      [],
+      ServiceDetails:       serviceDetails,
+    },
+  }, 'V3Estimate.aspx');
+
+  const errors = saveRes.data?.Errors || saveRes.data?.d?.Errors || [];
+  if (errors.length > 0) {
+    const msg = errors.join(', ');
+    if (msg.includes('Object reference not set')) {
+      throw new Error('SA createJob: account lacks commission configuration — contact SA support or configure commission rules in SA settings');
+    }
+    throw new Error(`SA createJob failed: ${msg}`);
+  }
+
+  const jobId = saveRes.data?.ProjectID || saveRes.data?.d?.ProjectID;
+  if (!jobId || jobId === EMPTY_GUID) {
+    throw new Error(`SA createJob: no job ID in response — ${saveRes.text?.slice(0, 300)}`);
+  }
+  logger.info('SA: job created', { jobId, clientId, quoteId });
+  return { jobId, clientId, quoteId };
+}
+
+/**
  * Add a note (CRM ticket) to an SA client.
  * Returns { noteId, clientId }
  */
@@ -253,4 +576,41 @@ export async function addNote({ clientId, noteText }) {
   }
   logger.info('SA: note created', { noteId, clientId });
   return { noteId, clientId };
+}
+
+/**
+ * Add a ticket (task/follow-up) to an SA client.
+ * ticketType: 'Task' | 'Call' | 'Email' | 'Note' (default 'Task')
+ * Returns { ticketId, clientId }
+ */
+export async function addTicket({ clientId, subject, body = '', ticketType = 'Task', dueDate }) {
+  const details = await getClientDetails({ clientId });
+
+  const typeMap = { Task: 2, Call: 3, Email: 4, Note: 1 };
+  const ticketEventType = typeMap[ticketType] ?? 2;
+
+  const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
+    Ticket: {
+      CategoryID:   null,
+      TicketStatus: 0,
+      EntityID:     details.customerJobId,
+      EntityType:   'Account',
+      DueDate:      dueDate ? new Date(dueDate).toISOString() : '',
+      TicketDetail: {
+        TicketEventType: ticketEventType,
+        Subject:         subject,
+        Body:            body,
+        CreatedByID:     details.currentUserId,
+        CreatedByType:   details.currentUserType,
+      },
+    },
+  }, 'ClientView.aspx');
+
+  const ticketId = res.data?.ID;
+  if (!ticketId || ticketId === EMPTY_GUID) {
+    const errors = res.data?.Errors;
+    throw new Error(`SA addTicket failed: ${errors?.length ? errors.join(', ') : res.text?.slice(0, 300)}`);
+  }
+  logger.info('SA: ticket created', { ticketId, clientId, ticketType });
+  return { ticketId, clientId };
 }

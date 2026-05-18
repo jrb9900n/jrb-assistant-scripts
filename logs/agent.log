@@ -433,3 +433,33 @@
 2026-05-03 16:05:00 [[32minfo[39m] Scheduled task complete: email_poller
 2026-05-03 16:10:00 [[32minfo[39m] Scheduled task starting: email_poller
 2026-05-03 16:10:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 01:42:27 [[32minfo[39m] Agent run started {"runId":"c2039df1-80b4-433c-9c5f-12aef68b9f5b","taskType":"general","model":"claude-haiku-4-5-20251001","task":"list my mail folders"}
+2026-05-18 01:42:29 [[32minfo[39m] Tool call {"tool":"list_emails","runId":"c2039df1-80b4-433c-9c5f-12aef68b9f5b"}
+2026-05-18 01:42:32 [[32minfo[39m] [task-poller] Started
+2026-05-18 01:42:32 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","expense_reminders","weekly_expense_report","weekly_synthesis","weekly_crm_report","invoice_aging_check","qbo_contacts_sync","sa_nightly_sync","email_poller"]}
+2026-05-18 01:42:32 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-18 01:42:32 [[32minfo[39m] MCP keepalive scheduled (every 4 min)
+2026-05-18 01:42:33 [[32minfo[39m] Tokens: 889 (in:646 out:243) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"c2039df1-80b4-433c-9c5f-12aef68b9f5b"}
+2026-05-18 01:42:33 [[32minfo[39m] Agent run complete {"runId":"c2039df1-80b4-433c-9c5f-12aef68b9f5b","totalTokens":889,"model":"claude-haiku-4-5-20251001"}
+2026-05-18 01:43:02 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":1}
+2026-05-18 01:43:39 [[32minfo[39m] Agent run started {"runId":"1f317bc2-df1d-4b87-91c9-e9c038f4c627","taskType":"general","model":"claude-haiku-4-5-20251001","task":"list my mail folders"}
+2026-05-18 01:43:40 [[32minfo[39m] Tool call {"tool":"list_mail_folders","runId":"1f317bc2-df1d-4b87-91c9-e9c038f4c627"}
+2026-05-18 01:43:43 [[32minfo[39m] Tokens: 1813 (in:1590 out:223) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"1f317bc2-df1d-4b87-91c9-e9c038f4c627"}
+2026-05-18 01:43:43 [[32minfo[39m] Agent run complete {"runId":"1f317bc2-df1d-4b87-91c9-e9c038f4c627","totalTokens":1813,"model":"claude-haiku-4-5-20251001"}
+2026-05-18 01:43:50 [[32minfo[39m] Agent run started {"runId":"1457674a-dea0-4099-8b1c-10f239b95532","taskType":"general","model":"claude-haiku-4-5-20251001","task":"what's on Michael's calendar this week"}
+2026-05-18 01:43:52 [[32minfo[39m] Tool call {"tool":"list_calendar_events","runId":"1457674a-dea0-4099-8b1c-10f239b95532"}
+2026-05-18 01:43:59 [[32minfo[39m] Tokens: 7987 (in:7159 out:828) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"1457674a-dea0-4099-8b1c-10f239b95532"}
+2026-05-18 01:43:59 [[32minfo[39m] Agent run complete {"runId":"1457674a-dea0-4099-8b1c-10f239b95532","totalTokens":7987,"model":"claude-haiku-4-5-20251001"}
+2026-05-18 01:44:02 [[32minfo[39m] Agent run started {"runId":"785b8e7a-7436-4761-bda8-61abcc3dd2cf","taskType":"general","model":"claude-haiku-4-5-20251001","task":"search SharePoint for contracts"}
+2026-05-18 01:44:03 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"785b8e7a-7436-4761-bda8-61abcc3dd2cf"}
+2026-05-18 01:44:04 [[31merror[39m] Tool error {"tool":"search_sharepoint","err":"Request failed with status code 400"}
+2026-05-18 01:44:05 [[32minfo[39m] Tool call {"tool":"list_sharepoint_sites","runId":"785b8e7a-7436-4761-bda8-61abcc3dd2cf"}
+2026-05-18 01:44:06 [[31merror[39m] Tool error {"tool":"list_sharepoint_sites","err":"Request failed with status code 403"}
+2026-05-18 01:44:08 [[32minfo[39m] Tokens: 907 (in:622 out:285) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"785b8e7a-7436-4761-bda8-61abcc3dd2cf"}
+2026-05-18 01:44:08 [[32minfo[39m] Agent run complete {"runId":"785b8e7a-7436-4761-bda8-61abcc3dd2cf","totalTokens":907,"model":"claude-haiku-4-5-20251001"}
+2026-05-18 01:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 01:45:00 [[31merror[39m] Scheduled task failed: email_poller {"err":"supabaseUrl is required."}
+2026-05-18 01:46:32 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":2}
+2026-05-18 01:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 01:50:00 [[31merror[39m] Scheduled task failed: email_poller {"err":"supabaseUrl is required."}
+2026-05-18 01:50:32 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":3}
