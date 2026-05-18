@@ -22,22 +22,39 @@ import * as sa          from './impl/serviceautopilot.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 
 const HANDLERS = {
-  // Email / Calendar
-  list_emails:          (i) => m365.listEmails(i),
-  get_email:            (i) => m365.getEmail(i),
-  draft_email:          (i) => m365.draftEmail(i),
-  send_email:           (i) => m365.sendEmail(i),
-  create_reminder:      (i) => m365.createReminder(i),
-  create_calendar_event:(i) => m365.createCalendarEvent(i),
+  // Email
+  list_emails:           (i) => m365.listEmails(i),
+  get_email:             (i) => m365.getEmail(i),
+  search_emails:         (i) => m365.searchEmails(i),
+  draft_email:           (i) => m365.draftEmail(i),
+  send_email:            (i) => m365.sendEmail(i),
+  list_mail_folders:     (i) => m365.listMailFolders(i),
+  create_mail_folder:    (i) => m365.createMailFolder(i),
+  move_email:            (i) => m365.moveEmail(i),
+  catalog_email:         (i) => m365.catalogEmail(i),
+  get_email_catalog:     (i) => m365.getEmailCatalog(i),
+
+  // Calendar
+  create_reminder:        (i) => m365.createReminder(i),
+  create_calendar_event:  (i) => m365.createCalendarEvent(i),
+  list_calendar_events:   (i) => m365.listCalendarEvents(i),
+  update_calendar_event:  (i) => m365.updateCalendarEvent(i),
+  delete_calendar_event:  (i) => m365.deleteCalendarEvent(i),
 
   // CRM / Finance
-  qb_query:             (i) => qb.query(i),
+  qb_query:              (i) => qb.query(i),
 
-  // Files
-  save_to_onedrive:     (i) => m365.saveToOneDrive(i),
-  read_from_onedrive:   (i) => m365.readFromOneDrive(i),
-  list_onedrive:        (i) => m365.listOneDrive(i),
-  write_file:           (i) => files.writeFile(i),
+  // Files / OneDrive
+  save_to_onedrive:      (i) => m365.saveToOneDrive(i),
+  read_from_onedrive:    (i) => m365.readFromOneDrive(i),
+  list_onedrive:         (i) => m365.listOneDrive(i),
+  write_file:            (i) => files.writeFile(i),
+
+  // SharePoint
+  search_sharepoint:     (i) => m365.searchSharePoint(i),
+  read_sharepoint_file:  (i) => m365.readSharePointFile(i),
+  list_sharepoint_folder:(i) => m365.listSharePointFolder(i),
+  list_sharepoint_sites: (i) => m365.listSharePointSites(i),
 
   // Code / Scripts
   vercel_api:   (i) => vercel.vercelApi(i),
@@ -56,9 +73,13 @@ const HANDLERS = {
   web_search:           (i) => webSearch(i),
 
   // Service Autopilot
-  sa_search_clients:    (i) => sa.searchClients(i),
-  sa_create_client:     (i) => sa.createClient(i),
-  sa_add_note:          (i) => sa.addNote(i),
+  sa_search_clients:       (i) => sa.searchClients(i),
+  sa_create_client:        (i) => sa.createClient(i),
+  sa_add_note:             (i) => sa.addNote(i),
+  sa_search_service_types: (i) => sa.searchServiceTypes(i),
+  sa_create_estimate:      (i) => sa.createEstimate(i),
+  sa_create_job:           (i) => sa.createJob(i),
+  sa_add_ticket:           (i) => sa.addTicket(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),
