@@ -120,14 +120,15 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 - Scheduler uses `node-cron`
 - Memory: session summaries stored in Supabase `memory` table, not raw transcripts
 - Feedback loop: `logObservation()` → `knowledge_log` → synthesis → `rules` table → `buildContextBlock()` → injected into every system prompt via `buildSystemPrompt()` in `core/agent.js`
-- MCP server: `run_task` calls `runAgent({task, taskType})` — returns `{result, messages, usage}`
+- MCP server: `run_task`, `send_teams_message`, `get_status` tools. `run_task` calls `runAgent({task, taskType})` — returns `{result, messages, usage}`
 - **Critical destructure pattern:** `const { result: agentResult } = await runAgent({task, taskType})`
+- Prompt caching: system prompt and tools array use `cache_control: {type:'ephemeral'}` — cached tokens count ~1/10th toward the 30k/min rate limit
 
 ---
 
 ## Open Issues / Current Priorities
 
-1. **MCP reconnect after pm2 restart** — Claude.ai custom connector requires manual reconnect after agent restart. Workaround URL: `https://agent.jrboehlke.com/mcp-reconnect?secret=a22a678014626325ee6091d844aee5cf2cd668b3d953c953a14d1f6c326bd295`. Server now returns 404 for unknown session IDs (per MCP spec) which triggers Claude.ai auto-reinitialize in most cases.
+*(No open issues as of 2026-05-18)*
 
 ---
 
@@ -202,10 +203,36 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 
 ---
 
+## Proactive Teams Messaging (built 2026-05-18)
+
+The agent can send unprompted Teams messages to Michael — for task completion notifications, error alerts, or anything from Claude Code.
+
+### How it works
+- `teams/notify.js` — standalone module (no circular deps). Stores `serviceUrl` + `conversationId` in `teams/conversation-ref.json` when Michael messages the bot. Uses Bot Framework client-credentials token to POST to that conversation.
+- **One-time setup per machine wipe:** Michael must send at least one message to the JRB bot in Teams to seed `conversation-ref.json`. After that, proactive messaging works indefinitely.
+
+### Three ways to trigger
+1. **Claude Code MCP tool** — `send_teams_message` tool on the MCP server (Claude Code VS Code)
+2. **HTTP endpoint** — `POST https://agent.jrboehlke.com/notify` with `X-Execute-Secret` header and `{"message":"..."}` body
+3. **Agent tool** — `send_teams_message` in `tools/registry.js` / `dispatcher.js` for use by the bot mid-task
+
+### Restart gotcha
+`pm2 restart all` has EPERM from Claude Code context and also doesn't re-inject secrets from Credential Manager. Correct restart flow:
+```powershell
+# 1. Find and kill the node process on port 3978
+$p = (netstat -ano | Select-String ":3978 .*LISTENING" | ForEach-Object { ($_ -split '\s+')[-1] })
+taskkill /f /pid $p
+
+# 2. Start fresh via launcher (injects all secrets including CLAUDE_EXECUTE_SECRET)
+Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
+```
+
+---
+
 ## Credentials
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
-Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~July 2026 — calendar reminder set), `GITHUB_TOKEN` (expires every 90 days), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`
+Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~July 2026 — calendar reminder set), `GITHUB_TOKEN` (expires every 90 days), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
 
 ---
 
