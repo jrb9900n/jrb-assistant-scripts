@@ -217,15 +217,16 @@ The agent can send unprompted Teams messages to Michael — for task completion 
 3. **Agent tool** — `send_teams_message` in `tools/registry.js` / `dispatcher.js` for use by the bot mid-task
 
 ### Restart gotcha
-`pm2 restart all` has EPERM from Claude Code context and also doesn't re-inject secrets from Credential Manager. Correct restart flow:
+`pm2 restart all` has EPERM from Claude Code context. Correct restart flow:
 ```powershell
 # 1. Find and kill the node process on port 3978
 $p = (netstat -ano | Select-String ":3978 .*LISTENING" | ForEach-Object { ($_ -split '\s+')[-1] })
 taskkill /f /pid $p
 
-# 2. Start fresh via launcher (injects all secrets including CLAUDE_EXECUTE_SECRET)
+# 2. Start fresh via launcher (injects all secrets)
 Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
 ```
+Simple `pm2 restart` doesn't re-inject secrets from Credential Manager — old env vars are reused, causing `supabaseUrl is required` errors in the scheduler.
 
 ---
 
