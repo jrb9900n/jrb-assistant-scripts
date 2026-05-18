@@ -68,6 +68,16 @@ const SCHEDULED_TASKS = [
     }),
   },
   {
+    // 2 AM nightly — sync QBO customers + vendors into each employee's Outlook contact folders
+    schedule: '0 2 * * *',
+    name: 'qbo_contacts_sync',
+    run: async () => {
+      const { runContactsSync } = await import('../tools/impl/contacts-sync.js');
+      const result = await runContactsSync();
+      logger.info('QBO contacts sync complete', { succeeded: result.succeeded, failed: result.failed });
+    },
+  },
+  {
     // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
     schedule: '0 1 * * *',
     name: 'sa_nightly_sync',
