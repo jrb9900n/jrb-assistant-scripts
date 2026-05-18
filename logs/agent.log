@@ -463,3 +463,589 @@
 2026-05-18 01:50:00 [[32minfo[39m] Scheduled task starting: email_poller
 2026-05-18 01:50:00 [[31merror[39m] Scheduled task failed: email_poller {"err":"supabaseUrl is required."}
 2026-05-18 01:50:32 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":3}
+2026-05-18 02:11:06 [[32minfo[39m] Scheduling skill loaded {"chars":7323}
+2026-05-18 02:11:06 [[33mwarn[39m] MCP handler not loaded (mcp/server.js missing or errored) {"err":"Cannot find package '@modelcontextprotocol/sdk' imported from C:\\Users\\Assistant\\JRBAgent\\agent\\mcp\\server.js"}
+2026-05-18 02:11:06 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-18 02:12:43 [[32minfo[39m] Agent run started {"runId":"c73b1d2d-382b-4d81-a81f-e36f91c74c80","taskType":"general","model":"claude-haiku-4-5-20251001","task":"search SharePoint for contracts"}
+2026-05-18 02:12:45 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"c73b1d2d-382b-4d81-a81f-e36f91c74c80"}
+2026-05-18 02:12:46 [[31merror[39m] Tool error {"tool":"search_sharepoint","err":"Request failed with status code 400"}
+2026-05-18 02:12:47 [[32minfo[39m] Tool call {"tool":"list_sharepoint_sites","runId":"c73b1d2d-382b-4d81-a81f-e36f91c74c80"}
+2026-05-18 02:12:47 [[31merror[39m] Tool error {"tool":"list_sharepoint_sites","err":"Request failed with status code 403"}
+2026-05-18 02:12:49 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"c73b1d2d-382b-4d81-a81f-e36f91c74c80"}
+2026-05-18 02:12:49 [[31merror[39m] Tool error {"tool":"search_sharepoint","err":"Request failed with status code 400"}
+2026-05-18 02:12:50 [[32minfo[39m] Tool call {"tool":"list_onedrive","runId":"c73b1d2d-382b-4d81-a81f-e36f91c74c80"}
+2026-05-18 02:12:51 [[31merror[39m] Tool error {"tool":"list_onedrive","err":"Request failed with status code 400"}
+2026-05-18 02:12:53 [[32minfo[39m] Tokens: 1570 (in:1111 out:459) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"c73b1d2d-382b-4d81-a81f-e36f91c74c80"}
+2026-05-18 02:12:54 [[32minfo[39m] Agent run complete {"runId":"c73b1d2d-382b-4d81-a81f-e36f91c74c80","totalTokens":1570,"model":"claude-haiku-4-5-20251001"}
+2026-05-18 02:13:35 [[32minfo[39m] Agent run started {"runId":"10810619-c619-4905-a62f-a757885bb9d3","taskType":"general","model":"claude-haiku-4-5-20251001","task":"search SharePoint for contracts"}
+2026-05-18 02:13:37 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"10810619-c619-4905-a62f-a757885bb9d3"}
+2026-05-18 02:13:42 [[32minfo[39m] Tokens: 6057 (in:5794 out:263) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"10810619-c619-4905-a62f-a757885bb9d3"}
+2026-05-18 02:13:42 [[32minfo[39m] Agent run complete {"runId":"10810619-c619-4905-a62f-a757885bb9d3","totalTokens":6057,"model":"claude-haiku-4-5-20251001"}
+2026-05-18 02:21:22 [[32minfo[39m] Teams message {"text":"How old are you"}
+2026-05-18 02:21:22 [[32minfo[39m] Agent run started {"runId":"09cfb846-2cca-478f-a5fe-23a235c5ab51","taskType":"general","model":"claude-haiku-4-5-20251001","task":"How old are you"}
+2026-05-18 02:21:25 [[32minfo[39m] Tokens: 438 (in:327 out:111) {"task":"general","model":"claude-haiku-4-5-20251001","runId":"09cfb846-2cca-478f-a5fe-23a235c5ab51"}
+2026-05-18 02:21:25 [[32minfo[39m] Agent run complete {"runId":"09cfb846-2cca-478f-a5fe-23a235c5ab51","totalTokens":438,"model":"claude-haiku-4-5-20251001"}
+2026-05-18 02:21:26 [[32minfo[39m] Tokens: 255 (in:189 out:66) {"task":"memory_summarise:general","model":"claude-haiku-4-5-20251001","runId":"09cfb846-2cca-478f-a5fe-23a235c5ab51"}
+2026-05-18 02:21:26 [[32minfo[39m] Memory saved {"topic":"general","summaryLength":281}
+2026-05-18 02:25:57 [[32minfo[39m] [task-poller] Started
+2026-05-18 02:25:57 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","expense_reminders","weekly_expense_report","weekly_synthesis","weekly_crm_report","invoice_aging_check","qbo_contacts_sync","sa_nightly_sync","email_poller"]}
+2026-05-18 02:25:57 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-18 02:25:57 [[32minfo[39m] MCP keepalive scheduled (every 4 min)
+2026-05-18 02:26:27 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":1}
+2026-05-18 02:29:57 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":2}
+2026-05-18 02:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:30:02 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:30:51 [[32minfo[39m] [task-poller] Started
+2026-05-18 02:30:51 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","expense_reminders","weekly_expense_report","weekly_synthesis","weekly_crm_report","invoice_aging_check","qbo_contacts_sync","sa_nightly_sync","email_poller"]}
+2026-05-18 02:30:51 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-18 02:30:51 [[32minfo[39m] MCP keepalive scheduled (every 4 min)
+2026-05-18 02:31:21 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":1}
+2026-05-18 02:33:27 [[32minfo[39m] Scheduling skill loaded {"chars":7323}
+2026-05-18 02:33:27 [[33mwarn[39m] MCP handler not loaded (mcp/server.js missing or errored) {"err":"Cannot find package '@modelcontextprotocol/sdk' imported from C:\\Users\\Assistant\\JRBAgent\\agent\\mcp\\server.js"}
+2026-05-18 02:33:27 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-18 02:33:27 [[32minfo[39m] [task-poller] Started
+2026-05-18 02:33:28 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","expense_reminders","weekly_expense_report","weekly_synthesis","weekly_crm_report","invoice_aging_check","qbo_contacts_sync","sa_nightly_sync","email_poller"]}
+2026-05-18 02:33:28 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-18 02:33:28 [[32minfo[39m] MCP keepalive scheduled (every 4 min)
+2026-05-18 02:33:45 [[32minfo[39m] Proactive Teams message sent {"preview":"Teams proactive messaging is working. You can now use send_t"}
+2026-05-18 02:33:52 [[32minfo[39m] Proactive Teams message sent {"preview":"Teams proactive messaging is working!"}
+2026-05-18 02:33:57 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":3}
+2026-05-18 02:33:58 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":1}
+2026-05-18 02:34:51 [[33mwarn[39m] MCP keepalive non-200 {"status":503,"failures":2}
+2026-05-18 02:34:58 [[32minfo[39m] Scheduling skill loaded {"chars":7323}
+2026-05-18 02:34:59 [[32minfo[39m] MCP handler loaded from mcp/server.js
+2026-05-18 02:34:59 [[32minfo[39m] Teams bot listening on port 3978
+2026-05-18 02:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:35:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:35:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:35:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:37:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":2}
+2026-05-18 02:37:57 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":4}
+2026-05-18 02:38:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":3}
+2026-05-18 02:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:40:00 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"FW: Contact Form Submission"}
+2026-05-18 02:40:00 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"FW: Contact Form Submission"}
+2026-05-18 02:40:00 [[32minfo[39m] Agent run started {"runId":"30829f2c-8c6a-4402-beb8-19b8969ac7d1","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"FW: Contact Form "}
+2026-05-18 02:40:00 [[32minfo[39m] Agent run started {"runId":"bc08c14f-4aa9-4e9e-97d6-a3a8c756b8a5","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"FW: Contact Form "}
+2026-05-18 02:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:40:01 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"FW: Contact Form Submission"}
+2026-05-18 02:40:01 [[32minfo[39m] Agent run started {"runId":"0133185f-48aa-4a1f-845f-42290876c08a","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"FW: Contact Form "}
+2026-05-18 02:40:04 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"30829f2c-8c6a-4402-beb8-19b8969ac7d1"}
+2026-05-18 02:40:04 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"bc08c14f-4aa9-4e9e-97d6-a3a8c756b8a5"}
+2026-05-18 02:40:04 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:40:04 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:40:05 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"0133185f-48aa-4a1f-845f-42290876c08a"}
+2026-05-18 02:40:05 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:40:05 [[32minfo[39m] Tool call {"tool":"list_emails","runId":"30829f2c-8c6a-4402-beb8-19b8969ac7d1"}
+2026-05-18 02:40:12 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"bc08c14f-4aa9-4e9e-97d6-a3a8c756b8a5"}
+2026-05-18 02:40:12 [[32minfo[39m] Tool call {"tool":"create_reminder","runId":"bc08c14f-4aa9-4e9e-97d6-a3a8c756b8a5"}
+2026-05-18 02:40:12 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAdhlzEAAA=","subject":"Re: Asphalt Seal Coating & Crack Filling – 9825 N Andover Ct, Mequon"}
+2026-05-18 02:40:14 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"0133185f-48aa-4a1f-845f-42290876c08a"}
+2026-05-18 02:40:14 [[32minfo[39m] Tool call {"tool":"create_reminder","runId":"0133185f-48aa-4a1f-845f-42290876c08a"}
+2026-05-18 02:40:14 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAdhlzFAAA=","subject":"RE: FW: Contact Form Submission – Eric Guse (Mequon – Seal Coat & Crack Fill)"}
+2026-05-18 02:40:15 [[32minfo[39m] Tool call {"tool":"catalog_email","runId":"30829f2c-8c6a-4402-beb8-19b8969ac7d1"}
+2026-05-18 02:40:15 [[32minfo[39m] Tool call {"tool":"create_reminder","runId":"30829f2c-8c6a-4402-beb8-19b8969ac7d1"}
+2026-05-18 02:40:15 [[32minfo[39m] Email cataloged {"message_id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEMAAAUaj6jLMsTR5fl4hQqUP2BAAAdhnwEAAA=","category":"customer","action_taken":"flagged"}
+2026-05-18 02:40:18 [[32minfo[39m] Tokens: 2871 (in:1953 out:918) {"task":"email","model":"claude-sonnet-4-6","runId":"bc08c14f-4aa9-4e9e-97d6-a3a8c756b8a5"}
+2026-05-18 02:40:18 [[32minfo[39m] Agent run complete {"runId":"bc08c14f-4aa9-4e9e-97d6-a3a8c756b8a5","totalTokens":2871,"model":"claude-sonnet-4-6"}
+2026-05-18 02:40:18 [[32minfo[39m] Tokens: 2070 (in:1156 out:914) {"task":"email","model":"claude-sonnet-4-6","runId":"0133185f-48aa-4a1f-845f-42290876c08a"}
+2026-05-18 02:40:18 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:40:18 [[32minfo[39m] Agent run complete {"runId":"0133185f-48aa-4a1f-845f-42290876c08a","totalTokens":2070,"model":"claude-sonnet-4-6"}
+2026-05-18 02:40:18 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"FW: Contact Form Submission"}
+2026-05-18 02:40:19 [[32minfo[39m] Agent run started {"runId":"e9e51cbc-9d64-4d56-ad1a-4117afdb19ba","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"FW: Contact Form "}
+2026-05-18 02:40:19 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:40:19 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"FW: Contact Form Submission"}
+2026-05-18 02:40:19 [[32minfo[39m] Agent run started {"runId":"39a772eb-db09-4e8c-97df-4b85b1ac6076","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"FW: Contact Form "}
+2026-05-18 02:40:19 [[32minfo[39m] Tokens: 12680 (in:11735 out:945) {"task":"email","model":"claude-sonnet-4-6","runId":"30829f2c-8c6a-4402-beb8-19b8969ac7d1"}
+2026-05-18 02:40:19 [[32minfo[39m] Agent run complete {"runId":"30829f2c-8c6a-4402-beb8-19b8969ac7d1","totalTokens":12680,"model":"claude-sonnet-4-6"}
+2026-05-18 02:40:20 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:40:20 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"FW: Contact Form Submission"}
+2026-05-18 02:40:20 [[32minfo[39m] Agent run started {"runId":"8f0d3ef0-5b55-455c-967a-260ebd824d1d","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"FW: Contact Form "}
+2026-05-18 02:40:23 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"e9e51cbc-9d64-4d56-ad1a-4117afdb19ba"}
+2026-05-18 02:40:23 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"8f0d3ef0-5b55-455c-967a-260ebd824d1d"}
+2026-05-18 02:40:23 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:40:23 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAdhlzJAAA=","subject":"Re: FW: Contact Form Submission"}
+2026-05-18 02:40:24 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"39a772eb-db09-4e8c-97df-4b85b1ac6076"}
+2026-05-18 02:40:24 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAdhlzKAAA=","subject":"Re: FW: Contact Form Submission"}
+2026-05-18 02:40:25 [[32minfo[39m] Tool call {"tool":"list_emails","runId":"8f0d3ef0-5b55-455c-967a-260ebd824d1d"}
+2026-05-18 02:40:26 [[32minfo[39m] Tool call {"tool":"send_email","runId":"e9e51cbc-9d64-4d56-ad1a-4117afdb19ba"}
+2026-05-18 02:40:27 [[32minfo[39m] Tokens: 621 (in:164 out:457) {"task":"email","model":"claude-sonnet-4-6","runId":"39a772eb-db09-4e8c-97df-4b85b1ac6076"}
+2026-05-18 02:40:27 [[32minfo[39m] Agent run complete {"runId":"39a772eb-db09-4e8c-97df-4b85b1ac6076","totalTokens":621,"model":"claude-sonnet-4-6"}
+2026-05-18 02:40:28 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:40:28 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:40:29 [[32minfo[39m] Tokens: 1982 (in:1364 out:618) {"task":"email","model":"claude-sonnet-4-6","runId":"e9e51cbc-9d64-4d56-ad1a-4117afdb19ba"}
+2026-05-18 02:40:29 [[32minfo[39m] Agent run complete {"runId":"e9e51cbc-9d64-4d56-ad1a-4117afdb19ba","totalTokens":1982,"model":"claude-sonnet-4-6"}
+2026-05-18 02:40:30 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:40:30 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:40:36 [[32minfo[39m] Tool call {"tool":"catalog_email","runId":"8f0d3ef0-5b55-455c-967a-260ebd824d1d"}
+2026-05-18 02:40:36 [[32minfo[39m] Tool call {"tool":"draft_email","runId":"8f0d3ef0-5b55-455c-967a-260ebd824d1d"}
+2026-05-18 02:40:37 [[32minfo[39m] Email drafted {"id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEPAAAUaj6jLMsTR5fl4hQqUP2BAAAdhlzOAAA=","subject":"RE: FW: Contact Form Submission"}
+2026-05-18 02:40:37 [[32minfo[39m] Email cataloged {"message_id":"AAMkADljOWI2YzU5LTcwOTQtNDRhMC05NGY3LTI1YzIxOGNhZTdhMABGAAAAAABN_d1zi-uUR6K99VehGUVRBwAUaj6jLMsTR5fl4hQqUP2BAAAAAAEMAAAUaj6jLMsTR5fl4hQqUP2BAAAdhnwDAAA=","category":"customer","action_taken":"flagged"}
+2026-05-18 02:40:42 [[32minfo[39m] Tokens: 8618 (in:7341 out:1277) {"task":"email","model":"claude-sonnet-4-6","runId":"8f0d3ef0-5b55-455c-967a-260ebd824d1d"}
+2026-05-18 02:40:43 [[32minfo[39m] Agent run complete {"runId":"8f0d3ef0-5b55-455c-967a-260ebd824d1d","totalTokens":8618,"model":"claude-sonnet-4-6"}
+2026-05-18 02:40:43 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:40:43 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:41:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":3}
+2026-05-18 02:41:57 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":5}
+2026-05-18 02:42:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":4}
+2026-05-18 02:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:45:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:45:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:45:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":4}
+2026-05-18 02:46:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":5}
+2026-05-18 02:49:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":5}
+2026-05-18 02:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:50:00 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"Flag #222 APPROVE"}
+2026-05-18 02:50:00 [[32minfo[39m] Agent run started {"runId":"09b6b869-94dd-4ff0-976c-c3edf036530c","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"Flag #222 APPROVE"}
+2026-05-18 02:50:00 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"Flag #222 APPROVE"}
+2026-05-18 02:50:01 [[32minfo[39m] Agent run started {"runId":"3872f809-2deb-473c-a454-a5d5b562f139","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"Flag #222 APPROVE"}
+2026-05-18 02:50:03 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"09b6b869-94dd-4ff0-976c-c3edf036530c"}
+2026-05-18 02:50:03 [[32minfo[39m] Tool call {"tool":"get_email_catalog","runId":"09b6b869-94dd-4ff0-976c-c3edf036530c"}
+2026-05-18 02:50:04 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:50:04 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"3872f809-2deb-473c-a454-a5d5b562f139"}
+2026-05-18 02:50:04 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:50:06 [[32minfo[39m] Tool call {"tool":"list_emails","runId":"3872f809-2deb-473c-a454-a5d5b562f139"}
+2026-05-18 02:50:06 [[32minfo[39m] Tool call {"tool":"list_emails","runId":"09b6b869-94dd-4ff0-976c-c3edf036530c"}
+2026-05-18 02:50:08 [[32minfo[39m] Tool call {"tool":"get_email_catalog","runId":"3872f809-2deb-473c-a454-a5d5b562f139"}
+2026-05-18 02:50:11 [[32minfo[39m] Tool call {"tool":"get_email","runId":"09b6b869-94dd-4ff0-976c-c3edf036530c"}
+2026-05-18 02:50:11 [[32minfo[39m] Tool call {"tool":"get_email","runId":"09b6b869-94dd-4ff0-976c-c3edf036530c"}
+2026-05-18 02:50:12 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"3872f809-2deb-473c-a454-a5d5b562f139"}
+2026-05-18 02:50:12 [[32minfo[39m] Tool call {"tool":"list_emails","runId":"3872f809-2deb-473c-a454-a5d5b562f139"}
+2026-05-18 02:50:12 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:50:17 [[32minfo[39m] Tokens: 17943 (in:17422 out:521) {"task":"email","model":"claude-sonnet-4-6","runId":"3872f809-2deb-473c-a454-a5d5b562f139"}
+2026-05-18 02:50:17 [[32minfo[39m] Agent run complete {"runId":"3872f809-2deb-473c-a454-a5d5b562f139","totalTokens":17943,"model":"claude-sonnet-4-6"}
+2026-05-18 02:50:18 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:50:18 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"Flag #221 APPROVE"}
+2026-05-18 02:50:18 [[32minfo[39m] Agent run started {"runId":"9df0375e-b461-4464-b0a1-52d693957c42","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"Flag #221 APPROVE"}
+2026-05-18 02:50:19 [[32minfo[39m] Tokens: 20130 (in:19279 out:851) {"task":"email","model":"claude-sonnet-4-6","runId":"09b6b869-94dd-4ff0-976c-c3edf036530c"}
+2026-05-18 02:50:19 [[32minfo[39m] Agent run complete {"runId":"09b6b869-94dd-4ff0-976c-c3edf036530c","totalTokens":20130,"model":"claude-sonnet-4-6"}
+2026-05-18 02:50:20 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:50:20 [[32minfo[39m] Email poller: processing email from michael@jrboehlke.com {"subject":"Flag #221 APPROVE"}
+2026-05-18 02:50:20 [[32minfo[39m] Agent run started {"runId":"1eb8347f-9daf-4a5e-9754-2ddb781b3dd7","taskType":"email","model":"claude-sonnet-4-6","task":"You received an email from michael@jrboehlke.com with subject \"Flag #221 APPROVE"}
+2026-05-18 02:50:21 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"9df0375e-b461-4464-b0a1-52d693957c42"}
+2026-05-18 02:50:21 [[32minfo[39m] Tool call {"tool":"get_email_catalog","runId":"9df0375e-b461-4464-b0a1-52d693957c42"}
+2026-05-18 02:50:21 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:50:23 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"1eb8347f-9daf-4a5e-9754-2ddb781b3dd7"}
+2026-05-18 02:50:23 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:50:24 [[32minfo[39m] Tool call {"tool":"search_emails","runId":"9df0375e-b461-4464-b0a1-52d693957c42"}
+2026-05-18 02:50:24 [[32minfo[39m] Tool call {"tool":"list_emails","runId":"9df0375e-b461-4464-b0a1-52d693957c42"}
+2026-05-18 02:50:24 [[31merror[39m] Tool error {"tool":"search_emails","err":"Request failed with status code 400"}
+2026-05-18 02:50:25 [[32minfo[39m] Tool call {"tool":"get_email_catalog","runId":"1eb8347f-9daf-4a5e-9754-2ddb781b3dd7"}
+2026-05-18 02:50:28 [[32minfo[39m] Tool call {"tool":"get_email","runId":"9df0375e-b461-4464-b0a1-52d693957c42"}
+2026-05-18 02:50:32 [[32minfo[39m] Tokens: 1936 (in:1635 out:301) {"task":"email","model":"claude-sonnet-4-6","runId":"1eb8347f-9daf-4a5e-9754-2ddb781b3dd7"}
+2026-05-18 02:50:32 [[32minfo[39m] Agent run complete {"runId":"1eb8347f-9daf-4a5e-9754-2ddb781b3dd7","totalTokens":1936,"model":"claude-sonnet-4-6"}
+2026-05-18 02:50:32 [[32minfo[39m] Tool call {"tool":"get_email_catalog","runId":"9df0375e-b461-4464-b0a1-52d693957c42"}
+2026-05-18 02:50:33 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:50:33 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:50:39 [[32minfo[39m] Tokens: 21325 (in:20608 out:717) {"task":"email","model":"claude-sonnet-4-6","runId":"9df0375e-b461-4464-b0a1-52d693957c42"}
+2026-05-18 02:50:40 [[32minfo[39m] Agent run complete {"runId":"9df0375e-b461-4464-b0a1-52d693957c42","totalTokens":21325,"model":"claude-sonnet-4-6"}
+2026-05-18 02:50:40 [[32minfo[39m] Email poller: replied to michael@jrboehlke.com
+2026-05-18 02:50:40 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:50:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":6}
+2026-05-18 02:53:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":6}
+2026-05-18 02:54:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":7}
+2026-05-18 02:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:55:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 02:55:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 02:57:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":7}
+2026-05-18 02:58:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":8}
+2026-05-18 03:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:00:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:01:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":8}
+2026-05-18 03:02:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":9}
+2026-05-18 03:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:05:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:05:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:05:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":9}
+2026-05-18 03:06:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":10}
+2026-05-18 03:09:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":10}
+2026-05-18 03:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:10:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:10:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:10:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":11}
+2026-05-18 03:13:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":11}
+2026-05-18 03:14:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":12}
+2026-05-18 03:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:15:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:15:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:17:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":12}
+2026-05-18 03:18:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":13}
+2026-05-18 03:20:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:20:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:20:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:20:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:21:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":13}
+2026-05-18 03:22:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":14}
+2026-05-18 03:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:25:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:25:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:25:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":14}
+2026-05-18 03:26:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":15}
+2026-05-18 03:29:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":15}
+2026-05-18 03:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:30:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:30:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:30:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":16}
+2026-05-18 03:33:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":16}
+2026-05-18 03:34:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":17}
+2026-05-18 03:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:35:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:35:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:37:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":17}
+2026-05-18 03:38:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":18}
+2026-05-18 03:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:40:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:40:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:41:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":18}
+2026-05-18 03:42:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":19}
+2026-05-18 03:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:45:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:45:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:45:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":19}
+2026-05-18 03:46:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":20}
+2026-05-18 03:49:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":20}
+2026-05-18 03:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:50:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:50:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:50:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":21}
+2026-05-18 03:53:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":21}
+2026-05-18 03:54:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":22}
+2026-05-18 03:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 03:55:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:55:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 03:57:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":22}
+2026-05-18 03:58:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":23}
+2026-05-18 04:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:00:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:00:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:01:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":23}
+2026-05-18 04:02:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":24}
+2026-05-18 04:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:05:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:05:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:05:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":24}
+2026-05-18 04:06:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":25}
+2026-05-18 04:09:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":25}
+2026-05-18 04:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:10:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:10:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:10:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":26}
+2026-05-18 04:13:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":26}
+2026-05-18 04:14:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":27}
+2026-05-18 04:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:15:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:15:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:17:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":27}
+2026-05-18 04:18:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":28}
+2026-05-18 04:20:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:20:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:20:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:20:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:21:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":28}
+2026-05-18 04:22:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":29}
+2026-05-18 04:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:25:23 [[31merror[39m] Scheduled task failed: email_poller {"err":""}
+2026-05-18 04:25:23 [[31merror[39m] Scheduled task failed: email_poller {"err":""}
+2026-05-18 04:25:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":29}
+2026-05-18 04:26:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":30}
+2026-05-18 04:29:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":30}
+2026-05-18 04:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:30:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:30:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:30:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":31}
+2026-05-18 04:33:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":31}
+2026-05-18 04:34:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":32}
+2026-05-18 04:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:35:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:35:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:37:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":32}
+2026-05-18 04:38:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":33}
+2026-05-18 04:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:40:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:40:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:41:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":33}
+2026-05-18 04:42:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":34}
+2026-05-18 04:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:45:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:45:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:45:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":34}
+2026-05-18 04:46:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":35}
+2026-05-18 04:49:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":35}
+2026-05-18 04:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:50:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:50:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:50:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":36}
+2026-05-18 04:53:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":36}
+2026-05-18 04:54:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":37}
+2026-05-18 04:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 04:55:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:55:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 04:57:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":37}
+2026-05-18 04:58:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":38}
+2026-05-18 05:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:00:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:00:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:01:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":38}
+2026-05-18 05:02:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":39}
+2026-05-18 05:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:05:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:05:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:05:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":39}
+2026-05-18 05:06:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":40}
+2026-05-18 05:09:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":40}
+2026-05-18 05:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:10:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:10:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:10:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":41}
+2026-05-18 05:13:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":41}
+2026-05-18 05:14:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":42}
+2026-05-18 05:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:15:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:15:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:17:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":42}
+2026-05-18 05:18:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":43}
+2026-05-18 05:20:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:20:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:20:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:20:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:21:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":43}
+2026-05-18 05:22:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":44}
+2026-05-18 05:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:25:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:25:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:25:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":44}
+2026-05-18 05:26:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":45}
+2026-05-18 05:29:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":45}
+2026-05-18 05:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:30:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:30:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:30:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":46}
+2026-05-18 05:33:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":46}
+2026-05-18 05:34:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":47}
+2026-05-18 05:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:35:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:35:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:37:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":47}
+2026-05-18 05:38:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":48}
+2026-05-18 05:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:40:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:40:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:41:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":48}
+2026-05-18 05:42:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":49}
+2026-05-18 05:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:45:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:45:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:45:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":49}
+2026-05-18 05:46:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":50}
+2026-05-18 05:49:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":50}
+2026-05-18 05:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:50:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:50:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:50:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":51}
+2026-05-18 05:53:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":51}
+2026-05-18 05:54:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":52}
+2026-05-18 05:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 05:55:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:55:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 05:57:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":52}
+2026-05-18 05:58:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":53}
+2026-05-18 06:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:00:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:00:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:01:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":53}
+2026-05-18 06:02:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":54}
+2026-05-18 06:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:05:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:05:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:05:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":54}
+2026-05-18 06:06:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":55}
+2026-05-18 06:09:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":55}
+2026-05-18 06:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:10:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:10:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:10:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":56}
+2026-05-18 06:13:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":56}
+2026-05-18 06:14:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":57}
+2026-05-18 06:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:15:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:15:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:17:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":57}
+2026-05-18 06:18:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":58}
+2026-05-18 06:20:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:20:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:20:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:20:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:21:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":58}
+2026-05-18 06:22:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":59}
+2026-05-18 06:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:25:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:25:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:25:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:25:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":59}
+2026-05-18 06:26:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":60}
+2026-05-18 06:29:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":60}
+2026-05-18 06:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:30:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:30:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:30:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:30:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":61}
+2026-05-18 06:33:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":61}
+2026-05-18 06:34:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":62}
+2026-05-18 06:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:35:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:35:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:35:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:37:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":62}
+2026-05-18 06:38:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":63}
+2026-05-18 06:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:40:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:40:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:40:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:41:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":63}
+2026-05-18 06:42:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":64}
+2026-05-18 06:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:45:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:45:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:45:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:45:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":64}
+2026-05-18 06:46:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":65}
+2026-05-18 06:49:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":65}
+2026-05-18 06:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:50:00 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:50:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:50:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:50:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":66}
+2026-05-18 06:53:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":66}
+2026-05-18 06:54:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":67}
+2026-05-18 06:55:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 06:55:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 06:57:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":67}
+2026-05-18 06:58:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":68}
+2026-05-18 07:00:00 [[32minfo[39m] Scheduled task starting: weekly_expense_report
+2026-05-18 07:00:00 [[32minfo[39m] Scheduled task starting: weekly_crm_report
+2026-05-18 07:00:00 [[32minfo[39m] Agent run started {"runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4","taskType":"report","model":"claude-sonnet-4-6","task":"Pull HubSpot deals data. Identify new deals, deals moved to next stage, deals at"}
+2026-05-18 07:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 07:00:00 [[32minfo[39m] Scheduled task starting: weekly_expense_report
+2026-05-18 07:00:00 [[32minfo[39m] Scheduled task starting: weekly_crm_report
+2026-05-18 07:00:00 [[32minfo[39m] Agent run started {"runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665","taskType":"report","model":"claude-sonnet-4-6","task":"Pull HubSpot deals data. Identify new deals, deals moved to next stage, deals at"}
+2026-05-18 07:00:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 07:00:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 07:00:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 07:00:02 [[32minfo[39m] Weekly expense report sent {"subject":"Weekly Expense Report — May 11 – May 17, 2026"}
+2026-05-18 07:00:02 [[32minfo[39m] Scheduled task complete: weekly_expense_report
+2026-05-18 07:00:02 [[32minfo[39m] Weekly expense report sent {"subject":"Weekly Expense Report — May 11 – May 17, 2026"}
+2026-05-18 07:00:02 [[32minfo[39m] Scheduled task complete: weekly_expense_report
+2026-05-18 07:00:04 [[32minfo[39m] Tool call {"tool":"qb_query","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:04 [[32minfo[39m] Tool call {"tool":"qb_query","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:04 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:05 [[32minfo[39m] Tool call {"tool":"qb_query","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:05 [[32minfo[39m] Tool call {"tool":"qb_query","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:05 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:05 [[32minfo[39m] Tool call {"tool":"list_onedrive","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:05 [[31merror[39m] Tool error {"tool":"qb_query","err":"Request failed with status code 400"}
+2026-05-18 07:00:05 [[31merror[39m] Tool error {"tool":"qb_query","err":"Request failed with status code 400"}
+2026-05-18 07:00:05 [[31merror[39m] Tool error {"tool":"qb_query","err":"Request failed with status code 400"}
+2026-05-18 07:00:05 [[31merror[39m] Tool error {"tool":"qb_query","err":"Request failed with status code 400"}
+2026-05-18 07:00:08 [[32minfo[39m] Tool call {"tool":"qb_query","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:08 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:08 [[32minfo[39m] Tool call {"tool":"list_onedrive","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:08 [[31merror[39m] Tool error {"tool":"qb_query","err":"Request failed with status code 400"}
+2026-05-18 07:00:08 [[32minfo[39m] Tool call {"tool":"read_from_onedrive","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:08 [[32minfo[39m] Tool call {"tool":"qb_query","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:08 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:08 [[31merror[39m] Tool error {"tool":"qb_query","err":"Request failed with status code 400"}
+2026-05-18 07:00:11 [[32minfo[39m] Tool call {"tool":"list_sharepoint_sites","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:11 [[32minfo[39m] Tool call {"tool":"qb_query","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:11 [[31merror[39m] Tool error {"tool":"qb_query","err":"Request failed with status code 400"}
+2026-05-18 07:00:11 [[31merror[39m] Tool error {"tool":"list_sharepoint_sites","err":"Request failed with status code 403"}
+2026-05-18 07:00:11 [[32minfo[39m] Tool call {"tool":"list_onedrive","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:11 [[32minfo[39m] Tool call {"tool":"search_sharepoint","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:11 [[32minfo[39m] Tool call {"tool":"list_sharepoint_sites","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:11 [[31merror[39m] Tool error {"tool":"list_sharepoint_sites","err":"Request failed with status code 403"}
+2026-05-18 07:00:14 [[32minfo[39m] Tool call {"tool":"read_from_onedrive","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:14 [[32minfo[39m] Tool call {"tool":"read_from_onedrive","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:38 [[32minfo[39m] Tool call {"tool":"save_to_onedrive","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:39 [[32minfo[39m] File saved to OneDrive {"path":"/Agent Reports/Weekly CRM/2026-W20.md"}
+2026-05-18 07:00:43 [[32minfo[39m] Tool call {"tool":"save_to_onedrive","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:44 [[32minfo[39m] File saved to OneDrive {"path":"/Agent Reports/Weekly CRM/2026-W20.md"}
+2026-05-18 07:00:44 [[32minfo[39m] Tool call {"tool":"send_teams_message","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:45 [[32minfo[39m] Proactive Teams message sent {"preview":"📊 **Weekly CRM & Finance Report — 2026-W20 (May 11–17)**\n\nR"}
+2026-05-18 07:00:49 [[32minfo[39m] Tool call {"tool":"send_teams_message","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:50 [[32minfo[39m] Proactive Teams message sent {"preview":"📊 **Weekly CRM & Finance Report — 2026-W20**\n\nReport saved "}
+2026-05-18 07:00:52 [[32minfo[39m] Tokens: 12411 (in:9224 out:3187) {"task":"report","model":"claude-sonnet-4-6","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:52 [[32minfo[39m] Agent run complete {"runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665","totalTokens":12411,"model":"claude-sonnet-4-6"}
+2026-05-18 07:00:52 [[32minfo[39m] Scheduled task complete: weekly_crm_report
+2026-05-18 07:00:55 [[32minfo[39m] Tokens: 2345 (in:2208 out:137) {"task":"memory_summarise:report","model":"claude-haiku-4-5-20251001","runId":"dc3b9bf4-47cd-491f-b2e0-fb0b5ad2a665"}
+2026-05-18 07:00:55 [[32minfo[39m] Memory saved {"topic":"report","summaryLength":577}
+2026-05-18 07:00:59 [[32minfo[39m] Tokens: 17852 (in:14483 out:3369) {"task":"report","model":"claude-sonnet-4-6","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:00:59 [[32minfo[39m] Agent run complete {"runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4","totalTokens":17852,"model":"claude-sonnet-4-6"}
+2026-05-18 07:00:59 [[32minfo[39m] Scheduled task complete: weekly_crm_report
+2026-05-18 07:01:02 [[32minfo[39m] Tokens: 2858 (in:2682 out:176) {"task":"memory_summarise:report","model":"claude-haiku-4-5-20251001","runId":"df772828-3b02-424a-a6f0-1d4d781f8cd4"}
+2026-05-18 07:01:02 [[32minfo[39m] Memory saved {"topic":"report","summaryLength":723}
+2026-05-18 07:01:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":68}
+2026-05-18 07:02:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":69}
+2026-05-18 07:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 07:05:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 07:05:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 07:05:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 07:05:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":69}
+2026-05-18 07:06:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":70}
+2026-05-18 07:09:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":70}
+2026-05-18 07:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 07:10:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 07:10:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 07:10:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 07:10:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":71}
+2026-05-18 07:13:28 [[33mwarn[39m] MCP keepalive non-200 {"status":406,"failures":71}
+2026-05-18 07:14:51 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":72}
+2026-05-18 07:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 07:15:00 [[32minfo[39m] Scheduled task starting: email_poller
+2026-05-18 07:15:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 07:15:01 [[32minfo[39m] Scheduled task complete: email_poller
+2026-05-18 07:15:54 [[32minfo[39m] [task-poller] Started
+2026-05-18 07:15:54 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","expense_reminders","weekly_expense_report","weekly_synthesis","weekly_crm_report","invoice_aging_check","qbo_contacts_sync","sa_nightly_sync","email_poller"]}
+2026-05-18 07:15:54 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-18 07:15:54 [[32minfo[39m] MCP keepalive scheduled (every 4 min)
+2026-05-18 07:16:24 [[33mwarn[39m] MCP keepalive non-200 {"status":401,"failures":1}

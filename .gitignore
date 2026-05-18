@@ -5,3 +5,5 @@ scheduler/logs/
 teams/logs/
 core/logs/
 *.backup-*
+
+.env

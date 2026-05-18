@@ -351,13 +351,15 @@ export async function deleteCalendarEvent({ userEmail, event_id } = {}) {
 // ── SharePoint (via Microsoft Graph API — Sites.Read.All) ─────
 
 export async function searchSharePoint({ query, fileType, siteId, limit = 20 } = {}) {
-  const entityTypes = ['driveItem', 'listItem'];
+  // listItem requires Sites.Read.All; driveItem works with Files.ReadWrite.All
+  const entityTypes = ['driveItem'];
   const body = {
     requests: [{
       entityTypes,
       query: { queryString: fileType ? `${query} filetype:${fileType}` : query },
       from: 0,
       size: limit,
+      region: 'NAM',
       fields: ['id', 'name', 'webUrl', 'lastModifiedDateTime', 'createdBy', 'fileSystemInfo', 'parentReference'],
     }],
   };
