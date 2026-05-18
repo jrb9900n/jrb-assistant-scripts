@@ -131,13 +131,17 @@ const SCHEDULED_TASKS = [
           continue;
         }
 
+        // Mark read before heavy processing — prevents duplicate handling if lock races
+        await markEmailRead({ email_id: email.id });
+
         logger.info(`Email poller: processing email from ${email.from}`, { subject: email.subject });
         const full = await getEmail({ email_id: email.id });
         const body = full.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+        const fullText = email.subject + ' ' + body;
 
-        // â”€â”€ Dev task detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        const isExplicitDev = isExplicitDevTask(email.subject + ' ' + body);
-        const isAmbiguousDev = !isExplicitDev && isAmbiguousDevTask(email.subject + ' ' + body);
+        // ── Dev task detection ──────────────────────────────────────────────────
+        const isExplicitDev = isExplicitDevTask(fullText);
+        const isAmbiguousDev = !isExplicitDev && isAmbiguousDevTask(fullText);
 
         if (isExplicitDev) {
           // Michael clearly wants code built â€” reply with a scope proposal
@@ -192,8 +196,39 @@ Do not write any code yet. Return only the reply text.`;
           continue;
         }
 
-        // â”€â”€ Standard email reply â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-        const task = `You received an email from ${email.from} with subject "${email.subject}". Email body:\n\n${body}\n\nWrite a concise helpful reply. Return only the reply text.`;
+        // ── CRM / SA action detection ─────────────────────────────────────────
+        // Contact forms, forwarded leads, and explicit SA/ticket requests go to
+        // CRM routing which gives the agent SA tools and an action-oriented prompt.
+        const isCrm = isCrmActionRequest(fullText);
+
+        if (isCrm) {
+          logger.info(`Email poller: detected CRM/SA action request`, { subject: email.subject });
+          const crmTask = `You received an email from Michael. Execute the action he is requesting using your SA and CRM tools.
+
+Subject: “${email.subject}”
+Email body:
+${body}
+
+Instructions:
+- If this is a forwarded contact form or new customer inquiry: search SA for the client by name (sa_search_clients). If not found, create them (sa_create_client with name, address, phone, email from the form). Then add a ticket (sa_add_ticket) summarizing the inquiry and any follow-up requested.
+- If Michael asks to create a ticket, estimate, job, or any SA record: do it now using your tools.
+- If Michael asks to look up a client, invoice, or balance: do it and report back.
+- Always confirm what you did: client name, SA IDs, actions taken.
+- Reply in plain text — no HTML needed.`;
+
+          const crmResult = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false });
+          const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
+          await sendEmail({
+            to: [email.from],
+            subject: `Re: ${email.subject}`,
+            body: `<p>${crmReply.replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
+          });
+          logger.info(`Email poller: executed CRM action and replied to ${email.from}`);
+          continue;
+        }
+
+        // ── Standard email reply ──────────────────────────────────────────────
+        const task = `You received an email from ${email.from} with subject “${email.subject}”. Email body:\n\n${body}\n\nWrite a concise helpful reply. Return only the reply text.`;
         const agentResult = await runAgent({ task, taskType: 'email', saveContext: false });
         const result = agentResult?.result ?? 'I received your email and will follow up shortly.';
 
@@ -202,7 +237,6 @@ Do not write any code yet. Return only the reply text.`;
           subject: `Re: ${email.subject}`,
           body: `<p>${result.replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
         });
-        await markEmailRead({ email_id: email.id });
         logger.info(`Email poller: replied to ${email.from}`);
       }
     },
@@ -224,6 +258,14 @@ function isAmbiguousDevTask(text) {
   const t = text.toLowerCase();
   const techTerms = /\b(script|code|github|deploy|vercel|supabase|automate|function|api|database|repo|branch|commit)\b/;
   return techTerms.test(t) && !isExplicitDevTask(text);
+}
+
+function isCrmActionRequest(text) {
+  const t = text.toLowerCase();
+  // Forwarded emails are almost always contact forms / leads
+  if (/^(fw|fwd):/i.test(text.split('\n')[0])) return true;
+  // Explicit SA/CRM keywords
+  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead)\b/.test(t);
 }
 
 // â”€â”€ Register all schedules â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
