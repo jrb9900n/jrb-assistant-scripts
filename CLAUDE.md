@@ -128,7 +128,17 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 
 ## Open Issues / Current Priorities
 
-*(No open issues as of 2026-05-18)*
+*(No open issues as of 2026-05-20)*
+
+## Deployment Note — teams/bot.js
+
+The git repo tracks `teams/bot.js` at the repo root (`C:\Users\Assistant\JRBAgent\teams\bot.js`).
+The launcher runs from `C:\Users\Assistant\JRBAgent\agent\` and loads `agent/teams/bot.js`.
+After any `git pull` that touches `teams/bot.js`, manually copy it to the live location:
+```powershell
+Copy-Item "C:\Users\Assistant\JRBAgent\teams\bot.js" "C:\Users\Assistant\JRBAgent\agent\teams\bot.js" -Force
+```
+Then restart the agent.
 
 ---
 
