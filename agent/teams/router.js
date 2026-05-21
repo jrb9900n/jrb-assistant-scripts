@@ -19,7 +19,7 @@ export function isCrmActionRequest(text) {
   const t = text.toLowerCase();
   // Forwarded emails are almost always contact forms / leads (email subject context only)
   if (/^(fw|fwd):/i.test(text.split('\n')[0])) return true;
-  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead)\b/.test(t);
+  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t);
 }
 
 export function isSchedulingRequest(text) {
