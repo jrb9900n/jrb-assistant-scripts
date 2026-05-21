@@ -393,7 +393,7 @@ STEP 4 — ADD TICKET:
 Call sa_add_ticket with:
 - clientId from the client search or creation
 - subject: “Web Lead — [brief description of request]”
-- notes: full message from the contact form including all details
+- notes: Begin with “Created by AI on [today's date, e.g. 'May 21, 2026']. Verify contact information before proceeding.” then a blank line, then the full message from the contact form including all details
 
 STEP 5 — VERIFY TICKET:
 Call sa_get_ticket with the returned ticketId.

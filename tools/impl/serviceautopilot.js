@@ -237,14 +237,6 @@ export async function createClient({ firstName, lastName, companyName = '', addr
     throw new Error(`SA createClient failed: ${errors ? JSON.stringify(errors) : res.text?.slice(0, 300)}`);
   }
   logger.info('SA: client created', { id, name });
-
-  // Add AI creation note to the client timeline (guaranteed to be visible even if OfficeNote field not supported)
-  try {
-    await addNote({ clientId: id, noteText: aiNote });
-  } catch (noteErr) {
-    logger.warn('SA: could not add AI creation note to timeline', { id, err: noteErr.message });
-  }
-
   return { clientId: id, name };
 }
 
@@ -625,7 +617,7 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
       CategoryID:   null,
       TicketStatus: 0,
       EntityID:     details.customerJobId,
-      EntityType:   'Account',
+      EntityType:   'Ticket',
       DueDate:      dueDate ? new Date(dueDate).toISOString() : '',
       TicketDetail: {
         TicketEventType: ticketEventType,
