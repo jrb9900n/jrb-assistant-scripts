@@ -679,16 +679,51 @@ const SCHEDULING_TOOLS = [
   },
 ];
 
+const CARDDAV_TOOLS = [
+  {
+    name: 'carddav_provision',
+    description: 'Provision a CardDAV account for an employee so they can add JRB contacts (customers + vendors) to their phone\'s native Contacts app. Returns the server URL and token they need to set up the account on iOS or Android.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Employee M365 email address, e.g. michael@jrboehlke.com' },
+        name:  { type: 'string', description: 'Employee full name, e.g. "Michael Reardon"' },
+      },
+      required: ['email', 'name'],
+    },
+  },
+  {
+    name: 'carddav_revoke',
+    description: 'Revoke a departing employee\'s CardDAV access. Their phone will stop syncing JRB contacts on the next sync cycle.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Employee email address to revoke' },
+      },
+      required: ['email'],
+    },
+  },
+  {
+    name: 'carddav_list',
+    description: 'List all CardDAV credentials — who has access, whether it\'s active, and when they last synced.',
+    input_schema: {
+      type: 'object',
+      properties: {},
+      required: [],
+    },
+  },
+];
+
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
-  crm:        [...QB_TOOLS, ...SA_TOOLS, ...TEAMS_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...TEAMS_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
   scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...CARDDAV_TOOLS, ...TEAMS_TOOLS],
 };
 
 export function getTools(taskType) {
