@@ -93,6 +93,8 @@ $secrets = @{
     "MENARDS_REBATE_ZIP"             = Get-Secret "MENARDS_REBATE_ZIP"
     "MENARDS_REBATE_PHONE"           = Get-Secret "MENARDS_REBATE_PHONE"
     "MENARDS_REBATE_EMAIL"           = Get-Secret "MENARDS_REBATE_EMAIL"
+    # BTA Reporting weekly syncs
+    "GOOGLE_SHEET_ID"       = Get-Secret "GOOGLE_SHEET_ID"
     "CLAUDE_EXECUTE_SECRET" = Get-Secret "CLAUDE_EXECUTE_SECRET"
     "CLAUDE_MCP_TOKEN"      = Get-Secret "CLAUDE_EXECUTE_SECRET"
     "HAIKU_THRESHOLD"      = "500"
