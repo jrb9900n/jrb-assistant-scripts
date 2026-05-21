@@ -91,6 +91,29 @@ async function processNewPurchase(purchaseId) {
     return;
   }
 
+  // Reconcile with a Chase-alert stub created before QBO settled
+  const dayBefore = new Date(`${date}T12:00:00`); dayBefore.setDate(dayBefore.getDate() - 1);
+  const dayAfter  = new Date(`${date}T12:00:00`); dayAfter.setDate(dayAfter.getDate() + 1);
+  const { data: alertStub } = await supabase
+    .from('expense_reports')
+    .select('id, receipt_path, qbo_attachment_id')
+    .eq('card_last_four', cardLastFour)
+    .is('qbo_transaction_id', null)
+    .gte('transaction_date', dayBefore.toISOString().slice(0, 10))
+    .lte('transaction_date', dayAfter.toISOString().slice(0, 10))
+    .gte('amount', amount - 0.02)
+    .lte('amount', amount + 0.02)
+    .maybeSingle();
+
+  if (alertStub) {
+    await supabase.from('expense_reports').update({ qbo_transaction_id: purchaseId }).eq('id', alertStub.id);
+    if (alertStub.receipt_path && !alertStub.qbo_attachment_id) {
+      uploadReceiptToQboAsync(alertStub.id, purchaseId, alertStub.receipt_path);
+    }
+    logger.info('QBO purchase reconciled with Chase alert stub', { reportId: alertStub.id, purchaseId });
+    return;
+  }
+
   const { data: report, error } = await supabase
     .from('expense_reports')
     .insert({
@@ -403,6 +426,143 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
   });
 
   return true;
+}
+
+// ── Chase Transaction Alert Processing ────────────────────────
+
+/**
+ * Called by the email poller for every unread email before the michael-only filter.
+ * Detects forwarded/auto-forwarded Chase transaction alerts, creates an expense
+ * report stub immediately (days before QBO settles the charge), and sends the
+ * receipt request SMS.
+ *
+ * Returns true if handled as a Chase alert, false to fall through to normal processing.
+ *
+ * NOTE: Chase email formats vary. The parser handles the known patterns as of
+ * 2026-05-20. Update parseChaseAlert() once real Chase emails are observed.
+ */
+export async function processChaseAlert(email, { getEmail, sendEmail }) {
+  // Quick pre-filter — avoid fetching body for every email
+  const fromAddr = (email.from || '').toLowerCase();
+  const subject  = (email.subject || '').toLowerCase();
+
+  const isFromChase = /chase\.com/.test(fromAddr);
+  const subjectLooksLikeAlert = subject.includes('chase') &&
+    /alert|transaction|purchase|charge/.test(subject);
+
+  if (!isFromChase && !subjectLooksLikeAlert) return false;
+
+  // Fetch full body for parsing
+  const full = await getEmail({ email_id: email.id });
+  const bodyText = (full.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+  const searchText = `${email.subject || ''} ${bodyText}`;
+
+  const parsed = parseChaseAlert(searchText);
+  if (!parsed) {
+    logger.warn('Chase alert: could not parse transaction details — will need format update', { subject: email.subject });
+    return false;
+  }
+
+  const { cardLastFour, amount, merchant, transactionDate } = parsed;
+
+  const { data: card } = await supabase
+    .from('credit_cards')
+    .select('*')
+    .eq('last_four', cardLastFour)
+    .eq('is_active', true)
+    .maybeSingle();
+
+  if (!card) {
+    logger.warn('Chase alert: no active card found for last four', { cardLastFour, subject: email.subject });
+    return true; // handled — don't let it fall through to general email reply
+  }
+
+  // Dedup: existing report within ±1 day with same card + amount
+  const dayBefore = new Date(`${transactionDate}T12:00:00`); dayBefore.setDate(dayBefore.getDate() - 1);
+  const dayAfter  = new Date(`${transactionDate}T12:00:00`); dayAfter.setDate(dayAfter.getDate() + 1);
+  const { data: dup } = await supabase
+    .from('expense_reports')
+    .select('id')
+    .eq('card_last_four', cardLastFour)
+    .gte('transaction_date', dayBefore.toISOString().slice(0, 10))
+    .lte('transaction_date', dayAfter.toISOString().slice(0, 10))
+    .gte('amount', amount - 0.02)
+    .lte('amount', amount + 0.02)
+    .maybeSingle();
+
+  if (dup) {
+    logger.info('Chase alert: duplicate report already exists, skipping', { reportId: dup.id });
+    return true;
+  }
+
+  const { data: report, error } = await supabase
+    .from('expense_reports')
+    .insert({
+      card_last_four: cardLastFour,
+      employee_name: card.employee_name,
+      phone_number: card.phone_number,
+      sms_gateway: card.sms_gateway,
+      profile_id: card.profile_id ?? null,
+      amount,
+      vendor: merchant,
+      transaction_date: transactionDate,
+      status: 'pending_employee',
+    })
+    .select()
+    .single();
+
+  if (error) {
+    logger.error('Chase alert: failed to create expense report', { err: error.message });
+    return true;
+  }
+
+  if (card.sms_gateway) {
+    await sendExpenseSms(card.sms_gateway, { report, amount, vendor: merchant, date: transactionDate, cardLastFour });
+    await supabase.from('expense_reports').update({ sms_sent_at: new Date().toISOString() }).eq('id', report.id);
+  }
+
+  logger.info('Chase alert: expense report created', { reportId: report.id, employee: card.employee_name, merchant, amount });
+  return true;
+}
+
+function parseChaseAlert(text) {
+  // Card last four — "card ending in 3468", "card ending 3468", "ending in 3468"
+  const cardMatch = text.match(/(?:card\s+ending\s+(?:in\s+)?|ending\s+in\s+)(\d{4})/i);
+  if (!cardMatch) return null;
+  const cardLastFour = cardMatch[1];
+
+  // Amount — "$47.23", "$1,200.00"
+  const amountMatch = text.match(/\$\s*([\d,]+\.\d{2})/);
+  if (!amountMatch) return null;
+  const amount = parseFloat(amountMatch[1].replace(',', ''));
+
+  // Merchant — "at HOME DEPOT on", "at HOME DEPOT using", "at HOME DEPOT."
+  let merchant = 'Unknown Merchant';
+  const merchantPatterns = [
+    /\bat\s+([A-Z][A-Z0-9 &'.,#\-*]+?)\s+(?:on\s+\d|using\s+your|for\s+\$|\.|$)/i,
+    /transaction\s+at\s+(.+?)(?:\s+on\s+|\s+for\s+|\.|$)/i,
+    /purchase\s+at\s+(.+?)(?:\s+on\s+|\.|$)/i,
+  ];
+  for (const pat of merchantPatterns) {
+    const m = text.match(pat);
+    if (m && m[1].trim().length > 1) { merchant = m[1].trim(); break; }
+  }
+
+  // Date — "05/20/2026", "May 20, 2026", "May 20 2026"
+  let transactionDate = new Date().toISOString().slice(0, 10);
+  const datePatterns = [
+    /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/,
+    /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})\b/i,
+  ];
+  for (const pat of datePatterns) {
+    const m = text.match(pat);
+    if (m) {
+      const d = new Date(m[0]);
+      if (!isNaN(d.getTime())) { transactionDate = d.toISOString().slice(0, 10); break; }
+    }
+  }
+
+  return { cardLastFour, amount, merchant, transactionDate };
 }
 
 function parseCardAndAmount(text) {
