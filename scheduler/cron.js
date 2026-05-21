@@ -338,30 +338,74 @@ Do not write any code yet. Return only the reply text.`;
 
         if (isCrm) {
           logger.info(`Email poller: detected CRM/SA action request`, { subject: email.subject });
-          const crmTask = `You received an email from Michael. Execute the action he is requesting using your SA and CRM tools.
+          const crmTask = `You received an email from Michael with a new customer contact form or CRM request. Follow these steps exactly.
 
 Subject: “${email.subject}”
 Email body:
 ${body}
 
-Instructions:
-- If this is a forwarded contact form or new customer inquiry: search SA for the client by name (sa_search_clients). If not found, create them (sa_create_client with name, address, phone, email from the form). Then add a ticket (sa_add_ticket) summarizing the inquiry and any follow-up requested.
-- If Michael asks to create a ticket, estimate, job, or any SA record: do it now using your tools.
-- If Michael asks to look up a client, invoice, or balance: do it and report back.
+━━━ CONTACT FORM / NEW LEAD WORKFLOW ━━━
 
-TICKET VERIFICATION (required after any sa_add_ticket call):
-After creating a ticket, immediately call sa_get_ticket with the returned ticketId to verify it was saved in SA.
-- If sa_get_ticket returns the ticket: begin your reply with "TICKET CONFIRMED IN SA:" followed by the client name, subject, and ticket ID.
-- If sa_get_ticket returns null or fails: begin your reply with "WARNING — TICKET NOT VERIFIED:" and describe what was attempted. Michael should manually check SA.
+STEP 1 — PARSE CONTACT DETAILS:
+Extract every field present in the email body:
+- firstName, lastName (required)
+- companyName (only if this is clearly a business customer — look for LLC, Inc, Co., business name, etc. Omit for residential.)
+- address (full street address including number and street name — e.g. “1234 Oak St”)
+- city, state (2-letter abbreviation e.g. “WI”), zip
+- email, phone
+If a field is not in the form, omit it from the tool call.
 
-Always include: client name, SA IDs, and actions taken. Reply in plain text — no HTML needed.`;
+STEP 2 — SEARCH FOR EXISTING CLIENT:
+Call sa_search_clients using their last name. If a client with the same name or email already exists, do NOT create a duplicate — skip to STEP 4.
+
+STEP 3 — CREATE CLIENT (only if new):
+Call sa_create_client with all parsed fields.
+- Business: pass companyName (client name in SA will be the company name)
+- Individual: pass firstName and lastName only — client name will be “First Last”
+- Always pass address, city, state, zip as separate fields
+
+STEP 4 — ADD TICKET:
+Call sa_add_ticket with:
+- clientId from the client search or creation
+- subject: “Web Lead — [brief description of request]”
+- notes: full message from the contact form including all details
+
+STEP 5 — VERIFY TICKET:
+Call sa_get_ticket with the returned ticketId.
+- Returns object → ticket confirmed
+- Returns null → ticket not verified
+
+STEP 6 — COMPOSE REPLY:
+Return a well-formatted HTML reply. Use this structure:
+
+<h3>✅ TICKET CONFIRMED IN SA: [Client Name]</h3>
+(or <h3>⚠️ WARNING — TICKET NOT VERIFIED: [Client Name]</h3>)
+
+<table style=”border-collapse:collapse;width:100%;font-family:Arial,sans-serif;font-size:14px;”>
+  <tr><td style=”padding:6px 12px;font-weight:bold;width:160px;”>Client Name</td><td style=”padding:6px 12px;”>[name]</td></tr>
+  <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>SA Client ID</td><td style=”padding:6px 12px;”>[clientId]</td></tr>
+  <tr><td style=”padding:6px 12px;font-weight:bold;”>Address</td><td style=”padding:6px 12px;”>[address, city, state zip]</td></tr>
+  <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>Email</td><td style=”padding:6px 12px;”>[email]</td></tr>
+  <tr><td style=”padding:6px 12px;font-weight:bold;”>Phone</td><td style=”padding:6px 12px;”>[phone]</td></tr>
+  <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>Ticket ID</td><td style=”padding:6px 12px;”>[ticketId]</td></tr>
+  <tr><td style=”padding:6px 12px;font-weight:bold;”>Ticket Subject</td><td style=”padding:6px 12px;”>[subject]</td></tr>
+</table>
+
+<h4>Lead Message</h4>
+<p style=”background:#f9f9f9;padding:12px;border-left:3px solid #ccc;”>[brief summary of what they're asking for]</p>
+
+<p><em>Note: [anything Michael should manually verify, e.g. incomplete address, ambiguous business/residential]</em></p>
+
+━━━ OTHER SA ACTIONS ━━━
+- If Michael asks to create a ticket, estimate, job, or other SA record: do it now using your tools, then reply with a brief HTML summary.
+- If Michael asks to look up a client, invoice, or balance: do it and return the result in a readable format.`;
 
           const crmResult = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false });
           const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
           await sendEmail({
             to: [email.from],
             subject: `Re: ${email.subject}`,
-            body: `<p>${crmReply.replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
+            body: `<div style=”font-family:Arial,sans-serif;max-width:640px;”>${crmReply}</div><hr style=”margin:20px 0;”><p style=”color:#888;font-size:12px;”><em>Sent by JRB Executive Assistant</em></p>`,
           });
           logger.info(`Email poller: executed CRM action and replied to ${email.from}`);
           continue;

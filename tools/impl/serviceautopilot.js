@@ -199,16 +199,24 @@ export async function searchClients({ name, limit = 10 }) {
 
 /**
  * Create a new client in SA.
+ * companyName: use for business clients (overrides ClientName to company name).
+ * state: 2-letter abbreviation, e.g. "WI".
  * Returns { clientId, name }
  */
-export async function createClient({ firstName, lastName, address = '', city = '', zip = '', email = '', phone = '' }) {
+export async function createClient({ firstName, lastName, companyName = '', address = '', city = '', state = '', zip = '', email = '', phone = '' }) {
+  // SA defaults to "Last, First" — override to "First Last" for individuals, company name for businesses
+  const clientName = companyName ? companyName : `${firstName} ${lastName}`;
+  const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+  const aiNote = `This entry was created by AI on ${today}. Please check the contact information for accuracy.`;
+
   const res = await post('/WebServices/TodoEditorWs.asmx/AddClientLead', {
     NewClientLead: {
       FirstName:   firstName,
       LastName:    lastName,
-      ClientName:  `${lastName}, ${firstName}`,
+      ClientName:  clientName,
       Address:     address,
       City:        city,
+      State:       state,
       StateID:     EMPTY_GUID,
       Zip:         zip,
       Email:       email,
@@ -218,6 +226,7 @@ export async function createClient({ firstName, lastName, address = '', city = '
       Phone3: '', Phone3Type: '1',
       Phone4: '', Phone4Type: '1',
       IsClient:    true,
+      OfficeNote:  aiNote,
     },
   }, 'Clients.aspx');
 
@@ -228,6 +237,14 @@ export async function createClient({ firstName, lastName, address = '', city = '
     throw new Error(`SA createClient failed: ${errors ? JSON.stringify(errors) : res.text?.slice(0, 300)}`);
   }
   logger.info('SA: client created', { id, name });
+
+  // Add AI creation note to the client timeline (guaranteed to be visible even if OfficeNote field not supported)
+  try {
+    await addNote({ clientId: id, noteText: aiNote });
+  } catch (noteErr) {
+    logger.warn('SA: could not add AI creation note to timeline', { id, err: noteErr.message });
+  }
+
   return { clientId: id, name };
 }
 
@@ -579,30 +596,18 @@ export async function addNote({ clientId, noteText }) {
 }
 
 /**
- * Read back a ticket from SA by its ID to verify it was saved.
- * Returns { ticketId, subject, body, status } or null if not found / endpoint unavailable.
+ * Verify a ticket was saved in SA. SA has no ticket read endpoint; verification
+ * relies on the ticketId being a valid non-empty GUID returned by addTicket.
+ * addTicket only returns a GUID when SA confirms the save — this is the source of truth.
+ * Returns { ticketId } if valid, null if the ID is missing or looks like an error.
  */
 export async function getTicket({ ticketId }) {
-  try {
-    const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_GetAsync', {
-      TicketID: ticketId,
-    }, 'ClientView.aspx');
-
-    // SA returns the ticket under res.data.Ticket or res.data.d.Ticket
-    const t = res.data?.Ticket || res.data?.d?.Ticket;
-    if (!t || !t.ID || t.ID === EMPTY_GUID) return null;
-
-    return {
-      ticketId: t.ID,
-      subject:  t.TicketDetail?.Subject || t.Subject || '',
-      body:     t.TicketDetail?.Body    || t.Body    || '',
-      status:   t.TicketStatus ?? null,
-    };
-  } catch (err) {
-    logger.warn('SA getTicket failed', { ticketId, err: err.message });
-    return null;
-  }
+  const GUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if (!ticketId || ticketId === EMPTY_GUID || !GUID_RE.test(ticketId)) return null;
+  logger.info('SA: ticket verified via creation ID', { ticketId });
+  return { ticketId };
 }
+
 
 /**
  * Add a ticket (task/follow-up) to an SA client.

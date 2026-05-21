@@ -259,13 +259,16 @@ async function handleTeamsActivity(req, res) {
       ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true }));
 
     } else if (intent === 'crm') {
-      const crmTask = `You received a Teams message from Michael. Execute the action he is requesting using your SA and CRM tools.
+      const crmTask = `You received a Teams message from Michael. Execute the action he is requesting using your SA, CRM, and CardDAV tools.
 
 Message: "${userText}"
 
 - If this is a forwarded contact form or new customer inquiry: search SA for the client, create if not found, add a ticket.
 - If Michael asks to create a ticket, estimate, job, or SA record: do it now.
 - If Michael asks to look up a client, invoice, or balance: do it and report back.
+- If Michael asks to provision CardDAV for an employee: use carddav_provision with their email and name. Return the server URL, username, and token with iOS/Android setup instructions.
+- If Michael asks to revoke CardDAV for an employee: use carddav_revoke with their email.
+- If Michael asks to list CardDAV credentials: use carddav_list.
 - Always confirm what you did: client name, SA IDs, actions taken.`;
       ({ result } = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false }));
 
