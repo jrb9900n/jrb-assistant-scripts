@@ -19,6 +19,7 @@ import {
   handleOAuthRegister,
   handleOAuthWellKnown,
 } from '../mcp/oauth.js';
+import { classifyIntent } from './router.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -227,10 +228,60 @@ async function handleTeamsActivity(req, res) {
   // Persist conversation reference so we can send proactive messages later
   saveConversationRef(activity);
 
-  logger.info('Teams message', { text: userText.slice(0, 80) });
+  const intent = classifyIntent(userText);
+  logger.info('Teams message', { intent, text: userText.slice(0, 80) });
 
   try {
-    const { result } = await runAgent({ task: userText, taskType: 'general' });
+    let result;
+
+    if (intent === 'scheduling') {
+      // Use the scheduling system prompt keyed to this Teams conversation so
+      // draft state persists across multiple messages in the same conversation.
+      const sessionId = `teams-${activity.conversation.id}`;
+      let rulesBlock = '';
+      try {
+        const ctx = await buildContextBlock('scheduling');
+        if (ctx) rulesBlock = `\n\n${ctx}`;
+      } catch { /* non-fatal */ }
+
+      let draftContext = '';
+      try {
+        const { getScheduleDraft } = await import('../tools/impl/scheduling.js');
+        const draft = await getScheduleDraft({ session_id: sessionId });
+        if (draft) {
+          const preview = JSON.stringify(draft.schedule_data, null, 2).slice(0, 2000);
+          draftContext = `\n\n## Current Draft (ID: ${draft.id})\nDirective: ${draft.directive}\nWeek: ${draft.week_start || 'TBD'}\n\n${preview}`;
+        }
+      } catch { /* non-fatal */ }
+
+      const systemPrompt = buildSchedulingSystemPrompt(sessionId, null, draftContext, rulesBlock);
+      ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true }));
+
+    } else if (intent === 'crm') {
+      const crmTask = `You received a Teams message from Michael. Execute the action he is requesting using your SA and CRM tools.
+
+Message: "${userText}"
+
+- If this is a forwarded contact form or new customer inquiry: search SA for the client, create if not found, add a ticket.
+- If Michael asks to create a ticket, estimate, job, or SA record: do it now.
+- If Michael asks to look up a client, invoice, or balance: do it and report back.
+- Always confirm what you did: client name, SA IDs, actions taken.`;
+      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false }));
+
+    } else if (intent === 'dev') {
+      const devTask = `Michael sent this Teams message:\n\n"${userText}"\n\nFollow the github-dev skill workflow. Reply with a scope proposal:\n- Restate the goal in 2-3 sentences\n- List the files that will be created or changed\n- Identify which repo this belongs in\n- State any assumptions\n- Ask Michael to confirm before you proceed\n\nDo not write any code yet. Return only the reply text.`;
+      ({ result } = await runAgent({ task: devTask, taskType: 'code', saveContext: false }));
+
+    } else if (intent === 'dev_ambiguous') {
+      result = `Want to make sure I handle this correctly — are you asking me to build or write code, or looking for information/advice? Reply "yes, build it" and I'll put together a scope plan.`;
+
+    } else if (intent === 'report') {
+      ({ result } = await runAgent({ task: userText, taskType: 'report', saveContext: false }));
+
+    } else {
+      ({ result } = await runAgent({ task: userText, taskType: 'general' }));
+    }
+
     await replyToTeams(activity, result);
   } catch (err) {
     logger.error('Teams handler error', { err: err.message });

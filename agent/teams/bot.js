@@ -19,7 +19,7 @@ import {
   handleOAuthRegister,
   handleOAuthWellKnown,
 } from '../mcp/oauth.js';
-import { classifyIntent, isExplicitDevTask, isAmbiguousDevTask } from './router.js';
+import { classifyIntent } from './router.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -496,6 +496,37 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ status: 'ok', mcp: mcpHandler ? 'loaded' : 'not loaded', ts: new Date().toISOString() }));
+    return;
+  }
+
+  // ── Google Ads flag actions — proxy to Python webhook server on port 8765 ──
+  // Handles GET (approve/reject/comment form) and POST (comment submission).
+  // Exposed via the Cloudflare tunnel so buttons in email are true one-click links.
+  if (/^\/flag\/\d+\/(approve|reject|comment)\/[^/]+/i.test(url)) {
+    const target = `http://localhost:8765${req.url}`;
+    try {
+      const init = { method: req.method };
+      if (req.method === 'POST') {
+        let postBody = '';
+        req.on('data', d => postBody += d);
+        await new Promise(r => req.on('end', r));
+        init.body = postBody;
+        init.headers = {
+          'Content-Type': req.headers['content-type'] || 'application/x-www-form-urlencoded',
+          'Content-Length': String(Buffer.byteLength(postBody)),
+        };
+      }
+      const proxyRes = await fetch(target, init);
+      const respBody = await proxyRes.arrayBuffer();
+      res.writeHead(proxyRes.status, {
+        'Content-Type': proxyRes.headers.get('content-type') || 'text/html; charset=utf-8',
+      });
+      res.end(Buffer.from(respBody));
+    } catch (err) {
+      logger.warn('Ads webhook proxy failed', { err: err.message });
+      res.writeHead(502, { 'Content-Type': 'text/plain' });
+      res.end('Approval server temporarily unavailable. Try again in a moment.');
+    }
     return;
   }
 
