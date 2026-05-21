@@ -447,10 +447,12 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
   const subject  = (email.subject || '').toLowerCase();
 
   const isFromChase = /chase\.com/.test(fromAddr);
-  const subjectLooksLikeAlert = subject.includes('chase') &&
-    /alert|transaction|purchase|charge/.test(subject);
+  const subjectLooksLikeAlert = (subject.includes('chase') &&
+    /alert|transaction|purchase|charge/.test(subject)) ||
+    /chase.*\$[\d,]+\.\d{2}/.test(subject);
 
   if (!isFromChase && !subjectLooksLikeAlert) return false;
+
 
   // Fetch full body for parsing
   const full = await getEmail({ email_id: email.id });
