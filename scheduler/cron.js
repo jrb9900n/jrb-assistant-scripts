@@ -213,8 +213,13 @@ Instructions:
 - If this is a forwarded contact form or new customer inquiry: search SA for the client by name (sa_search_clients). If not found, create them (sa_create_client with name, address, phone, email from the form). Then add a ticket (sa_add_ticket) summarizing the inquiry and any follow-up requested.
 - If Michael asks to create a ticket, estimate, job, or any SA record: do it now using your tools.
 - If Michael asks to look up a client, invoice, or balance: do it and report back.
-- Always confirm what you did: client name, SA IDs, actions taken.
-- Reply in plain text — no HTML needed.`;
+
+TICKET VERIFICATION (required after any sa_add_ticket call):
+After creating a ticket, immediately call sa_get_ticket with the returned ticketId to verify it was saved in SA.
+- If sa_get_ticket returns the ticket: begin your reply with "TICKET CONFIRMED IN SA:" followed by the client name, subject, and ticket ID.
+- If sa_get_ticket returns null or fails: begin your reply with "WARNING — TICKET NOT VERIFIED:" and describe what was attempted. Michael should manually check SA.
+
+Always include: client name, SA IDs, and actions taken. Reply in plain text — no HTML needed.`;
 
           const crmResult = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false });
           const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';

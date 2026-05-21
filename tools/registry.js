@@ -607,6 +607,17 @@ const SA_TOOLS = [
       required: ['clientId', 'subject'],
     },
   },
+  {
+    name: 'sa_get_ticket',
+    description: 'Read back a ticket from Service Autopilot by its ID. Use immediately after sa_add_ticket to verify the ticket was saved. Returns ticket subject and status, or null if not found.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        ticketId: { type: 'string', description: 'Ticket ID (GUID) returned by sa_add_ticket' },
+      },
+      required: ['ticketId'],
+    },
+  },
 ];
 
 const SCHEDULING_TOOLS = [
