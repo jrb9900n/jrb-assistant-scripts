@@ -447,17 +447,22 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
   const subject  = (email.subject || '').toLowerCase();
 
   const isFromChase = /chase\.com/.test(fromAddr);
-  const subjectLooksLikeAlert = (subject.includes('chase') &&
-    /alert|transaction|purchase|charge/.test(subject)) ||
-    /chase.*\$[\d,]+\.\d{2}/.test(subject);
+  // Chase alert subjects don't always include "chase" — match "$X.XX ... transaction" too
+  const subjectLooksLikeAlert =
+    (subject.includes('chase') && /alert|transaction|purchase|charge/.test(subject)) ||
+    (/\$[\d,]+\.\d{2}/.test(subject) && subject.includes('transaction'));
 
   if (!isFromChase && !subjectLooksLikeAlert) return false;
-
 
   // Fetch full body for parsing
   const full = await getEmail({ email_id: email.id });
   const bodyText = (full.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
   const searchText = `${email.subject || ''} ${bodyText}`;
+
+  // Secondary guard: if not from Chase directly, body must confirm this is a Chase alert
+  if (!isFromChase && !/chase|card ending|ink business|sapphire|freedom/i.test(searchText)) {
+    return false;
+  }
 
   const parsed = parseChaseAlert(searchText);
   if (!parsed) {
