@@ -579,6 +579,32 @@ export async function addNote({ clientId, noteText }) {
 }
 
 /**
+ * Read back a ticket from SA by its ID to verify it was saved.
+ * Returns { ticketId, subject, body, status } or null if not found / endpoint unavailable.
+ */
+export async function getTicket({ ticketId }) {
+  try {
+    const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_GetAsync', {
+      TicketID: ticketId,
+    }, 'ClientView.aspx');
+
+    // SA returns the ticket under res.data.Ticket or res.data.d.Ticket
+    const t = res.data?.Ticket || res.data?.d?.Ticket;
+    if (!t || !t.ID || t.ID === EMPTY_GUID) return null;
+
+    return {
+      ticketId: t.ID,
+      subject:  t.TicketDetail?.Subject || t.Subject || '',
+      body:     t.TicketDetail?.Body    || t.Body    || '',
+      status:   t.TicketStatus ?? null,
+    };
+  } catch (err) {
+    logger.warn('SA getTicket failed', { ticketId, err: err.message });
+    return null;
+  }
+}
+
+/**
  * Add a ticket (task/follow-up) to an SA client.
  * ticketType: 'Task' | 'Call' | 'Email' | 'Note' (default 'Task')
  * Returns { ticketId, clientId }

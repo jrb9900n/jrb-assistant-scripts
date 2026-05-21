@@ -84,6 +84,7 @@ const HANDLERS = {
   sa_create_estimate:      (i) => sa.createEstimate(i),
   sa_create_job:           (i) => sa.createJob(i),
   sa_add_ticket:           (i) => sa.addTicket(i),
+  sa_get_ticket:           (i) => sa.getTicket(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),
