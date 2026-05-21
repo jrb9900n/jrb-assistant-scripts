@@ -123,6 +123,63 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 3 AM — full SA weekly pipeline (estimates, tickets, waiting list, lead matching, sheets)
+    schedule: '0 3 * * 1',
+    name: 'sa_weekly_sync',
+    run: () => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['weekly-sync.js'], {
+        cwd: 'C:\\Users\\Assistant\\BTA Reporting',
+        env: {
+          ...process.env,
+          FIELDOPS_SUPABASE_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 900_000,
+      });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', d => { out += d; });
+      child.stderr.on('data', d => { err += d; });
+      child.on('close', code => {
+        logger.info('sa_weekly_sync complete', { code, output: out.slice(-2000) });
+        if (err) logger.warn('sa_weekly_sync stderr', { stderr: err.slice(-1000) });
+        code === 0 ? resolve() : reject(new Error(`weekly-sync.js exited ${code}`));
+      });
+      child.on('error', reject);
+    }),
+  },
+  {
+    // Monday 4 AM — QB weekly revenue pull to Supabase (prior ISO week)
+    schedule: '0 4 * * 1',
+    name: 'qb_weekly_sync',
+    run: () => new Promise((resolve, reject) => {
+      const prev = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const jan1 = new Date(prev.getFullYear(), 0, 1);
+      const wn = Math.ceil((((prev - jan1) / 86400000) + jan1.getDay() + 1) / 7);
+      const prevWeek = `${prev.getFullYear()}-W${String(wn).padStart(2, '0')}`;
+      const child = spawn(process.execPath, ['qb-sync.js', `--week=${prevWeek}`], {
+        cwd: 'C:\\Users\\Assistant\\BTA Reporting',
+        env: {
+          ...process.env,
+          SUPABASE_URL: process.env.FLEETOPS_SUPABASE_URL,
+          SUPABASE_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 300_000,
+      });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', d => { out += d; });
+      child.stderr.on('data', d => { err += d; });
+      child.on('close', code => {
+        logger.info('qb_weekly_sync complete', { code, week: prevWeek, output: out.slice(-2000) });
+        if (err) logger.warn('qb_weekly_sync stderr', { stderr: err.slice(-1000) });
+        code === 0 ? resolve() : reject(new Error(`qb-sync.js exited ${code}`));
+      });
+      child.on('error', reject);
+    }),
+  },
+  {
     // 6 AM daily — overnight SA activity report emailed to Michael
     schedule: '0 6 * * *',
     name: 'overnight_sa_report',

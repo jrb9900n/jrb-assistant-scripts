@@ -329,8 +329,44 @@ All functions accept optional `userEmail` param — omit for `assistant@`, pass 
 
 ---
 
+## CardDAV Contact Server (built 2026-05-21)
+
+Replaces Outlook contact sync. Serves QBO customers + vendors as a read-only CardDAV addressbook at `https://agent.jrboehlke.com/carddav/`. Employees add it as a native Contacts account on iOS/Android — contacts appear in the phone dialer. Revoking a credential instantly cuts access; contacts disappear from the phone on the next sync.
+
+### How it works
+- Per-employee tokens stored in Supabase `carddav_credentials` table (jrb-assistant project)
+- QBO contacts fetched via QB API and cached 2 hours; cache refreshes on next sync request
+- vCard 3.0 format; UID format `JRB-CUSTOMER-{Id}@jrboehlke.com` / `JRB-VENDOR-{Id}@jrboehlke.com`
+- CATEGORIES field = `JRB Customer` or `JRB Vendor` (creates groups on iOS)
+
+### Setup on iOS
+Settings → Contacts → Accounts → Add Account → Other → Add CardDAV Account
+- Server: `https://agent.jrboehlke.com/carddav/`
+- User Name: `[employee email]`
+- Password: `[token from carddav_provision]`
+
+### Setup on Android
+Open Contacts → Settings → Add account → Other → CardDAV (same credentials)
+
+### Agent tools (crm + general taskTypes)
+- `carddav_provision` — creates/rotates token for an employee; returns setup instructions
+- `carddav_revoke` — deactivates a credential; employee loses access on next sync
+- `carddav_list` — shows all credentials, active status, and last sync time
+
+### Key file
+- `tools/impl/carddav.js` — CardDAV handler + credential management
+- Routes added to `teams/bot.js` BEFORE the CORS OPTIONS handler (CardDAV has its own OPTIONS)
+
+### Supabase (jrb-assistant — znpahinyplccdyoekfeo)
+Table: `carddav_credentials` — columns: `email`, `name`, `token`, `active`, `created_at`, `last_used`
+
+### Security note
+Remove the old `agent/delete-outlook-contacts.mjs` one-off script once this session is done.
+
+---
+
 ## Supabase (jrb-assistant project — znpahinyplccdyoekfeo)
-Key tables: `rules` (agent rules/feedback loop), `knowledge_log` (observations), `memory` (session summaries), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller), `email_catalog` (inbox audit trail)
+Key tables: `rules` (agent rules/feedback loop), `knowledge_log` (observations), `memory` (session summaries), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller), `email_catalog` (inbox audit trail), `carddav_credentials` (CardDAV access tokens)
 
 ---
 
