@@ -278,7 +278,7 @@ ${responses}
 // ── Credential management helpers (called from agent tools) ───
 
 export async function provisionCredential({ email, name }) {
-  const token = crypto.randomBytes(24).toString('base64url');
+  const token = crypto.randomBytes(9).toString('base64url'); // 12 chars, easier to type on phone
   const { data, error } = await supabase
     .from('carddav_credentials')
     .upsert({ email: email.toLowerCase(), name, token, active: true }, { onConflict: 'email' })
