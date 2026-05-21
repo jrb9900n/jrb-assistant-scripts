@@ -84,7 +84,8 @@ const HANDLERS = {
   sa_search_service_types: (i) => sa.searchServiceTypes(i),
   sa_create_estimate:      (i) => sa.createEstimate(i),
   sa_create_job:           (i) => sa.createJob(i),
-  sa_add_ticket:           (i) => sa.addTicket(i),
+  sa_add_ticket:           ({ notes, ...rest }) => sa.addTicket({ ...rest, body: notes }),
+  sa_get_ticket:           (i) => sa.getTicket(i),
 
   // CardDAV
   carddav_provision:    (i) => provisionCredential(i),

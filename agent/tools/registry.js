@@ -507,17 +507,19 @@ const SA_TOOLS = [
   },
   {
     name: 'sa_create_client',
-    description: 'Create a new client record in Service Autopilot.',
+    description: 'Create a new client record in Service Autopilot. For business customers, pass companyName (it becomes the SA client name). For individuals, pass firstName + lastName (client name will be "First Last"). Always pass all address fields separately.',
     input_schema: {
       type: 'object',
       properties: {
-        firstName: { type: 'string', description: 'First name' },
-        lastName:  { type: 'string', description: 'Last name' },
-        address:   { type: 'string', description: 'Street address' },
-        city:      { type: 'string', description: 'City' },
-        zip:       { type: 'string', description: 'ZIP code' },
-        email:     { type: 'string', description: 'Email address' },
-        phone:     { type: 'string', description: 'Primary phone number' },
+        firstName:   { type: 'string', description: 'Contact first name' },
+        lastName:    { type: 'string', description: 'Contact last name' },
+        companyName: { type: 'string', description: 'Company/business name — only pass for business customers. Omit for residential.' },
+        address:     { type: 'string', description: 'Street address line 1 (number + street name)' },
+        city:        { type: 'string', description: 'City' },
+        state:       { type: 'string', description: '2-letter state abbreviation, e.g. WI' },
+        zip:         { type: 'string', description: 'ZIP code' },
+        email:       { type: 'string', description: 'Email address' },
+        phone:       { type: 'string', description: 'Primary phone number' },
       },
       required: ['firstName', 'lastName'],
     },
@@ -605,6 +607,17 @@ const SA_TOOLS = [
         dueDate:  { type: 'string', description: 'Optional due date ISO 8601 (YYYY-MM-DD)' },
       },
       required: ['clientId', 'subject'],
+    },
+  },
+  {
+    name: 'sa_get_ticket',
+    description: 'Verify a ticket was saved in Service Autopilot. Call immediately after sa_add_ticket with the returned ticketId. Returns { ticketId } if the ID is confirmed valid, or null if missing/invalid.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        ticketId: { type: 'string', description: 'Ticket ID (GUID) returned by sa_add_ticket' },
+      },
+      required: ['ticketId'],
     },
   },
 ];
