@@ -276,7 +276,7 @@ Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users
 ## Credentials
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
-Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~July 2026 — calendar reminder set), `GITHUB_TOKEN` (expires every 90 days), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
+Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
 
 Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 
@@ -309,7 +309,7 @@ All functions accept optional `userEmail` param — omit for `assistant@`, pass 
 `email_catalog` table — idempotent upsert on `message_id`. Columns: mailbox, subject, from_address, category, action_taken, folder, thread_id, snippet, etc.
 
 ### Azure app permissions (Application, admin-consented)
-`Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`
+`Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`, `Contacts.ReadWrite`
 
 ### SharePoint gotchas
 - Graph Search API requires `region: 'NAM'` when using Application permissions
