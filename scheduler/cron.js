@@ -50,13 +50,31 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 7 AM — prior week QBO AR/payment summary to Michael
     schedule: '0 7 * * 1',
     name: 'weekly_crm_report',
-    run: () => runAgent({
-      task: 'Pull HubSpot deals data. Identify new deals, deals moved to next stage, deals at risk, deals closed. Pull QuickBooks outstanding invoices and payments. Write executive summary. Save to OneDrive at /Agent Reports/Weekly CRM/YYYY-WW.md',
-      taskType: 'report',
-      saveContext: true,
-    }),
+    run: async () => {
+      const { sendEmail } = await import('../tools/impl/m365.js');
+      const d = new Date();
+      const dayNum = d.getUTCDay() || 7;
+      const thu = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 4 - dayNum));
+      const yearStart = new Date(Date.UTC(thu.getUTCFullYear(), 0, 1));
+      const weekNum = Math.ceil((((thu - yearStart) / 86400000) + 1) / 7);
+      const weekLabel = `${thu.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+
+      const { result: reportContent } = await runAgent({
+        task: `Pull QuickBooks data for the prior week. Include: outstanding invoices (total AR, overdue breakdown), payments received, any new customers, and top open balances. Write a concise executive summary. Save to OneDrive at /Agent Reports/Weekly CRM/${weekLabel}.md. Return the full report as plain text. Do NOT send a Teams message.`,
+        taskType: 'report',
+        saveContext: true,
+      });
+
+      await sendEmail({
+        to: ['michael@jrboehlke.com'],
+        subject: `Weekly Finance Report — ${weekLabel}`,
+        body: `<p>${(reportContent ?? 'Report generated — see OneDrive for full details.').replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
+      });
+      logger.info('Weekly CRM report sent', { week: weekLabel });
+    },
   },
   {
     schedule: '0 9 * * 3,5',
@@ -75,6 +93,22 @@ const SCHEDULED_TASKS = [
       const { runContactsSync } = await import('../tools/impl/contacts-sync.js');
       const result = await runContactsSync();
       logger.info('QBO contacts sync complete', { succeeded: result.succeeded, failed: result.failed });
+    },
+  },
+  {
+    // 6 AM daily — overnight SA activity report emailed to Michael
+    schedule: '0 6 * * *',
+    name: 'overnight_sa_report',
+    run: async () => {
+      const { generateOvernightReport } = await import('../tools/impl/overnight-report.js');
+      const { sendEmail }               = await import('../tools/impl/m365.js');
+      const report = await generateOvernightReport();
+      await sendEmail({
+        to:      ['michael@jrboehlke.com'],
+        subject: report.subject,
+        body:    report.body,
+      });
+      logger.info('overnight_sa_report: sent', { subject: report.subject });
     },
   },
   {
