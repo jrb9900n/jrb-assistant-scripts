@@ -87,17 +87,18 @@ tunnel.config.cjs      — pm2 config for Cloudflare tunnel
 ## How to Start the Agent
 
 ```powershell
-# Start tunnel
-pm2 start "C:\Users\Assistant\JRBAgent\agent\tunnel.config.cjs"
+# Start tunnel (Task Scheduler manages this — use only if cloudflared is down)
+Start-ScheduledTask -TaskName "JRB Cloudflare Tunnel"
+# Tunnel logs: C:\Users\Assistant\.cloudflared\tunnel.log (written on watchdog-triggered restarts)
 
 # Start Teams bot
 Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
 
 # Run a CLI test task
 powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1" cli "your task here"
-
-# Note: pm2 restart all has EPERM in Claude Code context — use Start-Process with the launcher script instead
 ```
+
+> **Note:** PM2 is no longer used. The tunnel, Teams bot, and scheduler are managed by Windows Task Scheduler tasks ("JRB Cloudflare Tunnel", "JRB Teams Bot", "JRB Scheduler"). A "JRB Cloudflare Watchdog" task runs every 5 minutes to restart cloudflared if it crashes.
 
 ---
 
@@ -129,6 +130,46 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 ## Open Issues / Current Priorities
 
 *(No open issues as of 2026-05-21)*
+
+---
+
+## AuditMatchingEngine (migrated 2026-05-21)
+
+Standalone financial reconciliation engine at `C:\Users\Assistant\AuditMatchingEngine\`.
+Scrapes SA invoices/payments via Playwright, downloads QB data via API, runs 3-tier matching.
+
+### Run via launcher (always use ame-run.ps1 — injects creds from Credential Manager)
+```powershell
+# Pre-flight check
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" setup
+
+# Sync SA (invoices + payments + payment applications)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" sync:sa
+
+# Sync QB (invoices + payments)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" sync:qb
+
+# Run matching engine
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" match
+
+# Full run (sync all + match)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" run:full
+```
+
+### Supabase (fleetops — mzywmgesulyalevtzudw)
+Tables: `sa_invoices`, `sa_payments`, `sa_payment_applications`, `qb_invoices`, `qb_payments`, `audit_matches`
+Data as of 2026-05-21: 8,517 SA invoices · 6,091 SA payments · 11,535 applications · 8,349 QB invoices · 8,368 matches
+
+### Credentials
+- Supabase: uses `FLEETOPS_SUPABASE_SERVICE_KEY` from Credential Manager (same as expense system)
+- QB: uses `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` from Credential Manager (same as JRBAgent)
+- SA: uses `SA_EMAIL`, `SA_PASSWORD` from Credential Manager
+- Do NOT edit `.env` QB/Supabase values — they say INJECTED_BY_LAUNCHER on purpose
+
+### Note on the weekly audit cron
+The `audit_runs` / `audit_issues` tables (added 2026-05-20) are separate from the AME tables.
+The JRBAgent weekly cron checks for high-level discrepancies; the AME does the deep invoice-level match.
+Both live in the fleetops Supabase project.
 
 ## Deployment Note — teams/bot.js
 
