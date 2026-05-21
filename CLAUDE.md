@@ -87,17 +87,18 @@ tunnel.config.cjs      — pm2 config for Cloudflare tunnel
 ## How to Start the Agent
 
 ```powershell
-# Start tunnel
-pm2 start "C:\Users\Assistant\JRBAgent\agent\tunnel.config.cjs"
+# Start tunnel (Task Scheduler manages this — use only if cloudflared is down)
+Start-ScheduledTask -TaskName "JRB Cloudflare Tunnel"
+# Tunnel logs: C:\Users\Assistant\.cloudflared\tunnel.log (written on watchdog-triggered restarts)
 
 # Start Teams bot
 Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
 
 # Run a CLI test task
 powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1" cli "your task here"
-
-# Note: pm2 restart all has EPERM in Claude Code context — use Start-Process with the launcher script instead
 ```
+
+> **Note:** PM2 is no longer used. The tunnel, Teams bot, and scheduler are managed by Windows Task Scheduler tasks ("JRB Cloudflare Tunnel", "JRB Teams Bot", "JRB Scheduler"). A "JRB Cloudflare Watchdog" task runs every 5 minutes to restart cloudflared if it crashes.
 
 ---
 
@@ -128,7 +129,36 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 
 ## Open Issues / Current Priorities
 
-*(No open issues as of 2026-05-20)*
+*(No open issues as of 2026-05-21)*
+
+---
+
+## Overnight SA Report (built 2026-05-21)
+
+Daily HTML email to michael@jrboehlke.com at 6 AM with SA activity from the prior day.
+
+### Report sections
+1. **Jobs Accepted Yesterday** — Won estimates first seen since prior 6 AM run, sorted by amount
+2. **Accepted — Awaiting Waiting List** — persistent day-over-day; auto-resolves when client appears in `sa_waiting_list`; shows days-since-won and pipeline total
+3. **Estimates Sent Yesterday** — Sent-stage estimates, QuoteDate = yesterday, sorted by amount
+4. **Aging Estimates** — Sent 7–60 days ago, no acceptance (follow-up candidates)
+5. **Today's Dispatch** — job count + crew from `sa_jobs` for today's date
+
+### Key files
+- `tools/impl/overnight-report.js` — report generation, Supabase tracking, HTML email
+- `tools/impl/serviceautopilot.js` — added `getEstimateList({ dateFrom, dateTo, stages, max })` read function
+- `scheduler/cron.js` — `overnight_sa_report` task at `0 6 * * *`
+
+### Supabase (fleetops — mzywmgesulyalevtzudw)
+New table: `sa_accepted_estimates` — tracks Won estimates for day-over-day reporting.
+- `estimate_id` PK, `client_name`, `client_id`, `address`, `sales_rep`, `service_type`, `amount`, `quote_date`
+- `first_seen_at` — when first observed as Won (used for "accepted yesterday" logic)
+- `resolved_at` / `resolved_reason` — set when client appears in `sa_waiting_list`
+
+### Notes
+- Bootstraps on first real cron run: all Won estimates from last 60 days inserted with `first_seen_at = now()`. "Accepted yesterday" is empty on day one, accurate from day two.
+- Uses `Promise.allSettled` — a failed SA section (e.g., browser login timeout) does not block the email.
+- SA estimate queries use `puppeteer-core` browser session (same as other SA tools). Sections 1–4 require a live SA login; section 5 reads Supabase only.
 
 ## Deployment Note — teams/bot.js
 
