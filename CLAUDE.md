@@ -128,7 +128,21 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 
 ## Open Issues / Current Priorities
 
-*(No open issues as of 2026-05-18)*
+*(No open issues as of 2026-05-20)*
+
+---
+
+## Deployment Note — teams/bot.js
+
+The git repo tracks **both** `teams/bot.js` (repo root) and `agent/teams/bot.js`. The launcher loads `agent/teams/bot.js`.
+
+**Critical rule:** Any PR that touches either file must update both in the same commit. If you update only one, the manual copy step below will silently wipe features present only in the other file. (This happened 2026-05-20: PR #26 updated only the root, the copy overwrote intent routing added in PR #25.)
+
+After any `git pull`, copy the root file to the live location:
+```powershell
+Copy-Item "C:\Users\Assistant\JRBAgent\teams\bot.js" "C:\Users\Assistant\JRBAgent\agent\teams\bot.js" -Force
+```
+This copy is safe only when both files were already kept in sync in the PR. Then restart the agent.
 
 ---
 
@@ -244,8 +258,37 @@ Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TE
 
 ---
 
+## Inbox Management System (built 2026-05-18)
+
+Multi-mailbox email catalog, calendar r/w, and SharePoint/OneDrive access for both `assistant@jrboehlke.com` and `michael@jrboehlke.com`.
+
+### New tools in m365.js
+- `listMailFolders`, `createMailFolder`, `moveEmail` — inbox organization
+- `searchEmails` — full-text + filter search, any mailbox
+- `catalogEmail`, `getEmailCatalog` — Supabase-backed persistent email log
+- `listCalendarEvents`, `updateCalendarEvent`, `deleteCalendarEvent` — calendar r/w
+- `searchSharePoint`, `readSharePointFile`, `listSharePointFolder`, `listSharePointSites`
+
+All functions accept optional `userEmail` param — omit for `assistant@`, pass `michael@jrboehlke.com` for Michael's mailbox/calendar.
+
+### Skill
+`agent/skills/definitions/inbox-management.md` — category taxonomy, folder structure, processing workflow
+
+### Supabase (jrb-assistant — znpahinyplccdyoekfeo)
+`email_catalog` table — idempotent upsert on `message_id`. Columns: mailbox, subject, from_address, category, action_taken, folder, thread_id, snippet, etc.
+
+### Azure app permissions (Application, admin-consented)
+`Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`
+
+### SharePoint gotchas
+- Graph Search API requires `region: 'NAM'` when using Application permissions
+- Only `driveItem` entity type works with `Files.ReadWrite.All`; `listItem` needs `Sites.Read.All`
+- `listSharePointSites` (`GET /sites?search=*`) requires `Sites.Read.All` specifically
+
+---
+
 ## Supabase (jrb-assistant project — znpahinyplccdyoekfeo)
-Key tables: `rules` (agent rules/feedback loop), `knowledge_log` (observations), `memory` (session summaries), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller)
+Key tables: `rules` (agent rules/feedback loop), `knowledge_log` (observations), `memory` (session summaries), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller), `email_catalog` (inbox audit trail)
 
 ---
 
