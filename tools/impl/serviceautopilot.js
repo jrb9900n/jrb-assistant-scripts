@@ -10,6 +10,44 @@ const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
 const EDGE_PATH  = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
 const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 
+// State abbreviation → SA internal GUID (from GetStateList endpoint)
+const STATE_IDS = {
+  AK: '6f5d3313-ef62-4c63-bb58-718f8a8b7f74', AL: '33e6414e-8a1d-43a7-ae21-7eff401809bc',
+  AR: '999f8d96-e314-4c5f-8725-680f5b785f0a', AZ: '3c56a8dc-0f7e-4595-bc55-4d79f3d5340c',
+  CA: 'e94bceff-6c60-40dd-972e-1fa49d9e9f61', CO: '5ad7017c-8816-40e1-bb03-2fecf9285476',
+  CT: 'fa8f172b-3067-4d81-9c40-a49ee9517e94', DC: 'bb52a6b8-c16f-4964-95e4-4436066b1aa1',
+  DE: '359abdcc-2d33-4f8f-af80-e3835948f2ea', FL: '3ea93761-97d7-46af-8fc9-6fdbd44ffd0b',
+  GA: 'efacc539-cce0-416c-89c8-674f168d83fb', HI: '81f3dc53-2b16-4f93-922d-3ee7c88b9a8c',
+  IA: 'e158f4f9-8b88-4190-b0e9-7bb2524c5ba9', ID: 'd50aa8a0-5043-4cc8-b7fe-f6276f043cde',
+  IL: 'd69c93c3-6850-402d-90c2-deed1e9ca73e', IN: '828e210f-ecfa-4f1d-b2d6-67731b3bcce8',
+  KS: '3ebfac96-d522-4653-b022-edcb993f356b', KY: 'e4761e4a-7cfe-4215-a4ab-33acbaf95538',
+  LA: '3ade1946-3ba9-4905-ad12-4759ee51094a', MA: 'af4039b2-bf71-4570-9a0e-1a48db3b1695',
+  MD: 'b53877bf-f90f-472d-b49f-24f554db2a6a', ME: '3ae7aa48-d0d7-49e8-ad85-aedf09518113',
+  MI: '65d3d984-6a77-45c5-9a3b-c5ab78490a74', MN: '98494a30-d613-45e5-9fa5-b8212c1ab3cd',
+  MO: '7faf41e4-0a7c-434e-8261-1e11f9b0e0e7', MS: '09982d5f-ad46-46bf-ac8b-c98648ef25aa',
+  MT: 'd2dafcc9-bfd4-4b97-ae0f-c112420748b8', NC: '3fb0dc25-e9ec-4d77-82b6-e0682b3f6fdb',
+  ND: '7aa42c0a-b045-4059-9010-f3eb1a77bff3', NE: '8796b587-d72a-4e10-a9e4-0eb9b4219e77',
+  NH: '07a08758-437d-4be9-8c76-3730aa9fa3ae', NJ: 'ec989a9d-3eee-4ec7-a536-d4c60c7c1443',
+  NM: '1facfd3c-b234-4096-b1e4-cc86349d2244', NV: 'e5114a31-090f-46c6-932c-d50862cacd58',
+  NY: 'fe66fd8d-425d-4a9f-8fc6-8073c6a69836', OH: '4bd2fdbd-e9d4-4dc9-aff8-d60a6399c417',
+  OK: '56e4626a-f4b0-4690-b7da-c727db552203', OR: 'a8ad98bb-9784-4409-8516-40a7d103d8ac',
+  PA: '533bfd24-3db3-483b-ad22-a8dc1b57b456', RI: '8d663ba2-37e6-4191-86bb-9841bde8321e',
+  SC: '13aa12c7-a770-4bf0-a070-9d1fcfcf0954', SD: '1d3ef3a3-16b2-4d7a-862c-3f18c4decd3f',
+  TN: 'bc4fc1b0-2be9-4c0c-967f-bc908f4881f9', TX: '247dc0a4-2f1d-473c-b27f-96c7e5503939',
+  UT: '13380a63-fba6-4392-943e-8b40cbe0ad07', VA: 'e532a8a9-351e-4ec8-bcb9-4a49b6ce4a94',
+  VT: 'd03a2e8b-f5b9-4213-bf04-d52aa28a375f', WA: '57f6a2e9-0411-44ae-9ccb-3cd11015a1b7',
+  WI: 'ce81d562-a057-4d48-bd07-b4b70795dea8', WV: 'b85db182-b124-4a02-bac4-f21b208ae043',
+  WY: '90f7e575-9148-4ade-8890-57fcc9fb8d77',
+};
+
+// SA ticket category IDs (from TicketEdit_TicketCategoryDropdown_GetByCompany)
+const TICKET_CATEGORIES = {
+  OTHER:            'e74cbced-0bf3-43ef-9fee-f7564af541da',
+  ESTIMATE:         '13ea0f69-bb00-42a3-af41-7c4ee9737a0f',
+  SCHEDULE_SERVICE: '35d51355-5fe7-4ccb-ab7b-7a48fe42980c',
+  ACCOUNT_ISSUE:    '9fc6647e-0f19-4b30-8c5f-00bdf75b5938',
+};
+
 const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 let _sessionCookies = null;
@@ -204,29 +242,37 @@ export async function searchClients({ name, limit = 10 }) {
  * Returns { clientId, name }
  */
 export async function createClient({ firstName, lastName, companyName = '', address = '', city = '', state = '', zip = '', email = '', phone = '' }) {
-  // SA defaults to "Last, First" — override to "First Last" for individuals, company name for businesses
   const clientName = companyName ? companyName : `${firstName} ${lastName}`;
+  const stateAbbr = (state || 'WI').toUpperCase();
+  const stateId   = STATE_IDS[stateAbbr] || STATE_IDS['WI'];
   const today = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
   const aiNote = `This entry was created by AI on ${today}. Please check the contact information for accuracy.`;
 
   const res = await post('/WebServices/TodoEditorWs.asmx/AddClientLead', {
     NewClientLead: {
-      FirstName:   firstName,
-      LastName:    lastName,
-      ClientName:  clientName,
-      Address:     address,
-      City:        city,
-      State:       state,
-      StateID:     EMPTY_GUID,
-      Zip:         zip,
-      Email:       email,
-      Phone1:      phone,
-      Phone1Type:  '1',
+      FirstName:      firstName,
+      LastName:       lastName,
+      ClientName:     clientName,
+      Address:        address,
+      City:           city,
+      State:          stateAbbr,
+      StateID:        stateId,
+      Zip:            zip,
+      Email:          email,
+      Phone1:         phone,
+      Phone1Type:     '1',
       Phone2: '', Phone2Type: '1',
       Phone3: '', Phone3Type: '1',
       Phone4: '', Phone4Type: '1',
-      IsClient:    true,
-      OfficeNote:  aiNote,
+      IsClient:       true,
+      OfficeNotes:    aiNote,
+      // Mirror primary address to billing address
+      BillingAddress1: address,
+      BillingAddress2: '',
+      BillingCity:     city,
+      BillingState:    stateAbbr,
+      BillingStateID:  stateId,
+      BillingZip:      zip,
     },
   }, 'Clients.aspx');
 
@@ -614,7 +660,7 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
 
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
-      CategoryID:   null,
+      CategoryID:   TICKET_CATEGORIES.OTHER,
       TicketStatus: 0,
       EntityID:     details.customerJobId,
       EntityType:   'Ticket',
