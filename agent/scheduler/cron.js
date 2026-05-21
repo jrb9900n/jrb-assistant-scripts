@@ -242,10 +242,21 @@ const SCHEDULED_TASKS = [
       }
       try {
       const { listEmails, getEmail, sendEmail, markEmailRead, listEmailAttachments, getEmailAttachmentBytes } = await import('../tools/impl/m365.js');
-      const { processEmailedReceipt } = await import('../tools/impl/expense.js');
+      const { processEmailedReceipt, processChaseAlert } = await import('../tools/impl/expense.js');
       const emails = await listEmails({ folder: 'Inbox', limit: 10, unread_only: true });
 
       for (const email of emails) {
+        // ── Chase transaction alert check (before receipt check and michael-only filter) ──
+        try {
+          const chaseHandled = await processChaseAlert(email, { getEmail, sendEmail });
+          if (chaseHandled) {
+            await markEmailRead({ email_id: email.id });
+            continue;
+          }
+        } catch (err) {
+          logger.warn('Chase alert check failed', { err: err.message, from: email.from });
+        }
+
         // ── Receipt email check (runs before michael-only filter) ──
         try {
           const handled = await processEmailedReceipt(email, {

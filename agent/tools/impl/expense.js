@@ -447,10 +447,14 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
   const subject  = (email.subject || '').toLowerCase();
 
   const isFromChase = /chase\.com/.test(fromAddr);
-  const subjectLooksLikeAlert = subject.includes('chase') &&
-    /alert|transaction|purchase|charge/.test(subject);
+  const subjectLooksLikeAlert = (subject.includes('chase') &&
+    /alert|transaction|purchase|charge/.test(subject)) ||
+    /chase.*\$[\d,]+\.\d{2}/.test(subject);
 
   if (!isFromChase && !subjectLooksLikeAlert) return false;
+
+  // If this was forwarded (not directly from Chase), reply to the forwarder
+  const replyTo = isFromChase ? null : (email.from || null);
 
   // Fetch full body for parsing
   const full = await getEmail({ email_id: email.id });
@@ -522,6 +526,17 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
   }
 
   logger.info('Chase alert: expense report created', { reportId: report.id, employee: card.employee_name, merchant, amount });
+
+  if (replyTo) {
+    const fmtAmount = `$${Number(amount).toFixed(2)}`;
+    const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
+    await sendEmail({
+      to: [replyTo],
+      subject: `Re: ${email.subject}`,
+      body: `<p>Chase alert received — expense report created for <strong>${fmtAmount} at ${merchant}</strong> on card ending ${cardLastFour}.</p><p>Receipt request sent via text. <a href="${portalUrl}">View expense report →</a></p><p><em>— JRB Executive Assistant</em></p>`,
+    }).catch(err => logger.warn('Chase alert: confirmation reply failed', { err: err.message }));
+  }
+
   return true;
 }
 
