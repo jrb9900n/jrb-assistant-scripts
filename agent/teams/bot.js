@@ -12,6 +12,7 @@ import { listSkills } from '../skills/library.js';
 import { logger } from '../core/logger.js';
 import { buildContextBlock } from '../tools/impl/feedback.js';
 import { saveConversationRef, sendProactiveMessage } from './notify.js';
+import { handleCardDAV } from '../tools/impl/carddav.js';
 import {
   handleOAuthAuthorize,
   handleOAuthApprove,
@@ -372,13 +373,52 @@ async function loadMcpHandler() {
 }
 
 const server = http.createServer(async (req, res) => {
+  const url = req.url?.split('?')[0];
+
+  // CardDAV — handle before CORS (CardDAV has its own OPTIONS/auth)
+  if (url?.startsWith('/carddav')) {
+    const chunks = [];
+    req.on('data', d => chunks.push(d));
+    await new Promise(r => req.on('end', r));
+    const bodyBuf = Buffer.concat(chunks);
+
+    // Minimal Express-style adapter
+    const fakeReq = {
+      method: req.method,
+      path: url,
+      headers: req.headers,
+      body: bodyBuf,
+    };
+    const headers = {};
+    const fakeRes = {
+      _status: 200,
+      set: (k, v) => { headers[k] = v; return fakeRes; },
+      status: (s) => { fakeRes._status = s; return fakeRes; },
+      send: (body) => {
+        res.writeHead(fakeRes._status, headers);
+        res.end(body);
+      },
+      redirect: (code, loc) => {
+        res.writeHead(code, { Location: loc });
+        res.end();
+      },
+    };
+
+    try {
+      await handleCardDAV(fakeReq, fakeRes);
+    } catch (err) {
+      logger.error('CardDAV error', { err: err.message });
+      res.writeHead(500);
+      res.end('Internal Server Error');
+    }
+    return;
+  }
+
   // CORS preflight
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Execute-Secret, mcp-session-id');
   if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
-
-  const url = req.url?.split('?')[0];
 
   // ── OAuth 2.0 endpoints (required by Claude.ai custom connector) ──────────
   if (req.method === 'GET' && url === '/.well-known/oauth-authorization-server') {
