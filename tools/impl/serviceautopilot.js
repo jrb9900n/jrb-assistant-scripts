@@ -640,3 +640,41 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   logger.info('SA: ticket created', { ticketId, clientId, ticketType });
   return { ticketId, clientId };
 }
+
+/**
+ * Query the SA estimate list for a date range and/or stage filter.
+ * stages: array of 'Draft' | 'Sent' | 'Won' | 'Lost'
+ * dateFrom / dateTo: JS Date objects (filter on QuoteDate)
+ * Returns raw estimate objects from the BFF response.
+ */
+export async function getEstimateList({ dateFrom, dateTo, stages, max = 500 } = {}) {
+  const filterTypes = [];
+
+  if (dateFrom && dateTo) {
+    filterTypes.push({
+      ScreenViewFilterType:      76,
+      ScreenViewFilterObjects:   [],
+      ScreenViewFilterTypeItems: [
+        { Value: '6' },
+        { Value: JSON.stringify({ Month: dateFrom.getMonth() + 1, Day: dateFrom.getDate(), Year: dateFrom.getFullYear() }) },
+        { Value: JSON.stringify({ Month: dateTo.getMonth() + 1,   Day: dateTo.getDate(),   Year: dateTo.getFullYear()   }) },
+      ],
+    });
+  }
+
+  const body = {
+    QueryInput: {
+      ActiveTab:             'Results',
+      StartRow:              1,
+      Max:                   max,
+      SortedColumns:         [{ FieldName: 'EstimateNumber', Direction: 2, ColumnEnum: 11 }],
+      ScreenViewFilterTypes: filterTypes,
+      ...(stages && stages.length > 0 ? { QuoteStageTypes: stages } : {}),
+    },
+  };
+
+  const res = await post('/CRMBFF/Estimate/V2EstimateList_Query', body, 'QuoteList.aspx');
+  const estimates = (res.data?.d || res.data)?.Estimates || [];
+  logger.info('SA: estimate list fetched', { count: estimates.length, stages, dateFrom, dateTo });
+  return estimates;
+}
