@@ -130,8 +130,6 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 
 *(No open issues as of 2026-05-20)*
 
----
-
 ## Deployment Note — teams/bot.js
 
 The git repo tracks **both** `teams/bot.js` (repo root) and `agent/teams/bot.js`. The launcher loads `agent/teams/bot.js`.
@@ -142,7 +140,9 @@ After any `git pull`, copy the root file to the live location:
 ```powershell
 Copy-Item "C:\Users\Assistant\JRBAgent\teams\bot.js" "C:\Users\Assistant\JRBAgent\agent\teams\bot.js" -Force
 ```
-This copy is safe only when both files were already kept in sync in the PR. Then restart the agent.
+This copy is safe only when both files were already kept in sync in the PR.
+
+Then restart the agent.
 
 ---
 
@@ -231,16 +231,15 @@ The agent can send unprompted Teams messages to Michael — for task completion 
 3. **Agent tool** — `send_teams_message` in `tools/registry.js` / `dispatcher.js` for use by the bot mid-task
 
 ### Restart gotcha
-`pm2 restart all` has EPERM from Claude Code context. Correct restart flow:
+`pm2 restart all` has EPERM from Claude Code context and also doesn't re-inject secrets from Credential Manager. Correct restart flow:
 ```powershell
 # 1. Find and kill the node process on port 3978
 $p = (netstat -ano | Select-String ":3978 .*LISTENING" | ForEach-Object { ($_ -split '\s+')[-1] })
 taskkill /f /pid $p
 
-# 2. Start fresh via launcher (injects all secrets)
+# 2. Start fresh via launcher (injects all secrets including CLAUDE_EXECUTE_SECRET)
 Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
 ```
-Simple `pm2 restart` doesn't re-inject secrets from Credential Manager — old env vars are reused, causing `supabaseUrl is required` errors in the scheduler.
 
 ---
 
@@ -248,6 +247,8 @@ Simple `pm2 restart` doesn't re-inject secrets from Credential Manager — old e
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
 Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~July 2026 — calendar reminder set), `GITHUB_TOKEN` (expires every 90 days), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
+
+Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 
 ---
 
