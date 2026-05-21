@@ -3,31 +3,6 @@ import 'dotenv/config';
 import cron from 'node-cron';
 import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
-import { classifyIntent, isExplicitDevTask, isAmbiguousDevTask } from '../teams/router.js';
-import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
-import { tmpdir } from 'os';
-import { join } from 'path';
-
-// File-based lock to prevent duplicate runs when multiple scheduler instances are alive.
-// Returns true if this instance should proceed; false if another instance ran recently.
-function acquireRunLock(taskName, ttlMs = 60_000) {
-  const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
-  try {
-    if (existsSync(lockFile)) {
-      const ts = Number(readFileSync(lockFile, 'utf8'));
-      if (Date.now() - ts < ttlMs) return false; // another instance holds the lock
-    }
-    writeFileSync(lockFile, String(Date.now()), 'utf8');
-    return true;
-  } catch {
-    return true; // if we can't read/write the lock, proceed anyway
-  }
-}
-
-function releaseRunLock(taskName) {
-  const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
-  try { unlinkSync(lockFile); } catch { /* ignore */ }
-}
 
 const SCHEDULED_TASKS = [
   {
@@ -66,33 +41,6 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Sunday 1:30 AM — QBO ↔ SA audit matching engine
-    // Runs after the 1 AM SA nightly sync to ensure sa_jobs is fresh.
-    schedule: '30 1 * * 0',
-    name: 'weekly_audit_run',
-    run: async () => {
-      const { runAudit } = await import('../tools/impl/audit.js');
-      const result = await runAudit();
-      logger.info('Weekly audit run complete', result);
-    },
-  },
-  {
-    // Sunday 6 AM — send QBO ↔ SA audit summary email to Michael
-    schedule: '0 6 * * 0',
-    name: 'weekly_audit_email',
-    run: async () => {
-      const { generateAuditEmail } = await import('../tools/impl/audit.js');
-      const { sendEmail } = await import('../tools/impl/m365.js');
-      const report = await generateAuditEmail();
-      await sendEmail({
-        to: ['michael@jrboehlke.com'],
-        subject: report.subject,
-        body: report.body,
-      });
-      logger.info('Weekly audit email sent', { subject: report.subject });
-    },
-  },
-  {
     // Sunday 11 PM — synthesize week's observations into reusable patterns
     schedule: '0 23 * * 0',
     name: 'weekly_synthesis',
@@ -102,37 +50,30 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 7 AM — prior week QBO AR/payment summary to Michael
     schedule: '0 7 * * 1',
     name: 'weekly_crm_report',
     run: async () => {
-      if (!acquireRunLock('weekly_crm_report', 10 * 60_000)) {
-        logger.debug('weekly_crm_report: skipped (another instance running)');
-        return;
-      }
-      try {
-        const { sendEmail } = await import('../tools/impl/m365.js');
-        const d = new Date();
-        const dayNum = d.getUTCDay() || 7;
-        const thu = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 4 - dayNum));
-        const yearStart = new Date(Date.UTC(thu.getUTCFullYear(), 0, 1));
-        const weekNum = Math.ceil((((thu - yearStart) / 86400000) + 1) / 7);
-        const weekLabel = `${thu.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
+      const { sendEmail } = await import('../tools/impl/m365.js');
+      const d = new Date();
+      const dayNum = d.getUTCDay() || 7;
+      const thu = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 4 - dayNum));
+      const yearStart = new Date(Date.UTC(thu.getUTCFullYear(), 0, 1));
+      const weekNum = Math.ceil((((thu - yearStart) / 86400000) + 1) / 7);
+      const weekLabel = `${thu.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
 
-        const { result: reportContent } = await runAgent({
-          task: `Pull HubSpot deals data. Identify new deals, deals moved to next stage, deals at risk, deals closed. Pull QuickBooks outstanding invoices and payments. Write executive summary. Save to OneDrive at /Agent Reports/Weekly CRM/${weekLabel}.md. Return the full report as plain text. Do NOT send a Teams message.`,
-          taskType: 'report',
-          saveContext: true,
-        });
+      const { result: reportContent } = await runAgent({
+        task: `Pull QuickBooks data for the prior week. Include: outstanding invoices (total AR, overdue breakdown), payments received, any new customers, and top open balances. Write a concise executive summary. Save to OneDrive at /Agent Reports/Weekly CRM/${weekLabel}.md. Return the full report as plain text. Do NOT send a Teams message.`,
+        taskType: 'report',
+        saveContext: true,
+      });
 
-        await sendEmail({
-          to: ['michael@jrboehlke.com'],
-          subject: `Weekly CRM & Finance Report — ${weekLabel}`,
-          body: `<p>${(reportContent ?? 'Report generated — see OneDrive for full details.').replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
-        });
-        logger.info('Weekly CRM report sent', { week: weekLabel });
-      } finally {
-        releaseRunLock('weekly_crm_report');
-      }
+      await sendEmail({
+        to: ['michael@jrboehlke.com'],
+        subject: `Weekly Finance Report — ${weekLabel}`,
+        body: `<p>${(reportContent ?? 'Report generated — see OneDrive for full details.').replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
+      });
+      logger.info('Weekly CRM report sent', { week: weekLabel });
     },
   },
   {
@@ -155,6 +96,22 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // 6 AM daily — overnight SA activity report emailed to Michael
+    schedule: '0 6 * * *',
+    name: 'overnight_sa_report',
+    run: async () => {
+      const { generateOvernightReport } = await import('../tools/impl/overnight-report.js');
+      const { sendEmail }               = await import('../tools/impl/m365.js');
+      const report = await generateOvernightReport();
+      await sendEmail({
+        to:      ['michael@jrboehlke.com'],
+        subject: report.subject,
+        body:    report.body,
+      });
+      logger.info('overnight_sa_report: sent', { subject: report.subject });
+    },
+  },
+  {
     // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
     schedule: '0 1 * * *',
     name: 'sa_nightly_sync',
@@ -168,13 +125,8 @@ const SCHEDULED_TASKS = [
     schedule: '*/5 * * * *',
     name: 'email_poller',
     run: async () => {
-      if (!acquireRunLock('email_poller', 4 * 60_000)) {
-        logger.debug('email_poller: skipped (another instance running)');
-        return;
-      }
-      try {
       const { listEmails, getEmail, sendEmail, markEmailRead, listEmailAttachments, getEmailAttachmentBytes } = await import('../tools/impl/m365.js');
-      const { processEmailedReceipt } = await import('../tools/impl/expense.js');
+      const { processEmailedReceipt, processChaseAlert } = await import('../tools/impl/expense.js');
       const emails = await listEmails({ folder: 'Inbox', limit: 10, unread_only: true });
 
       for (const email of emails) {
@@ -191,6 +143,17 @@ const SCHEDULED_TASKS = [
           }
         } catch (err) {
           logger.warn('Receipt email check failed', { err: err.message, from: email.from });
+        }
+
+        // ── Chase transaction alert check (runs before michael-only filter) ──
+        try {
+          const chaseHandled = await processChaseAlert(email, { getEmail, sendEmail });
+          if (chaseHandled) {
+            await markEmailRead({ email_id: email.id });
+            continue;
+          }
+        } catch (err) {
+          logger.warn('Chase alert check failed', { err: err.message, from: email.from });
         }
 
         // Only process non-receipt emails from Michael
@@ -221,26 +184,9 @@ const SCHEDULED_TASKS = [
         const body = full.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
         const fullText = email.subject + ' ' + body;
 
-        const intent = classifyIntent(fullText);
-
-        // ── Scheduling request ────────────────────────────────────────────────
-        if (intent === 'scheduling') {
-          logger.info('Email poller: detected scheduling request', { subject: email.subject });
-          const schedTask = `You received an email from Michael asking about crew scheduling.\nSubject: "${email.subject}"\n\n${body}\n\nHandle this scheduling request using your scheduling tools. Return only the reply text.`;
-          const schedResult = await runAgent({ task: schedTask, taskType: 'scheduling', saveContext: false });
-          const schedReply = schedResult?.result ?? 'On it — checking the schedule now.';
-          await sendEmail({
-            to: [email.from],
-            subject: `Re: ${email.subject}`,
-            body: `<p>${schedReply.replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
-          });
-          logger.info('Email poller: replied to scheduling request', { from: email.from });
-          continue;
-        }
-
         // ── Dev task detection ──────────────────────────────────────────────────
-        const isExplicitDev = intent === 'dev';
-        const isAmbiguousDev = intent === 'dev_ambiguous';
+        const isExplicitDev = isExplicitDevTask(fullText);
+        const isAmbiguousDev = !isExplicitDev && isAmbiguousDevTask(fullText);
 
         if (isExplicitDev) {
           // Michael clearly wants code built â€” reply with a scope proposal
@@ -296,7 +242,9 @@ Do not write any code yet. Return only the reply text.`;
         }
 
         // ── CRM / SA action detection ─────────────────────────────────────────
-        const isCrm = intent === 'crm';
+        // Contact forms, forwarded leads, and explicit SA/ticket requests go to
+        // CRM routing which gives the agent SA tools and an action-oriented prompt.
+        const isCrm = isCrmActionRequest(fullText);
 
         if (isCrm) {
           logger.info(`Email poller: detected CRM/SA action request`, { subject: email.subject });
@@ -310,8 +258,13 @@ Instructions:
 - If this is a forwarded contact form or new customer inquiry: search SA for the client by name (sa_search_clients). If not found, create them (sa_create_client with name, address, phone, email from the form). Then add a ticket (sa_add_ticket) summarizing the inquiry and any follow-up requested.
 - If Michael asks to create a ticket, estimate, job, or any SA record: do it now using your tools.
 - If Michael asks to look up a client, invoice, or balance: do it and report back.
-- Always confirm what you did: client name, SA IDs, actions taken.
-- Reply in plain text — no HTML needed.`;
+
+TICKET VERIFICATION (required after any sa_add_ticket call):
+After creating a ticket, immediately call sa_get_ticket with the returned ticketId to verify it was saved in SA.
+- If sa_get_ticket returns the ticket: begin your reply with "TICKET CONFIRMED IN SA:" followed by the client name, subject, and ticket ID.
+- If sa_get_ticket returns null or fails: begin your reply with "WARNING — TICKET NOT VERIFIED:" and describe what was attempted. Michael should manually check SA.
+
+Always include: client name, SA IDs, and actions taken. Reply in plain text — no HTML needed.`;
 
           const crmResult = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false });
           const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
@@ -336,9 +289,6 @@ Instructions:
         });
         logger.info(`Email poller: replied to ${email.from}`);
       }
-      } finally {
-        releaseRunLock('email_poller');
-      }
     },
   },
 ];
@@ -346,7 +296,27 @@ Instructions:
 // â”€â”€ Dev task detection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Shared with bot.js â€” explicit build intent + deliverable noun, or known phrases
 
-// Intent detection is imported from teams/router.js (shared with bot.js)
+function isExplicitDevTask(text) {
+  const t = text.toLowerCase();
+  const intentVerbs = /\b(build|create|write|develop|code|make|set up|implement|automate|generate)\b/;
+  const deliverableNouns = /\b(script|program|tool|app|application|function|integration|workflow|automation|report|dashboard|bot|scheduler|pipeline)\b/;
+  const explicitPhrases = /\b(using your coding skills|write (me |us )?code|build (me |us )?a|deploy (this|it|to)|push to (github|vercel|prod)|open a pr|create a branch)\b/;
+  return explicitPhrases.test(t) || (intentVerbs.test(t) && deliverableNouns.test(t));
+}
+
+function isAmbiguousDevTask(text) {
+  const t = text.toLowerCase();
+  const techTerms = /\b(script|code|github|deploy|vercel|supabase|automate|function|api|database|repo|branch|commit)\b/;
+  return techTerms.test(t) && !isExplicitDevTask(text);
+}
+
+function isCrmActionRequest(text) {
+  const t = text.toLowerCase();
+  // Forwarded emails are almost always contact forms / leads
+  if (/^(fw|fwd):/i.test(text.split('\n')[0])) return true;
+  // Explicit SA/CRM keywords
+  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead)\b/.test(t);
+}
 
 // â”€â”€ Register all schedules â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
@@ -364,26 +334,40 @@ for (const task of SCHEDULED_TASKS) {
 }
 logger.info('All schedules registered. Scheduler running.');
 
-// Server liveness check — ping /health every 4 minutes.
-// Uses /health (no auth required) instead of /mcp so the scheduler process doesn't
-// need CLAUDE_EXECUTE_SECRET. Verifies the bot server is alive; logs only on failure.
+// MCP keepalive — ping our own MCP endpoint every 4 minutes to prevent
+// Claude.ai connector from timing out the session
+const MCP_TOKEN = process.env.CLAUDE_MCP_TOKEN || process.env.CLAUDE_EXECUTE_SECRET;
 let mcpKeepaliveFailures = 0;
 
 async function pingMcpKeepalive() {
   try {
-    const res = await fetch('http://localhost:3978/health');
-    if (res.ok) {
-      if (mcpKeepaliveFailures > 0) {
-        logger.info('Server liveness restored', { failures: mcpKeepaliveFailures });
-        mcpKeepaliveFailures = 0;
-      }
+    const res = await fetch('http://localhost:3978/mcp', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(MCP_TOKEN ? { 'Authorization': `Bearer ${MCP_TOKEN}` } : {}),
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2024-11-05',
+          capabilities: {},
+          clientInfo: { name: 'keepalive', version: '1.0.0' },
+        },
+      }),
+    });
+    if (res.ok || res.status === 200) {
+      mcpKeepaliveFailures = 0;
+      logger.info('MCP keepalive ok', { status: res.status });
     } else {
       mcpKeepaliveFailures++;
-      logger.warn('Server liveness non-200', { status: res.status, failures: mcpKeepaliveFailures });
+      logger.warn('MCP keepalive non-200', { status: res.status, failures: mcpKeepaliveFailures });
     }
   } catch (err) {
     mcpKeepaliveFailures++;
-    logger.warn('Server liveness check failed', { err: err.message, failures: mcpKeepaliveFailures });
+    logger.warn('MCP keepalive failed', { err: err.message, failures: mcpKeepaliveFailures });
   }
 }
 
