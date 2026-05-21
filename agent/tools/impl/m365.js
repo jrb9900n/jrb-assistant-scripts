@@ -85,7 +85,7 @@ export async function draftEmail({ to, subject, body, cc = [] }) {
   return { draft_id: data.id, subject, message: 'Draft created — not sent.' };
 }
 
-export async function sendEmail({ draft_id, to, subject, body, contentType = 'HTML' }) {
+export async function sendEmail({ draft_id, to, subject, body, contentType = 'HTML', attachments = [] }) {
   if (draft_id) {
     await graph('POST', `/users/${USER()}/messages/${draft_id}/send`);
     return { sent: true, draft_id };
@@ -95,6 +95,14 @@ export async function sendEmail({ draft_id, to, subject, body, contentType = 'HT
       subject: subject ?? '',
       body: { contentType, content: body },
       toRecipients: to.map(a => ({ emailAddress: { address: a } })),
+      ...(attachments.length ? {
+        attachments: attachments.map(a => ({
+          '@odata.type': '#microsoft.graph.fileAttachment',
+          name: a.name,
+          contentType: a.contentType,
+          contentBytes: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
+        })),
+      } : {}),
     },
     saveToSentItems: false,
   };

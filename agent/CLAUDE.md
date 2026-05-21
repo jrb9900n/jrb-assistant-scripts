@@ -87,17 +87,18 @@ tunnel.config.cjs      — pm2 config for Cloudflare tunnel
 ## How to Start the Agent
 
 ```powershell
-# Start tunnel
-pm2 start "C:\Users\Assistant\JRBAgent\agent\tunnel.config.cjs"
+# Start tunnel (Task Scheduler manages this — use only if cloudflared is down)
+Start-ScheduledTask -TaskName "JRB Cloudflare Tunnel"
+# Tunnel logs: C:\Users\Assistant\.cloudflared\tunnel.log (written on watchdog-triggered restarts)
 
 # Start Teams bot
 Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
 
 # Run a CLI test task
 powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1" cli "your task here"
-
-# Note: pm2 restart all has EPERM in Claude Code context — use Start-Process with the launcher script instead
 ```
+
+> **Note:** PM2 is no longer used. The tunnel, Teams bot, and scheduler are managed by Windows Task Scheduler tasks ("JRB Cloudflare Tunnel", "JRB Teams Bot", "JRB Scheduler"). A "JRB Cloudflare Watchdog" task runs every 5 minutes to restart cloudflared if it crashes.
 
 ---
 

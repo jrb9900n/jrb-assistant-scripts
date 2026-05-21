@@ -133,32 +133,43 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 
 ---
 
-## Overnight SA Report (built 2026-05-21)
+## AuditMatchingEngine (migrated 2026-05-21)
 
-Daily HTML email to michael@jrboehlke.com at 6 AM with SA activity from the prior day.
+Standalone financial reconciliation engine at `C:\Users\Assistant\AuditMatchingEngine\`.
+Scrapes SA invoices/payments via Playwright, downloads QB data via API, runs 3-tier matching.
 
-### Report sections
-1. **Jobs Accepted Yesterday** — Won estimates first seen since prior 6 AM run, sorted by amount
-2. **Accepted — Awaiting Waiting List** — persistent day-over-day; auto-resolves when client appears in `sa_waiting_list`; shows days-since-won and pipeline total
-3. **Estimates Sent Yesterday** — Sent-stage estimates, QuoteDate = yesterday, sorted by amount
-4. **Aging Estimates** — Sent 7–60 days ago, no acceptance (follow-up candidates)
-5. **Today's Dispatch** — job count + crew from `sa_jobs` for today's date
+### Run via launcher (always use ame-run.ps1 — injects creds from Credential Manager)
+```powershell
+# Pre-flight check
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" setup
 
-### Key files
-- `tools/impl/overnight-report.js` — report generation, Supabase tracking, HTML email
-- `tools/impl/serviceautopilot.js` — added `getEstimateList({ dateFrom, dateTo, stages, max })` read function
-- `scheduler/cron.js` — `overnight_sa_report` task at `0 6 * * *`
+# Sync SA (invoices + payments + payment applications)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" sync:sa
+
+# Sync QB (invoices + payments)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" sync:qb
+
+# Run matching engine
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" match
+
+# Full run (sync all + match)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" run:full
+```
 
 ### Supabase (fleetops — mzywmgesulyalevtzudw)
-New table: `sa_accepted_estimates` — tracks Won estimates for day-over-day reporting.
-- `estimate_id` PK, `client_name`, `client_id`, `address`, `sales_rep`, `service_type`, `amount`, `quote_date`
-- `first_seen_at` — when first observed as Won (used for "accepted yesterday" logic)
-- `resolved_at` / `resolved_reason` — set when client appears in `sa_waiting_list`
+Tables: `sa_invoices`, `sa_payments`, `sa_payment_applications`, `qb_invoices`, `qb_payments`, `audit_matches`
+Data as of 2026-05-21: 8,517 SA invoices · 6,091 SA payments · 11,535 applications · 8,349 QB invoices · 8,368 matches
 
-### Notes
-- Bootstraps on first real cron run: all Won estimates from last 60 days inserted with `first_seen_at = now()`. "Accepted yesterday" is empty on day one, accurate from day two.
-- Uses `Promise.allSettled` — a failed SA section (e.g., browser login timeout) does not block the email.
-- SA estimate queries use `puppeteer-core` browser session (same as other SA tools). Sections 1–4 require a live SA login; section 5 reads Supabase only.
+### Credentials
+- Supabase: uses `FLEETOPS_SUPABASE_SERVICE_KEY` from Credential Manager (same as expense system)
+- QB: uses `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` from Credential Manager (same as JRBAgent)
+- SA: uses `SA_EMAIL`, `SA_PASSWORD` from Credential Manager
+- Do NOT edit `.env` QB/Supabase values — they say INJECTED_BY_LAUNCHER on purpose
+
+### Note on the weekly audit cron
+The `audit_runs` / `audit_issues` tables (added 2026-05-20) are separate from the AME tables.
+The JRBAgent weekly cron checks for high-level discrepancies; the AME does the deep invoice-level match.
+Both live in the fleetops Supabase project.
 
 ## Deployment Note — teams/bot.js
 

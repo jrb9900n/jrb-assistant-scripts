@@ -1,6 +1,7 @@
 // scheduler/cron.js - Automated task scheduler
 import 'dotenv/config';
 import cron from 'node-cron';
+import { spawn } from 'child_process';
 import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
 
@@ -38,6 +39,32 @@ const SCHEDULED_TASKS = [
         body: report.body,
       });
       logger.info('Weekly expense report sent', { subject: report.subject });
+    },
+  },
+  {
+    // Sunday 1:30 AM — QBO ↔ SA audit matching engine (runs after 1 AM sa_nightly_sync)
+    schedule: '30 1 * * 0',
+    name: 'weekly_audit_run',
+    run: async () => {
+      const { runAudit } = await import('../tools/impl/audit.js');
+      const result = await runAudit();
+      logger.info('Weekly audit run complete', result);
+    },
+  },
+  {
+    // Sunday 6 AM — send QBO ↔ SA audit summary email to Michael
+    schedule: '0 6 * * 0',
+    name: 'weekly_audit_email',
+    run: async () => {
+      const { generateAuditEmail } = await import('../tools/impl/audit.js');
+      const { sendEmail } = await import('../tools/impl/m365.js');
+      const report = await generateAuditEmail();
+      await sendEmail({
+        to: ['michael@jrboehlke.com'],
+        subject: report.subject,
+        body: report.body,
+      });
+      logger.info('Weekly audit email sent', { subject: report.subject });
     },
   },
   {
@@ -115,10 +142,27 @@ const SCHEDULED_TASKS = [
     // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
     schedule: '0 1 * * *',
     name: 'sa_nightly_sync',
-    run: () => runAgent({
-      task: 'Run the SA nightly sync script. Use run_script with script_path "C:\\\\Users\\\\Assistant\\\\OneDrive - jrboehlke.com\\\\JR Boehlke - Claude Folder\\\\BTA Reporting\\\\sa-nightly-sync.js" and timeout_ms 600000 (10 minutes). Log the result including job counts for each sync.',
-      taskType: 'code',
-      saveContext: false,
+    run: () => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['sa-nightly-sync.js'], {
+        cwd: 'C:\\Users\\Assistant\\BTA Reporting',
+        env: {
+          ...process.env,
+          // Script uses FIELDOPS_SUPABASE_KEY; launcher injects FLEETOPS_SUPABASE_SERVICE_KEY
+          FIELDOPS_SUPABASE_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 600_000,
+      });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', d => { out += d; });
+      child.stderr.on('data', d => { err += d; });
+      child.on('close', code => {
+        logger.info('sa_nightly_sync complete', { code, output: out.slice(-2000) });
+        if (err) logger.warn('sa_nightly_sync stderr', { stderr: err.slice(-1000) });
+        code === 0 ? resolve() : reject(new Error(`sa-nightly-sync.js exited ${code}`));
+      });
+      child.on('error', reject);
     }),
   },
   {
