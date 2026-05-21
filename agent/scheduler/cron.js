@@ -66,6 +66,33 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Sunday 1:30 AM — QBO ↔ SA audit matching engine
+    // Runs after the 1 AM SA nightly sync to ensure sa_jobs is fresh.
+    schedule: '30 1 * * 0',
+    name: 'weekly_audit_run',
+    run: async () => {
+      const { runAudit } = await import('../tools/impl/audit.js');
+      const result = await runAudit();
+      logger.info('Weekly audit run complete', result);
+    },
+  },
+  {
+    // Sunday 6 AM — send QBO ↔ SA audit summary email to Michael
+    schedule: '0 6 * * 0',
+    name: 'weekly_audit_email',
+    run: async () => {
+      const { generateAuditEmail } = await import('../tools/impl/audit.js');
+      const { sendEmail } = await import('../tools/impl/m365.js');
+      const report = await generateAuditEmail();
+      await sendEmail({
+        to: ['michael@jrboehlke.com'],
+        subject: report.subject,
+        body: report.body,
+      });
+      logger.info('Weekly audit email sent', { subject: report.subject });
+    },
+  },
+  {
     // Sunday 11 PM — synthesize week's observations into reusable patterns
     schedule: '0 23 * * 0',
     name: 'weekly_synthesis',
