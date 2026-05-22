@@ -252,10 +252,21 @@ const SCHEDULED_TASKS = [
       }
       try {
       const { listEmails, getEmail, sendEmail, markEmailRead, listEmailAttachments, getEmailAttachmentBytes } = await import('../tools/impl/m365.js');
-      const { processEmailedReceipt } = await import('../tools/impl/expense.js');
+      const { processEmailedReceipt, processChaseAlert } = await import('../tools/impl/expense.js');
       const emails = await listEmails({ folder: 'Inbox', limit: 10, unread_only: true });
 
       for (const email of emails) {
+        // ── Chase transaction alert check (before receipt check and michael-only filter) ──
+        try {
+          const chaseHandled = await processChaseAlert(email, { getEmail, sendEmail });
+          if (chaseHandled) {
+            await markEmailRead({ email_id: email.id });
+            continue;
+          }
+        } catch (err) {
+          logger.warn('Chase alert check failed', { err: err.message, from: email.from });
+        }
+
         // ── Receipt email check (runs before michael-only filter) ──
         try {
           const handled = await processEmailedReceipt(email, {
@@ -444,8 +455,20 @@ Return a well-formatted HTML reply. Use this structure:
           continue;
         }
 
-        // ── Standard email reply ──────────────────────────────────────────────
-        const task = `You received an email from ${email.from} with subject “${email.subject}”. Email body:\n\n${body}\n\nWrite a concise helpful reply. Return only the reply text.`;
+        // ── General AI routing (fallback for all unclassified emails from Michael) ──
+        const task = `You received an email from Michael Reardon (michael@jrboehlke.com).
+
+Subject: “${email.subject}”
+Body:
+${body}
+
+Classify the email and respond appropriately:
+- Question or info request → answer directly and concisely
+- Task completable without code or CRM tools → complete it and report back
+- FYI / forwarded notification with no action needed → acknowledge in 1-2 sentences
+- Financial/bank/vendor notification → note the key details (amount, merchant, account) and ask if any action is needed
+
+Return ONLY the reply text. No preamble, no analysis section, no “Here is my reply:” header. Just the reply itself.`;
         const agentResult = await runAgent({ task, taskType: 'email', saveContext: false });
         const result = agentResult?.result ?? 'I received your email and will follow up shortly.';
 
