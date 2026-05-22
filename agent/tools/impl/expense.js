@@ -447,9 +447,10 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
   const subject  = (email.subject || '').toLowerCase();
 
   const isFromChase = /chase\.com/.test(fromAddr);
-  // Chase alert subjects don't always include "chase" — match "$X.XX ... transaction" too
+  // Match: direct Chase alerts, "You made a $X.XX transaction", or any "$X.XX ... transaction" subject
   const subjectLooksLikeAlert =
     (subject.includes('chase') && /alert|transaction|purchase|charge/.test(subject)) ||
+    /you made a .{0,20}\$[\d,]+\.\d{2}/.test(subject) ||
     (/\$[\d,]+\.\d{2}/.test(subject) && subject.includes('transaction'));
 
   if (!isFromChase && !subjectLooksLikeAlert) return false;
@@ -459,7 +460,7 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
   const bodyText = (full.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
   const searchText = `${email.subject || ''} ${bodyText}`;
 
-  // Secondary guard: if not from Chase directly, body must confirm this is a Chase alert
+  // If not directly from Chase, confirm the body also looks like a Chase alert
   if (!isFromChase && !/chase|card ending|ink business|sapphire|freedom/i.test(searchText)) {
     return false;
   }
@@ -533,7 +534,7 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
 }
 
 function parseChaseAlert(text) {
-  // Card last four — "card ending in 3468", "ending in 3468", "...3468", "(...3468)", "Visa ...3468"
+  // Card last four — "card ending in 3468", "ending in 3468", "...3468", "(...3468)"
   const cardMatch = text.match(
     /(?:card\s+ending\s+(?:in\s+)?|ending\s+in\s+|\(\.*|\.{2,})\s*(\d{4})/i
   );
