@@ -357,9 +357,9 @@ Do not write any code yet. Return only the reply text.`;
         }
 
         // ── CRM / SA action detection ─────────────────────────────────────────
-        // Contact forms, forwarded leads, and explicit SA/ticket requests go to
-        // CRM routing which gives the agent SA tools and an action-oriented prompt.
-        const isCrm = isCrmActionRequest(fullText);
+        // Only check subject + first 600 chars of body to avoid quoted reply text
+        // from previous assistant emails poisoning the keyword match.
+        const isCrm = isCrmActionRequest(email.subject + ' ' + body.slice(0, 600));
 
         if (isCrm) {
           logger.info(`Email poller: detected CRM/SA action request`, { subject: email.subject });
@@ -482,9 +482,8 @@ function isAmbiguousDevTask(text) {
 
 function isCrmActionRequest(text) {
   const t = text.toLowerCase();
-  // Forwarded emails are almost always contact forms / leads
-  if (/^(fw|fwd):/i.test(text.split('\n')[0])) return true;
-  // Explicit SA/CRM keywords
+  // Explicit exclusion: bank/transaction alerts are never CRM leads
+  if (/you made a .{0,30}\$[\d,]+\.\d{2}/.test(t) || /chase.*transaction|transaction alert/i.test(t)) return false;
   return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead)\b/.test(t);
 }
 
