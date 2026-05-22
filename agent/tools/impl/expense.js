@@ -546,9 +546,11 @@ function parseChaseAlert(text) {
   if (!amountMatch) return null;
   const amount = parseFloat(amountMatch[1].replace(',', ''));
 
-  // Merchant — "at HOME DEPOT on", "at HOME DEPOT using", "at HOME DEPOT."
+  // Merchant — subject: "You made a $X.XX transaction with MERCHANT NAME"
+  // or body: "at HOME DEPOT on", "transaction at ...", etc.
   let merchant = 'Unknown Merchant';
   const merchantPatterns = [
+    /transaction\s+with\s+([A-Z][A-Z0-9 &'.,#\-*]+?)(?:\s*$|\s+on\s|\s+using\s|\s+for\s|\.|,)/im,
     /\bat\s+([A-Z][A-Z0-9 &'.,#\-*]+?)\s+(?:on\s+\d|using\s+your|for\s+\$|\.|$)/i,
     /transaction\s+at\s+(.+?)(?:\s+on\s+|\s+for\s+|\.|$)/i,
     /purchase\s+at\s+(.+?)(?:\s+on\s+|\.|$)/i,
