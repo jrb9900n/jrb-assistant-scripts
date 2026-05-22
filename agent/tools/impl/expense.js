@@ -533,8 +533,10 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
 }
 
 function parseChaseAlert(text) {
-  // Card last four — "card ending in 3468", "card ending 3468", "ending in 3468"
-  const cardMatch = text.match(/(?:card\s+ending\s+(?:in\s+)?|ending\s+in\s+)(\d{4})/i);
+  // Card last four — "card ending in 3468", "ending in 3468", "...3468", "(...3468)", "Visa ...3468"
+  const cardMatch = text.match(
+    /(?:card\s+ending\s+(?:in\s+)?|ending\s+in\s+|\(\.*|\.{2,})\s*(\d{4})/i
+  );
   if (!cardMatch) return null;
   const cardLastFour = cardMatch[1];
 

@@ -437,8 +437,20 @@ Return a well-formatted HTML reply. Use this structure:
           continue;
         }
 
-        // ── Standard email reply ──────────────────────────────────────────────
-        const task = `You received an email from ${email.from} with subject “${email.subject}”. Email body:\n\n${body}\n\nWrite a concise helpful reply. Return only the reply text.`;
+        // ── General AI routing (fallback for all unclassified emails from Michael) ──
+        const task = `You received an email from Michael Reardon (michael@jrboehlke.com).
+
+Subject: “${email.subject}”
+Body:
+${body}
+
+Classify the email and respond appropriately:
+- Question or info request → answer directly and concisely
+- Task completable without code or CRM tools → complete it and report back
+- FYI / forwarded notification with no action needed → acknowledge in 1-2 sentences
+- Financial/bank/vendor notification → note the key details (amount, merchant, account) and ask if any action is needed
+
+Return ONLY the reply text. No preamble, no analysis section, no “Here is my reply:” header. Just the reply itself.`;
         const agentResult = await runAgent({ task, taskType: 'email', saveContext: false });
         const result = agentResult?.result ?? 'I received your email and will follow up shortly.';
 
@@ -475,9 +487,6 @@ function isAmbiguousDevTask(text) {
 
 function isCrmActionRequest(text) {
   const t = text.toLowerCase();
-  // Forwarded emails are almost always contact forms / leads
-  if (/^(fw|fwd):/i.test(text.split('\n')[0])) return true;
-  // Explicit SA/CRM keywords
   return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead)\b/.test(t);
 }
 
