@@ -363,7 +363,13 @@ Do not write any code yet. Return only the reply text.`;
 
         if (isCrm) {
           logger.info(`Email poller: detected CRM/SA action request`, { subject: email.subject });
+          const isFromMichael = /michael@jrboehlke\.com|assistant@jrboehlke\.com/i.test(email.from);
           const crmTask = `You received an email from Michael with a new customer contact form or CRM request. Follow these steps exactly.
+
+Company info (use exactly as written):
+  Name: J.R. Boehlke
+  Phone: 262-242-9924
+  Sign off as: Michael
 
 Subject: “${email.subject}”
 Email body:
@@ -407,8 +413,8 @@ Call sa_set_billing_defaults with the clientId to set Taxable=Tax and InvoiceDel
 - Failure → note "Billing defaults could not be set — update manually in SA" in the reply
 Skip this step entirely if STEP 2 found an existing client.
 
-STEP 7 — COMPOSE REPLY:
-Return a well-formatted HTML reply. Use this structure:
+STEP 7 — COMPOSE INTERNAL SUMMARY:
+Return a well-formatted HTML summary for Michael's reference. This is NOT sent to the customer — do NOT write a customer-facing letter or acknowledgment. Use this structure:
 
 <h3>✅ TICKET CONFIRMED IN SA: [Client Name]</h3>
 (or <h3>⚠️ WARNING — TICKET NOT VERIFIED: [Client Name]</h3>)
@@ -435,12 +441,15 @@ Return a well-formatted HTML reply. Use this structure:
 
           const crmResult = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false });
           const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
+          // Forwarded leads (from Michael) get an internal summary — don't reply to his own email
+          const crmReplyTo = isFromMichael ? 'michael@jrboehlke.com' : email.from;
+          const crmSubject = isFromMichael ? `SA: ${email.subject}` : `Re: ${email.subject}`;
           await sendEmail({
-            to: [email.from],
-            subject: `Re: ${email.subject}`,
+            to: [crmReplyTo],
+            subject: crmSubject,
             body: `<div style=”font-family:Arial,sans-serif;max-width:640px;”>${crmReply}</div><hr style=”margin:20px 0;”><p style=”color:#888;font-size:12px;”><em>Sent by JRB Executive Assistant</em></p>`,
           });
-          logger.info(`Email poller: executed CRM action and replied to ${email.from}`);
+          logger.info(`Email poller: executed CRM action and sent summary to ${crmReplyTo}`);
           continue;
         }
 
