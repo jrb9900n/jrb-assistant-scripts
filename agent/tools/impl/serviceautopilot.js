@@ -891,3 +891,45 @@ export async function getEstimateList({ dateFrom, dateTo, stages, max = 500 } = 
   logger.info('SA: estimate list fetched', { count: estimates.length, stages, dateFrom, dateTo });
   return estimates;
 }
+
+/**
+ * Bulk-fetch all SA clients for CardDAV address overlay.
+ * Returns [{ clientId, name, address, city, state, zip, phone, qboId }]
+ * Fields are best-effort from the V2AccountList_Query response; unavailable fields are ''.
+ */
+export async function getAllClients({ max = 10000 } = {}) {
+  const results = [];
+  let startRow = 1;
+  const pageSize = 500;
+
+  while (results.length < max) {
+    const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
+      QueryInput: {
+        Settings: {
+          FilterData: JSON.stringify({ FilterData: [], CustomFields: [], QuerySelection: 0 }),
+        },
+        StartRow: startRow,
+        Max: pageSize,
+        SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
+      },
+    }, 'Clients.aspx');
+
+    const accounts = (res.data?.d || res.data)?.Accounts || [];
+    if (accounts.length === 0) break;
+    results.push(...accounts);
+    if (accounts.length < pageSize) break;
+    startRow += pageSize;
+  }
+
+  logger.info('SA: bulk client fetch complete', { count: results.length });
+  return results.map(a => ({
+    clientId: a.ClientID || '',
+    name:     a.ClientName || '',
+    address:  a.Address1 || '',
+    city:     a.City || '',
+    state:    a.State || a.StateAbbr || '',
+    zip:      a.Zip || a.ZipCode || a.PostalCode || '',
+    phone:    a.Phone1 || a.PhoneNumber || '',
+    qboId:    a.QboID || a.QboId || '',
+  }));
+}
