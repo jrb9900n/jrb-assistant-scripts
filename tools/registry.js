@@ -620,6 +620,17 @@ const SA_TOOLS = [
       required: ['ticketId'],
     },
   },
+  {
+    name: 'sa_set_billing_defaults',
+    description: 'Set billing defaults on an existing SA client: Taxable=Tax, InvoiceDelivery=Email. Call as a separate step ~5 minutes after sa_create_client to allow SA indexing to complete. Returns { clientId, sendInvoiceBy, taxable }.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID returned by sa_create_client' },
+      },
+      required: ['clientId'],
+    },
+  },
 ];
 
 const SCHEDULING_TOOLS = [
