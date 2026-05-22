@@ -252,7 +252,7 @@ const SCHEDULED_TASKS = [
       }
       try {
       const { listEmails, getEmail, sendEmail, markEmailRead, listEmailAttachments, getEmailAttachmentBytes } = await import('../tools/impl/m365.js');
-      const { processEmailedReceipt } = await import('../tools/impl/expense.js');
+      const { processEmailedReceipt, processChaseAlert } = await import('../tools/impl/expense.js');
       const emails = await listEmails({ folder: 'Inbox', limit: 10, unread_only: true });
 
       for (const email of emails) {
@@ -269,6 +269,17 @@ const SCHEDULED_TASKS = [
           }
         } catch (err) {
           logger.warn('Receipt email check failed', { err: err.message, from: email.from });
+        }
+
+        // ── Chase transaction alert check (before michael-only filter — alerts may arrive directly from chase.com) ──
+        try {
+          const chaseHandled = await processChaseAlert(email, { getEmail, sendEmail });
+          if (chaseHandled) {
+            await markEmailRead({ email_id: email.id });
+            continue;
+          }
+        } catch (err) {
+          logger.warn('Chase alert check failed', { err: err.message, from: email.from });
         }
 
         // Only process non-receipt emails from Michael
