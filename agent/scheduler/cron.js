@@ -133,6 +133,16 @@ const SCHEDULED_TASKS = [
     }),
   },
   {
+    // 2 AM nightly — sync QBO customers + vendors into each employee's Outlook contact folders
+    schedule: '0 2 * * *',
+    name: 'qbo_contacts_sync',
+    run: async () => {
+      const { runContactsSync } = await import('../tools/impl/contacts-sync.js');
+      const result = await runContactsSync();
+      logger.info('QBO contacts sync complete', { succeeded: result.succeeded, failed: result.failed });
+    },
+  },
+  {
     // Monday 3 AM — full SA weekly pipeline (estimates, tickets, waiting list, lead matching, sheets)
     schedule: '0 3 * * 1',
     name: 'sa_weekly_sync',
@@ -390,7 +400,14 @@ Call sa_get_ticket with the returned ticketId.
 - Returns object → ticket confirmed
 - Returns null → ticket not verified
 
-STEP 6 — COMPOSE REPLY:
+STEP 6 — SET BILLING DEFAULTS (new clients only):
+If a NEW client was created in STEP 3 (not an existing client found in STEP 2):
+Call sa_set_billing_defaults with the clientId to set Taxable=Tax and InvoiceDelivery=Email.
+- Success → note "Billing defaults set (Tax, Email)" in the reply
+- Failure → note "Billing defaults could not be set — update manually in SA" in the reply
+Skip this step entirely if STEP 2 found an existing client.
+
+STEP 7 — COMPOSE REPLY:
 Return a well-formatted HTML reply. Use this structure:
 
 <h3>✅ TICKET CONFIRMED IN SA: [Client Name]</h3>
@@ -404,6 +421,7 @@ Return a well-formatted HTML reply. Use this structure:
   <tr><td style=”padding:6px 12px;font-weight:bold;”>Phone</td><td style=”padding:6px 12px;”>[phone]</td></tr>
   <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>Ticket ID</td><td style=”padding:6px 12px;”>[ticketId]</td></tr>
   <tr><td style=”padding:6px 12px;font-weight:bold;”>Ticket Subject</td><td style=”padding:6px 12px;”>[subject]</td></tr>
+  <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>Billing Defaults</td><td style=”padding:6px 12px;”>[billing defaults status from STEP 6, or “N/A — existing client”]</td></tr>
 </table>
 
 <h4>Lead Message</h4>

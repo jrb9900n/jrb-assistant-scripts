@@ -85,6 +85,7 @@ const HANDLERS = {
   sa_create_job:           (i) => sa.createJob(i),
   sa_add_ticket:           ({ notes, ...rest }) => sa.addTicket({ ...rest, body: notes }),
   sa_get_ticket:           (i) => sa.getTicket(i),
+  sa_set_billing_defaults: (i) => sa.setClientBillingDefaults(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),

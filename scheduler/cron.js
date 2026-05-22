@@ -400,7 +400,14 @@ Call sa_get_ticket with the returned ticketId.
 - Returns object → ticket confirmed
 - Returns null → ticket not verified
 
-STEP 6 — COMPOSE REPLY:
+STEP 6 — SET BILLING DEFAULTS (new clients only):
+If a NEW client was created in STEP 3 (not an existing client found in STEP 2):
+Call sa_set_billing_defaults with the clientId to set Taxable=Tax and InvoiceDelivery=Email.
+- Success → note "Billing defaults set (Tax, Email)" in the reply
+- Failure → note "Billing defaults could not be set — update manually in SA" in the reply
+Skip this step entirely if STEP 2 found an existing client.
+
+STEP 7 — COMPOSE REPLY:
 Return a well-formatted HTML reply. Use this structure:
 
 <h3>✅ TICKET CONFIRMED IN SA: [Client Name]</h3>
@@ -414,6 +421,7 @@ Return a well-formatted HTML reply. Use this structure:
   <tr><td style=”padding:6px 12px;font-weight:bold;”>Phone</td><td style=”padding:6px 12px;”>[phone]</td></tr>
   <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>Ticket ID</td><td style=”padding:6px 12px;”>[ticketId]</td></tr>
   <tr><td style=”padding:6px 12px;font-weight:bold;”>Ticket Subject</td><td style=”padding:6px 12px;”>[subject]</td></tr>
+  <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>Billing Defaults</td><td style=”padding:6px 12px;”>[billing defaults status from STEP 6, or “N/A — existing client”]</td></tr>
 </table>
 
 <h4>Lead Message</h4>

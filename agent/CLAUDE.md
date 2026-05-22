@@ -206,6 +206,7 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 - `sa_create_estimate` — create estimate with line items; preserves template EstimateNote; returns `placeholders` array for `[x]`-style tokens
 - `sa_update_estimate_notes` — re-save estimate with filled placeholder values
 - `sa_create_job` — schedule waiting-list job from estimate via CreateServiceJobFromQuote + SaveWaitingListService
+- `sa_set_billing_defaults` — set Taxable=Tax, InvoiceDelivery=Email on a client (call ~5 min after `sa_create_client`)
 
 ### Key constants
 - `EMPTY_GUID` = `00000000-0000-0000-0000-000000000000`
@@ -215,6 +216,7 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 ### Known limitations
 - `createJob` / `SaveWaitingListService` errors with "Object reference not set" on the APIProbe test account — that account has no commission configuration. Works on JRB production account.
 - SA_EMAIL and SA_PASSWORD must be in Credential Manager as `JRBAgent:SA_EMAIL` and `JRBAgent:SA_PASSWORD`
+- **No dedicated API endpoint exists for `Taxable` or `InvoiceDelivery` fields.** Exhaustive probing of ClientView-minified.js (207 KB), ClientList.js (171 KB), and sa-minified.js (1.1 MB) confirmed zero save endpoints for these fields specifically. Workaround: `sa_set_billing_defaults` calls `ClientEditOverlayWs.asmx/GetClientInfo` to get the full client record, overrides `SalesTaxCodeID` (JRB "Tax" code `c432e644-…`) and `SendInvoiceBy` ("Email"), then POSTs to `ClientEditOverlayWs.asmx/SaveClient` with the full payload. No puppeteer UI clicking required.
 
 ---
 

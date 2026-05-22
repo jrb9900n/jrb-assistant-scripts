@@ -21,7 +21,6 @@ import * as scheduling  from './impl/scheduling.js';
 import * as sa          from './impl/serviceautopilot.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { sendProactiveMessage } from '../teams/notify.js';
-import { provisionCredential, revokeCredential, listCredentials } from './impl/carddav.js';
 
 const HANDLERS = {
   // Email
@@ -86,11 +85,7 @@ const HANDLERS = {
   sa_create_job:           (i) => sa.createJob(i),
   sa_add_ticket:           ({ notes, ...rest }) => sa.addTicket({ ...rest, body: notes }),
   sa_get_ticket:           (i) => sa.getTicket(i),
-
-  // CardDAV
-  carddav_provision:    (i) => provisionCredential(i),
-  carddav_revoke:       ({ email }) => revokeCredential(email),
-  carddav_list:         ()  => listCredentials(),
+  sa_set_billing_defaults: (i) => sa.setClientBillingDefaults(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),
