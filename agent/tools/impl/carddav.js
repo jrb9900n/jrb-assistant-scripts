@@ -9,6 +9,7 @@ import axios from 'axios';
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
+import { getQBAccessToken } from './qb-token.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
 
@@ -17,27 +18,10 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// ── QB auth (reuse token until near-expiry) ───────────────────
-
-let _qbToken = null, _qbTokenExpiry = 0;
-
-async function getQBToken() {
-  if (_qbToken && Date.now() < _qbTokenExpiry - 60_000) return _qbToken;
-  const creds = Buffer.from(`${process.env.QB_CLIENT_ID}:${process.env.QB_CLIENT_SECRET}`).toString('base64');
-  const res = await axios.post(
-    'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
-    `grant_type=refresh_token&refresh_token=${encodeURIComponent(process.env.QB_REFRESH_TOKEN)}`,
-    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
-  );
-  _qbToken = res.data.access_token;
-  _qbTokenExpiry = Date.now() + res.data.expires_in * 1000;
-  return _qbToken;
-}
-
 // ── QBO data fetch ────────────────────────────────────────────
 
 async function fetchQBOEntities(entityType) {
-  const token = await getQBToken();
+  const token = await getQBAccessToken();
   const results = [];
   let pos = 1;
   while (true) {
