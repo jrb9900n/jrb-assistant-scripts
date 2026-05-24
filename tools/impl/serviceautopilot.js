@@ -51,58 +51,60 @@ const TICKET_CATEGORIES = {
 // JRB SA billing defaults — discovered 2026-05-22 via GetSalesTaxCodeListWithParams
 const JRB_TAX_CODE_ID = 'c432e644-6f8f-4a78-b52f-ef93f05abf4e'; // "Tax" code
 
-// Municipality SalesTaxRef GUIDs — discovered 2026-05-22 by scanning 200 real clients.
-// GetSalesTaxList endpoint returns null-Company error (broken). Values derived from GetClientInfo.
-// Default fallback: Fond du Lac County (most common in JRB service area).
-const JRB_TAX_REF_DEFAULT = '0075bdca-da5c-46cb-a5e2-13fe2f7c5822'; // Fond du Lac County
+// Municipality SalesTaxRef GUIDs — discovered 2026-05-22 by scanning 500 real SA client records.
+// GetSalesTaxList endpoint returns null-Company error (broken). Default fallback: Ozaukee County.
+const JRB_TAX_REF_DEFAULT = '97608201-5377-4e0f-acaa-1aeee550dd32'; // Ozaukee County
 const JRB_TAX_REF_BY_CITY = {
-  // Milwaukee County
-  'milwaukee':       '43974a35-2806-4010-98a5-d14ae1393884',
-  'shorewood':       '43974a35-2806-4010-98a5-d14ae1393884',
-  'whitefish bay':   '43974a35-2806-4010-98a5-d14ae1393884',
-  'wauwatosa':       '43974a35-2806-4010-98a5-d14ae1393884',
-  'west allis':      '43974a35-2806-4010-98a5-d14ae1393884',
-  'greenfield':      '43974a35-2806-4010-98a5-d14ae1393884',
-  'oak creek':       '43974a35-2806-4010-98a5-d14ae1393884',
-  'south milwaukee': '43974a35-2806-4010-98a5-d14ae1393884',
-  'cudahy':          '43974a35-2806-4010-98a5-d14ae1393884',
-  'st. francis':     '43974a35-2806-4010-98a5-d14ae1393884',
-  'hales corners':   '43974a35-2806-4010-98a5-d14ae1393884',
-  'franklin':        '43974a35-2806-4010-98a5-d14ae1393884',
+  // City of Milwaukee (separate rate from county suburbs)
+  'milwaukee':           '6adcb6c0-b0b0-42be-8afb-08627f3561b1',
+  'city of milwaukee':   '6adcb6c0-b0b0-42be-8afb-08627f3561b1',
+  // Milwaukee County suburbs
+  'shorewood':           '43974a35-2806-4010-98a5-d14ae1393884',
+  'whitefish bay':       '43974a35-2806-4010-98a5-d14ae1393884',
+  'river hills':         '43974a35-2806-4010-98a5-d14ae1393884',
+  'bayside':             '43974a35-2806-4010-98a5-d14ae1393884',
+  'glendale':            '43974a35-2806-4010-98a5-d14ae1393884',
+  'south milwaukee':     '43974a35-2806-4010-98a5-d14ae1393884',
+  'cudahy':              '43974a35-2806-4010-98a5-d14ae1393884',
+  'st. francis':         '43974a35-2806-4010-98a5-d14ae1393884',
+  'hales corners':       '43974a35-2806-4010-98a5-d14ae1393884',
+  'west allis':          '43974a35-2806-4010-98a5-d14ae1393884',
+  'wauwatosa':           '43974a35-2806-4010-98a5-d14ae1393884',
+  'greenfield':          '43974a35-2806-4010-98a5-d14ae1393884',
+  'franklin':            '43974a35-2806-4010-98a5-d14ae1393884',
+  // City-specific Milwaukee rates
+  'brown deer':          'ec76dd4b-b7eb-468e-bd0b-8246bdeedb9c',
+  'oak creek':           '80f64212-06c7-46f3-840b-e14873895504',
+  // Ozaukee County
+  'mequon':              '97608201-5377-4e0f-acaa-1aeee550dd32',
+  'cedarburg':           '97608201-5377-4e0f-acaa-1aeee550dd32',
+  'thiensville':         '97608201-5377-4e0f-acaa-1aeee550dd32',
+  'grafton':             '97608201-5377-4e0f-acaa-1aeee550dd32',
+  'port washington':     '97608201-5377-4e0f-acaa-1aeee550dd32',
+  'saukville':           '97608201-5377-4e0f-acaa-1aeee550dd32',
+  'fredonia':            '97608201-5377-4e0f-acaa-1aeee550dd32',
+  'belgium':             '97608201-5377-4e0f-acaa-1aeee550dd32',
+  'newburg':             '97608201-5377-4e0f-acaa-1aeee550dd32',
   // Washington County
-  'jackson':         '6955686a-5b1d-4684-92cd-becd890b562d',
-  'hartford':        '6955686a-5b1d-4684-92cd-becd890b562d',
-  'colgate':         '6955686a-5b1d-4684-92cd-becd890b562d',
-  'slinger':         '6955686a-5b1d-4684-92cd-becd890b562d',
-  'addison':         '6955686a-5b1d-4684-92cd-becd890b562d',
+  'jackson':             '6955686a-5b1d-4684-92cd-becd890b562d',
+  'hartford':            '6955686a-5b1d-4684-92cd-becd890b562d',
+  'colgate':             '6955686a-5b1d-4684-92cd-becd890b562d',
+  'slinger':             '6955686a-5b1d-4684-92cd-becd890b562d',
+  'addison':             '6955686a-5b1d-4684-92cd-becd890b562d',
   // Waukesha County
-  'new berlin':      '50b742c7-66ba-4034-b602-9552d5f2e77e',
-  'elm grove':       '50b742c7-66ba-4034-b602-9552d5f2e77e',
-  'lisbon':          '50b742c7-66ba-4034-b602-9552d5f2e77e',
-  'waukesha':        '50b742c7-66ba-4034-b602-9552d5f2e77e',
-  'pewaukee':        '50b742c7-66ba-4034-b602-9552d5f2e77e',
-  'mukwonago':       '50b742c7-66ba-4034-b602-9552d5f2e77e',
-  'menomonee falls': '50b742c7-66ba-4034-b602-9552d5f2e77e',
-  // Fond du Lac County (JRB default — covers most of Ozaukee and outlying suburbs)
-  'mequon':          '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'cedarburg':       '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'thiensville':     '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'grafton':         '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'port washington': '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'west bend':       '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'germantown':      '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'brookfield':      '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'glendale':        '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'sussex':          '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'fox point':       '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'hubertus':        '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'random lake':     '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'oconomowoc':      '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'river hills':     '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'brown deer':      '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'bayside':         '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'sturtevant':      '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
-  'racine':          '0075bdca-da5c-46cb-a5e2-13fe2f7c5822',
+  'new berlin':          '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'elm grove':           '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'lisbon':              '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'waukesha':            '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'pewaukee':            '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'mukwonago':           '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'menomonee falls':     '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'brookfield':          '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'hartland':            '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  'sussex':              '50b742c7-66ba-4034-b602-9552d5f2e77e',
+  // Walworth County
+  'elkhorn':             'f6f4fc4a-a05c-49f7-84c6-e5cc7d06b6f0',
+  'lake geneva':         'f6f4fc4a-a05c-49f7-84c6-e5cc7d06b6f0',
 };
 
 const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
@@ -254,6 +256,7 @@ function extractPlaceholders(text) {
   const matches = text.match(/\[[^\]]+\]/g);
   return [...new Set(matches || [])];
 }
+
 
 // ── Public API ────────────────────────────────────────────────────────────────
 

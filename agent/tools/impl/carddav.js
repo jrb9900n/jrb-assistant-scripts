@@ -9,6 +9,8 @@ import axios from 'axios';
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
+import { getQBAccessToken } from './qb-token.js';
+import { getAllClients } from './serviceautopilot.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
 
@@ -17,27 +19,10 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY
 );
 
-// ── QB auth (reuse token until near-expiry) ───────────────────
-
-let _qbToken = null, _qbTokenExpiry = 0;
-
-async function getQBToken() {
-  if (_qbToken && Date.now() < _qbTokenExpiry - 60_000) return _qbToken;
-  const creds = Buffer.from(`${process.env.QB_CLIENT_ID}:${process.env.QB_CLIENT_SECRET}`).toString('base64');
-  const res = await axios.post(
-    'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
-    `grant_type=refresh_token&refresh_token=${encodeURIComponent(process.env.QB_REFRESH_TOKEN)}`,
-    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
-  );
-  _qbToken = res.data.access_token;
-  _qbTokenExpiry = Date.now() + res.data.expires_in * 1000;
-  return _qbToken;
-}
-
 // ── QBO data fetch ────────────────────────────────────────────
 
 async function fetchQBOEntities(entityType) {
-  const token = await getQBToken();
+  const token = await getQBAccessToken();
   const results = [];
   let pos = 1;
   while (true) {
@@ -58,16 +43,50 @@ async function fetchQBOEntities(entityType) {
 let _cache = null, _cacheTime = 0, _cacheEtag = null;
 const CACHE_TTL = 2 * 60 * 60 * 1000;
 
+function normalizeName(s) {
+  return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+async function buildSAAddressMap() {
+  try {
+    const clients = await getAllClients();
+    const byQboId = new Map();
+    const byName  = new Map();
+    for (const c of clients) {
+      const addr = c.address ? { Line1: c.address, City: c.city, State: c.state, Zip: c.zip } : null;
+      if (!addr) continue;
+      if (c.qboId) byQboId.set(c.qboId, addr);
+      const key = normalizeName(c.name);
+      if (key) byName.set(key, addr);
+    }
+    logger.info('CardDAV: SA address map built', { byQboId: byQboId.size, byName: byName.size });
+    return { byQboId, byName };
+  } catch (err) {
+    logger.warn('CardDAV: SA address fetch failed, proceeding without SA addresses', { err: err.message });
+    return { byQboId: new Map(), byName: new Map() };
+  }
+}
+
 async function getContacts() {
   if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
 
-  logger.info('CardDAV: refreshing QBO contact cache');
-  const [customers, vendors] = await Promise.all([
+  logger.info('CardDAV: refreshing contact cache');
+  const [customers, vendors, saMap] = await Promise.all([
     fetchQBOEntities('Customer'),
     fetchQBOEntities('Vendor'),
+    buildSAAddressMap(),
   ]);
 
-  _cache = [...customers.map(c => entityToVCard(c, 'customer')), ...vendors.map(v => entityToVCard(v, 'vendor'))];
+  function saAddrFor(entity) {
+    return saMap.byQboId.get(String(entity.Id))
+      || saMap.byName.get(normalizeName(entity.DisplayName || ''))
+      || null;
+  }
+
+  _cache = [
+    ...customers.map(c => entityToVCard(c, 'customer', saAddrFor(c))),
+    ...vendors.map(v => entityToVCard(v, 'vendor', null)),
+  ];
   _cacheTime = Date.now();
   _cacheEtag = crypto.createHash('md5').update(String(_cacheTime)).digest('hex');
   logger.info('CardDAV: cache refreshed', { customers: customers.length, vendors: vendors.length });
@@ -80,16 +99,39 @@ function escapeVCard(s) {
   return (s ?? '').replace(/\\/g, '\\\\').replace(/,/g, '\\,').replace(/;/g, '\\;').replace(/\n/g, '\\n');
 }
 
-function entityToVCard(entity, type) {
+function entityToVCard(entity, type, saAddr) {
   const uid = `JRB-${type.toUpperCase()}-${entity.Id}@jrboehlke.com`;
   const name = escapeVCard(entity.DisplayName || [entity.GivenName, entity.FamilyName].filter(Boolean).join(' ') || 'Unknown');
   const givenName = escapeVCard(entity.GivenName ?? '');
   const familyName = escapeVCard(entity.FamilyName ?? '');
   const company = escapeVCard(entity.CompanyName ?? '');
-  const phone = entity.PrimaryPhone?.FreeFormNumber ?? '';
+
+  const primaryPhone = entity.PrimaryPhone?.FreeFormNumber ?? '';
+  const mobilePhone  = entity.Mobile?.FreeFormNumber ?? '';
+  const altPhone     = entity.AlternatePhone?.FreeFormNumber ?? '';
+  const faxPhone     = entity.Fax?.FreeFormNumber ?? '';
+
   const email = entity.PrimaryEmailAddr?.Address ?? '';
-  const addr = (type === 'customer' ? (entity.ShipAddr?.Line1 ? entity.ShipAddr : entity.BillAddr) : entity.BillAddr) ?? {};
+
+  // Address: SA service address takes priority over QBO ShipAddr/BillAddr
+  let addr;
+  if (saAddr?.Line1) {
+    addr = saAddr;
+  } else {
+    const qbo = (type === 'customer' ? (entity.ShipAddr?.Line1 ? entity.ShipAddr : entity.BillAddr) : entity.BillAddr) ?? {};
+    addr = qbo.Line1 ? { Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode } : null;
+  }
+
   const category = type === 'customer' ? 'JRB Customer' : 'JRB Vendor';
+
+  // Deduplicate phone entries so the same number doesn't appear twice
+  const seen = new Set();
+  function tel(number, telType) {
+    const n = (number || '').trim();
+    if (!n || seen.has(n)) return null;
+    seen.add(n);
+    return `TEL;TYPE=${telType}:${escapeVCard(n)}`;
+  }
 
   const lines = [
     'BEGIN:VCARD',
@@ -98,15 +140,18 @@ function entityToVCard(entity, type) {
     `FN:${name}`,
     `N:${familyName};${givenName};;;`,
     company ? `ORG:${company}` : null,
-    phone ? `TEL;TYPE=WORK,VOICE:${escapeVCard(phone)}` : null,
+    tel(primaryPhone, 'WORK,VOICE'),
+    tel(mobilePhone, 'CELL,VOICE'),
+    tel(altPhone, 'WORK,VOICE'),
+    tel(faxPhone, 'WORK,FAX'),
     email ? `EMAIL;TYPE=WORK:${escapeVCard(email)}` : null,
-    addr.Line1 ? `ADR;TYPE=WORK:;;${escapeVCard(addr.Line1)};${escapeVCard(addr.City ?? '')};${escapeVCard(addr.CountrySubDivisionCode ?? '')};${escapeVCard(addr.PostalCode ?? '')};US` : null,
+    addr?.Line1 ? `ADR;TYPE=WORK:;;${escapeVCard(addr.Line1)};${escapeVCard(addr.City ?? '')};${escapeVCard(addr.State ?? '')};${escapeVCard(addr.Zip ?? '')};US` : null,
     `CATEGORIES:${category}`,
     `NOTE:${uid}`,
     'END:VCARD',
   ].filter(Boolean).join('\r\n');
 
-  const etag = crypto.createHash('md5').update(uid + name + phone + email).digest('hex');
+  const etag = crypto.createHash('md5').update(uid + name + primaryPhone + mobilePhone + altPhone + email + (addr?.Line1 ?? '')).digest('hex');
   return { uid, etag, vcard: lines };
 }
 

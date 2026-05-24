@@ -573,6 +573,48 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── QuickBooks OAuth re-auth ──────────────────────────────────
+  // GET /qb-reauth?secret=<EXECUTE_SECRET>
+  //   → redirects to Intuit auth page so Michael can reconnect QB
+  // GET /qb-callback?code=<code>&realmId=<id>
+  //   → exchanges auth code, saves new refresh token, done
+  if (req.method === 'GET' && url.startsWith('/qb-reauth')) {
+    const secret = new URL(req.url, 'https://agent.jrboehlke.com').searchParams.get('secret');
+    if (secret !== process.env.CLAUDE_EXECUTE_SECRET) {
+      res.writeHead(401, { 'Content-Type': 'text/plain' });
+      res.end('Unauthorized'); return;
+    }
+    const { buildQBAuthUrl } = await import('../tools/impl/qb-token.js');
+    const authUrl = buildQBAuthUrl('reauth-' + Date.now());
+    res.writeHead(302, { Location: authUrl });
+    res.end(); return;
+  }
+
+  if (req.method === 'GET' && url.startsWith('/qb-callback')) {
+    const params = new URL(req.url, 'https://agent.jrboehlke.com').searchParams;
+    const code = params.get('code');
+    const realmId = params.get('realmId');
+    if (!code) { res.writeHead(400, { 'Content-Type': 'text/plain' }); res.end('Missing code'); return; }
+
+    try {
+      const { exchangeQBAuthCode } = await import('../tools/impl/qb-token.js');
+      await exchangeQBAuthCode(code);
+      logger.info('QB: re-auth complete', { realmId });
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font-family:monospace;background:#0a0a0a;color:#e0e0e0;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}
+.box{background:#111;border:1px solid #333;border-radius:8px;padding:32px 40px;max-width:420px;text-align:center}
+h2{color:#00cc66;margin-bottom:12px}p{color:#888;font-size:13px}</style></head>
+<body><div class="box"><h2>QuickBooks Connected</h2>
+<p>New refresh token saved. QBO queries will work immediately.</p></div></body></html>`);
+    } catch (err) {
+      logger.error('QB: re-auth callback failed', { err: err.message });
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end(`QB auth failed: ${err.message}`);
+    }
+    return;
+  }
+
   res.writeHead(404); res.end('Not found');
 });
 
