@@ -43,6 +43,11 @@ async function fetchQBOEntities(entityType) {
 let _cache = null, _cacheTime = 0, _cacheEtag = null;
 const CACHE_TTL = 2 * 60 * 60 * 1000;
 
+export function invalidateContactCache() {
+  _cache = null;
+  _cacheTime = 0;
+}
+
 function normalizeName(s) {
   return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }

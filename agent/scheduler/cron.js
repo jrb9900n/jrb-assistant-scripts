@@ -133,13 +133,13 @@ const SCHEDULED_TASKS = [
     }),
   },
   {
-    // 2 AM nightly — sync QBO customers + vendors into each employee's Outlook contact folders
+    // 2 AM nightly — bust CardDAV cache so phones get fresh QBO+SA contacts on next sync
     schedule: '0 2 * * *',
-    name: 'qbo_contacts_sync',
+    name: 'carddav_cache_refresh',
     run: async () => {
-      const { runContactsSync } = await import('../tools/impl/contacts-sync.js');
-      const result = await runContactsSync();
-      logger.info('QBO contacts sync complete', { succeeded: result.succeeded, failed: result.failed });
+      const { invalidateContactCache } = await import('../tools/impl/carddav.js');
+      invalidateContactCache();
+      logger.info('CardDAV contact cache invalidated — will refresh on next phone sync');
     },
   },
   {
