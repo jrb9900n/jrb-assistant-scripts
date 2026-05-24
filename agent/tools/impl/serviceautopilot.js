@@ -835,7 +835,7 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
       CategoryID:   TICKET_CATEGORIES.OTHER,
       TicketStatus: 0,
       EntityID:     details.customerJobId,
-      EntityType:   'Ticket',
+      EntityType:   'Account',
       DueDate:      dueDate ? new Date(dueDate).toISOString() : '',
       TicketDetail: {
         TicketEventType: ticketEventType,
