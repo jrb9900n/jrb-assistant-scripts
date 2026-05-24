@@ -52,9 +52,8 @@ const TICKET_CATEGORIES = {
 const JRB_TAX_CODE_ID = 'c432e644-6f8f-4a78-b52f-ef93f05abf4e'; // "Tax" code
 
 // Municipality SalesTaxRef GUIDs — discovered 2026-05-22 by scanning 500 real SA client records.
-// GetSalesTaxList endpoint returns null-Company error (broken). Fallback: Ozaukee County.
-// For cities not in this map, lookupTaxRefByCity() queries a live SA client in that city.
-const JRB_TAX_REF_FALLBACK = '97608201-5377-4e0f-acaa-1aeee550dd32'; // Ozaukee County
+// GetSalesTaxList endpoint returns null-Company error (broken). Default fallback: Ozaukee County.
+const JRB_TAX_REF_DEFAULT = '97608201-5377-4e0f-acaa-1aeee550dd32'; // Ozaukee County
 const JRB_TAX_REF_BY_CITY = {
   // City of Milwaukee (separate rate from county suburbs)
   'milwaukee':           '6adcb6c0-b0b0-42be-8afb-08627f3561b1',
@@ -74,8 +73,8 @@ const JRB_TAX_REF_BY_CITY = {
   'greenfield':          '43974a35-2806-4010-98a5-d14ae1393884',
   'franklin':            '43974a35-2806-4010-98a5-d14ae1393884',
   // City-specific Milwaukee rates
-  'brown deer':          'ec76dd4b-b7eb-468e-bd0b-8246bdeedb9c', // WI-Milwaukee-Brown Deer
-  'oak creek':           '80f64212-06c7-46f3-840b-e14873895504', // WI-Milwaukee-Oak Creek
+  'brown deer':          'ec76dd4b-b7eb-468e-bd0b-8246bdeedb9c',
+  'oak creek':           '80f64212-06c7-46f3-840b-e14873895504',
   // Ozaukee County
   'mequon':              '97608201-5377-4e0f-acaa-1aeee550dd32',
   'cedarburg':           '97608201-5377-4e0f-acaa-1aeee550dd32',
@@ -258,44 +257,6 @@ function extractPlaceholders(text) {
   return [...new Set(matches || [])];
 }
 
-// Look up the SA SalesTaxRefID for a city: static map first, then query a live SA client
-// in that city for their rate, then fall back to Ozaukee County.
-async function lookupTaxRefByCity(city) {
-  const key = (city || '').toLowerCase().trim();
-  if (!key) return JRB_TAX_REF_FALLBACK;
-  if (JRB_TAX_REF_BY_CITY[key]) return JRB_TAX_REF_BY_CITY[key];
-
-  // Dynamic: search SA for clients in this city and borrow their tax rate
-  try {
-    const searchRes = await post('/CRMBFF/AccountList/V2AccountList_Query', {
-      QueryInput: {
-        Settings: {
-          FilterData: JSON.stringify({
-            FilterData: [{ FieldColumn: '5', ContainOperator: '0', FieldItems: [city], Order: 0, SCFilterID: EMPTY_GUID }],
-            CustomFields: [], QuerySelection: 0,
-          }),
-        },
-        StartRow: 1, Max: 10,
-        SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
-      },
-    }, 'Clients.aspx');
-    const accounts = searchRes.data?.d?.Accounts || searchRes.data?.Accounts || [];
-    for (const acct of accounts) {
-      const ci = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo', { ClientID: acct.ClientID });
-      const taxVal = ci.data?.d?.SalesTaxInfo?.Value;
-      if (taxVal && taxVal !== EMPTY_GUID) {
-        logger.info('SA: tax ref resolved from existing client', { city, taxVal, clientName: acct.ClientName });
-        return taxVal;
-      }
-    }
-  } catch (err) {
-    logger.warn('SA: lookupTaxRefByCity dynamic lookup failed', { city, err: err.message });
-  }
-
-  logger.info('SA: tax ref defaulting to Ozaukee County', { city });
-  return JRB_TAX_REF_FALLBACK;
-}
-
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /**
@@ -464,7 +425,7 @@ export async function setClientBillingDefaults({ clientId }) {
     AutoCharge:              d.AutoCharge                       || false,
     BillingNotes:            d.BillingNotes                     || '',
     PaymentMethodID:         d.PaymentMethodInfo?.Value         || EMPTY_GUID,
-    SalesTaxRefID:           await lookupTaxRefByCity(d.City),
+    SalesTaxRefID:           JRB_TAX_REF_BY_CITY[(d.City || '').toLowerCase().trim()] || JRB_TAX_REF_DEFAULT,
     SalesTaxCodeID:          JRB_TAX_CODE_ID,                                // "Tax" — taxable
     InvoiceFrequencyID:      d.InvoiceFrequencyInfo?.Value      || EMPTY_GUID,
     StandardTermID:          d.StandardTermInfo?.Value          || EMPTY_GUID,
@@ -491,8 +452,10 @@ export async function setClientBillingDefaults({ clientId }) {
   if (result?.response?.Errors?.length > 0) {
     throw new Error(`SA setClientBillingDefaults SaveClient errors: ${JSON.stringify(result.response.Errors)}`);
   }
-  logger.info('SA: billing defaults set', { clientId, city: d.City });
-  return { clientId, sendInvoiceBy: 'Email', taxable: true, city: d.City };
+  const city = (d.City || '').toLowerCase().trim();
+  const taxRefId = JRB_TAX_REF_BY_CITY[city] || JRB_TAX_REF_DEFAULT;
+  logger.info('SA: billing defaults set', { clientId, city: d.City, taxRefId });
+  return { clientId, sendInvoiceBy: 'Email', taxable: true, city: d.City, taxRefId };
 }
 
 /**
