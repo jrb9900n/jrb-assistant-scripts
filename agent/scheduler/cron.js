@@ -1,12 +1,24 @@
 // scheduler/cron.js - Automated task scheduler
 import 'dotenv/config';
 import cron from 'node-cron';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
+
+// Kill any other running instances of this scheduler (prevents duplicates from Task Scheduler multi-fire)
+try {
+  const out = execSync('wmic process where "name=\'node.exe\'" get processid,commandline /format:list', { encoding: 'utf8', timeout: 5000 });
+  for (const block of out.split(/\r?\n\r?\n/)) {
+    if (!block.includes('cron.js')) continue;
+    const pidMatch = block.match(/ProcessId=(\d+)/);
+    if (pidMatch && parseInt(pidMatch[1]) !== process.pid) {
+      try { execSync(`taskkill /f /pid ${pidMatch[1]}`, { timeout: 3000 }); } catch {}
+    }
+  }
+} catch {}
 
 function acquireRunLock(taskName, ttlMs = 60_000) {
   const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
@@ -133,13 +145,13 @@ const SCHEDULED_TASKS = [
     }),
   },
   {
-    // 2 AM nightly — sync QBO customers + vendors into each employee's Outlook contact folders
+    // 2 AM nightly — bust CardDAV cache so phones get fresh QBO+SA contacts on next sync
     schedule: '0 2 * * *',
-    name: 'qbo_contacts_sync',
+    name: 'carddav_cache_refresh',
     run: async () => {
-      const { runContactsSync } = await import('../tools/impl/contacts-sync.js');
-      const result = await runContactsSync();
-      logger.info('QBO contacts sync complete', { succeeded: result.succeeded, failed: result.failed });
+      const { invalidateContactCache } = await import('../tools/impl/carddav.js');
+      invalidateContactCache();
+      logger.info('CardDAV contact cache invalidated — will refresh on next phone sync');
     },
   },
   {
