@@ -8,17 +8,17 @@ import { join } from 'path';
 import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
 
-// Kill any other running instances of this scheduler (prevents duplicates from Task Scheduler multi-fire)
+// Kill any previous scheduler instance via PID file (wmic not available; this works cross-session)
+const SCHEDULER_PID_FILE = join(tmpdir(), 'jrb-scheduler.pid');
 try {
-  const out = execSync('wmic process where "name=\'node.exe\'" get processid,commandline /format:list', { encoding: 'utf8', timeout: 5000 });
-  for (const block of out.split(/\r?\n\r?\n/)) {
-    if (!block.includes('cron.js')) continue;
-    const pidMatch = block.match(/ProcessId=(\d+)/);
-    if (pidMatch && parseInt(pidMatch[1]) !== process.pid) {
-      try { execSync(`taskkill /f /pid ${pidMatch[1]}`, { timeout: 3000 }); } catch {}
+  if (existsSync(SCHEDULER_PID_FILE)) {
+    const oldPid = parseInt(readFileSync(SCHEDULER_PID_FILE, 'utf8').trim(), 10);
+    if (oldPid && oldPid !== process.pid) {
+      try { execSync(`taskkill /f /pid ${oldPid}`, { encoding: 'utf8', timeout: 3000 }); } catch {}
     }
   }
 } catch {}
+try { writeFileSync(SCHEDULER_PID_FILE, String(process.pid), 'utf8'); } catch {}
 
 function acquireRunLock(taskName, ttlMs = 60_000) {
   const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
