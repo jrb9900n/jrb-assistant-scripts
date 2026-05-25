@@ -913,8 +913,9 @@ function mapSAAccount(a) {
     city:     a.City || '',
     state:    a.State || a.StateAbbr || '',
     zip:      a.Zip || a.ZipCode || a.PostalCode || '',
-    phone:    a.Phone1 || a.PhoneNumber || '',
+    phone:    a.HomePhone || a.CellPhone || a.WorkPhone || a.OtherPhone || a.Phone1 || a.PhoneNumber || '',
     qboId:    a.QboID || a.QboId || '',
+    isLead:   !!(a.IsLead || a.isLead),
   };
 }
 
@@ -946,23 +947,23 @@ async function paginateAccountList(referer, max = 10000) {
 }
 
 /**
- * Bulk-fetch all SA clients (active accounts).
- * Returns [{ clientId, name, address, city, state, zip, phone, qboId }]
+ * Bulk-fetch all SA accounts (clients + leads) in a single paginated call.
+ * Returns [{ clientId, name, address, city, state, zip, phone, qboId, isLead }]
  */
-export async function getAllClients({ max = 10000 } = {}) {
+export async function getAllSAAccounts({ max = 10000 } = {}) {
   const accounts = await paginateAccountList('Clients.aspx', max);
-  logger.info('SA: bulk client fetch complete', { count: accounts.length });
+  logger.info('SA: bulk account fetch complete', { count: accounts.length });
   return accounts.map(mapSAAccount);
 }
 
-/**
- * Bulk-fetch all SA leads (prospects not yet converted to clients).
- * Returns [{ clientId, name, address, city, state, zip, phone, qboId }]
- * When a lead converts and gets a QBO ID, the QBO customer record takes
- * precedence automatically in CardDAV because the SA record will have qboId set.
- */
+// Kept for backward compatibility — returns only non-lead accounts
+export async function getAllClients({ max = 10000 } = {}) {
+  const all = await getAllSAAccounts({ max });
+  return all.filter(a => !a.isLead);
+}
+
+// Returns only lead accounts
 export async function getAllLeads({ max = 10000 } = {}) {
-  const accounts = await paginateAccountList('Leads.aspx', max);
-  logger.info('SA: bulk lead fetch complete', { count: accounts.length });
-  return accounts.map(mapSAAccount);
+  const all = await getAllSAAccounts({ max });
+  return all.filter(a => a.isLead);
 }
