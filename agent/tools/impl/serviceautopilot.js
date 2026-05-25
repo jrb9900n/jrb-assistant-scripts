@@ -836,13 +836,18 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   const typeMap = { Task: 2, Call: 3, Email: 4, Note: 1 };
   const ticketEventType = typeMap[ticketType] ?? 2;
 
+  // SA's MyDay view only shows tickets DueDate = today. Default to today so
+  // new tickets are immediately visible in the SA ticket queue.
+  const effectiveDueDate = dueDate ? new Date(dueDate) : new Date();
+  effectiveDueDate.setHours(23, 59, 0, 0);
+
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
       CategoryID:   TICKET_CATEGORIES.OTHER,
       TicketStatus: 0,
       EntityID:     details.customerJobId,
       EntityType:   'Account',
-      DueDate:      dueDate ? new Date(dueDate).toISOString() : '',
+      DueDate:      effectiveDueDate.toISOString(),
       TicketDetail: {
         TicketEventType: ticketEventType,
         Subject:         subject,
