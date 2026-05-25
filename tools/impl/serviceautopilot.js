@@ -868,13 +868,31 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   const effectiveDueDate = dueDate ? new Date(dueDate) : new Date();
   effectiveDueDate.setHours(23, 59, 0, 0);
 
+  // Fetch the current SA user's resource record so we can assign the ticket to them.
+  // Without AssignedResources, the ticket only appears on the client CRM page and is
+  // invisible in the company-wide MyDay ticket queue.
+  let assignedResourceId   = details.currentUserId;
+  let assignedResourceType = details.currentUserType;
+  try {
+    const rRes   = await post('/CRMBFF/TicketEdit/GetCurrentResource', {}, 'ClientView.aspx');
+    const rData  = rRes.data?.Result ?? rRes.data?.d?.Result ?? rRes.data;
+    if (rData?.ID && rData.ID !== EMPTY_GUID) {
+      assignedResourceId   = rData.ID;
+      assignedResourceType = rData.Type ?? rData.ResourceType ?? assignedResourceType;
+    }
+    logger.info('SA: current resource', { assignedResourceId, assignedResourceType, rawKeys: Object.keys(rData || {}) });
+  } catch (e) {
+    logger.warn('SA: GetCurrentResource failed, falling back to currentUserId', { error: e.message });
+  }
+
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
-      CategoryID:   TICKET_CATEGORIES.OTHER,
-      TicketStatus: 0,
-      EntityID:     details.customerJobId,
-      EntityType:   'Account',
-      DueDate:      effectiveDueDate.toISOString(),
+      CategoryID:        TICKET_CATEGORIES.OTHER,
+      TicketStatus:      0,
+      EntityID:          details.customerJobId,
+      EntityType:        'Account',
+      DueDate:           effectiveDueDate.toISOString(),
+      AssignedResources: [{ ResourceID: assignedResourceId, ResourceType: assignedResourceType }],
       TicketDetail: {
         TicketEventType: ticketEventType,
         Subject:         subject,
