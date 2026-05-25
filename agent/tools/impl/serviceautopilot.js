@@ -905,12 +905,20 @@ export async function getEstimateList({ dateFrom, dateTo, stages, max = 500 } = 
   return estimates;
 }
 
-/**
- * Bulk-fetch all SA clients for CardDAV address overlay.
- * Returns [{ clientId, name, address, city, state, zip, phone, qboId }]
- * Fields are best-effort from the V2AccountList_Query response; unavailable fields are ''.
- */
-export async function getAllClients({ max = 10000 } = {}) {
+function mapSAAccount(a) {
+  return {
+    clientId: a.ClientID || '',
+    name:     a.ClientName || '',
+    address:  a.Address1 || '',
+    city:     a.City || '',
+    state:    a.State || a.StateAbbr || '',
+    zip:      a.Zip || a.ZipCode || a.PostalCode || '',
+    phone:    a.Phone1 || a.PhoneNumber || '',
+    qboId:    a.QboID || a.QboId || '',
+  };
+}
+
+async function paginateAccountList(referer, max = 10000) {
   const results = [];
   let startRow = 1;
   const pageSize = 500;
@@ -925,7 +933,7 @@ export async function getAllClients({ max = 10000 } = {}) {
         Max: pageSize,
         SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
       },
-    }, 'Clients.aspx');
+    }, referer);
 
     const accounts = (res.data?.d || res.data)?.Accounts || [];
     if (accounts.length === 0) break;
@@ -934,15 +942,27 @@ export async function getAllClients({ max = 10000 } = {}) {
     startRow += pageSize;
   }
 
-  logger.info('SA: bulk client fetch complete', { count: results.length });
-  return results.map(a => ({
-    clientId: a.ClientID || '',
-    name:     a.ClientName || '',
-    address:  a.Address1 || '',
-    city:     a.City || '',
-    state:    a.State || a.StateAbbr || '',
-    zip:      a.Zip || a.ZipCode || a.PostalCode || '',
-    phone:    a.Phone1 || a.PhoneNumber || '',
-    qboId:    a.QboID || a.QboId || '',
-  }));
+  return results;
+}
+
+/**
+ * Bulk-fetch all SA clients (active accounts).
+ * Returns [{ clientId, name, address, city, state, zip, phone, qboId }]
+ */
+export async function getAllClients({ max = 10000 } = {}) {
+  const accounts = await paginateAccountList('Clients.aspx', max);
+  logger.info('SA: bulk client fetch complete', { count: accounts.length });
+  return accounts.map(mapSAAccount);
+}
+
+/**
+ * Bulk-fetch all SA leads (prospects not yet converted to clients).
+ * Returns [{ clientId, name, address, city, state, zip, phone, qboId }]
+ * When a lead converts and gets a QBO ID, the QBO customer record takes
+ * precedence automatically in CardDAV because the SA record will have qboId set.
+ */
+export async function getAllLeads({ max = 10000 } = {}) {
+  const accounts = await paginateAccountList('Leads.aspx', max);
+  logger.info('SA: bulk lead fetch complete', { count: accounts.length });
+  return accounts.map(mapSAAccount);
 }
