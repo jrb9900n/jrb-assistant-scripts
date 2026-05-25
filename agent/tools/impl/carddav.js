@@ -160,6 +160,16 @@ function entityToVCard(entity, type, saAddr) {
   return { uid, etag, vcard: lines };
 }
 
+// ── Per-user exclusion list ───────────────────────────────────
+
+async function getUserExclusions(credentialId) {
+  const { data } = await supabase
+    .from('carddav_exclusions')
+    .select('uid')
+    .eq('credential_id', credentialId);
+  return new Set((data ?? []).map(r => r.uid));
+}
+
 // ── Credential check ──────────────────────────────────────────
 
 export async function checkCredentials(username, password) {
@@ -210,7 +220,7 @@ export async function handleCardDAV(req, res) {
   // OPTIONS — announce CardDAV support
   if (method === 'OPTIONS') {
     res.set('DAV', '1, 3, addressbook');
-    res.set('Allow', 'OPTIONS, GET, HEAD, PROPFIND, REPORT');
+    res.set('Allow', 'OPTIONS, GET, HEAD, PROPFIND, REPORT, DELETE');
     return res.status(200).send('');
   }
 
@@ -285,7 +295,8 @@ export async function handleCardDAV(req, res) {
     const wantsAddressData = bodyStr.includes('address-data') || bodyStr.includes('addressbook-multiget');
 
     res.set('DAV', '1, 3, addressbook');
-    const contacts = await getContacts();
+    const [allContacts, exclusions] = await Promise.all([getContacts(), getUserExclusions(user.id)]);
+    const contacts = allContacts.filter(c => !exclusions.has(c.uid));
 
     const responses = contacts.map(c => {
       const vcardBlock = wantsAddressData
@@ -309,17 +320,28 @@ ${responses}
     return res.status(207).set('Content-Type', 'application/xml; charset=utf-8').send(`<?xml version="1.0" encoding="utf-8"?>\n${xml}`);
   }
 
-  // GET individual vCard
+  // GET / DELETE individual vCard
   const vcfMatch = path.match(/\/carddav\/addressbooks\/jrb\/(.+)\.vcf$/);
-  if (method === 'GET' && vcfMatch) {
+  if (vcfMatch) {
     const uid = decodeURIComponent(vcfMatch[1]);
-    const contacts = await getContacts();
-    const contact = contacts.find(c => c.uid === uid);
-    if (!contact) return res.status(404).send('Not found');
-    return res.status(200)
-      .set('Content-Type', 'text/vcard; charset=utf-8')
-      .set('ETag', `"${contact.etag}"`)
-      .send(contact.vcard);
+
+    // DELETE — add to this user's exclusion list so it never comes back
+    if (method === 'DELETE') {
+      await supabase
+        .from('carddav_exclusions')
+        .upsert({ credential_id: user.id, uid }, { onConflict: 'credential_id,uid' });
+      return res.status(204).send('');
+    }
+
+    if (method === 'GET') {
+      const [contacts, exclusions] = await Promise.all([getContacts(), getUserExclusions(user.id)]);
+      const contact = contacts.find(c => c.uid === uid && !exclusions.has(c.uid));
+      if (!contact) return res.status(404).send('Not found');
+      return res.status(200)
+        .set('Content-Type', 'text/vcard; charset=utf-8')
+        .set('ETag', `"${contact.etag}"`)
+        .send(contact.vcard);
+    }
   }
 
   return res.status(404).send('Not found');
