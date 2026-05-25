@@ -281,18 +281,24 @@ export async function searchClients({ name, limit = 10 }) {
     QueryInput: {
       Settings: { FilterData: filterData },
       StartRow: 1,
-      Max: limit,
+      Max: limit * 3,
       SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
     },
   }, 'Clients.aspx');
 
   const accounts = (res.data?.d || res.data)?.Accounts || [];
-  return accounts.map(a => ({
-    clientId: a.ClientID,
-    name:     a.ClientName,
-    address:  a.Location || a.Address1 || '',
-    type:     a.Type || '',
-  }));
+  const term = name.toLowerCase();
+  // SA returns its "recent clients" list when no filter matches — filter client-side
+  // to ensure only genuinely matching records are returned.
+  return accounts
+    .filter(a => (a.ClientName || '').toLowerCase().includes(term))
+    .slice(0, limit)
+    .map(a => ({
+      clientId: a.ClientID,
+      name:     a.ClientName,
+      address:  a.Location || a.Address1 || '',
+      type:     a.Type || '',
+    }));
 }
 
 /**

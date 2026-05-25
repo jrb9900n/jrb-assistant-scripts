@@ -420,8 +420,24 @@ Extract every field present in the email body:
 - email, phone
 If a field is not in the form, omit it from the tool call (except state: always include state, defaulting to “WI”).
 
-STEP 2 — SEARCH FOR EXISTING CLIENT:
-Call sa_search_clients using their last name. If a client with the same name or email already exists, do NOT create a duplicate — skip to STEP 4.
+STEP 2 — SEARCH FOR EXISTING CLIENT (deduplicate before creating):
+Run multiple SA searches to check for an existing account. SA client names are stored as "First Last" or "Company Name".
+
+a) Search by firstName: call sa_search_clients with firstName (finds residential clients by first name).
+b) Search by lastName: call sa_search_clients with lastName (catches reversed entries).
+c) If the name looks like a business (has LLC, Inc, Co, or companyName is set): also call sa_search_clients with companyName.
+d) Merge results from all searches. Evaluate each unique result against the incoming contact data:
+   - Name match: same first+last name or same company name (case-insensitive)
+   - Address match: same street number AND street name (ignore unit/apt, city, zip differences)
+   - Email match: identical email address
+   - Phone match: same 10 digits (ignore dashes, spaces, parentheses)
+
+DUPLICATE DECISION RULES:
+- If ANY result matches on 2 or more fields (name + address, name + email, name + phone, address + email) → treat as EXISTING CLIENT. Use that clientId. Skip STEP 3.
+- If a result matches on name only but has a DIFFERENT address → this may be a GC, property manager, or business owner with multiple properties. Note it in the STEP 7 summary as "Possible existing client [name] found at different address — Michael should verify". Still use the existing clientId (do NOT create a duplicate account).
+- If search returns no matches on any field → proceed to STEP 3 (create new client).
+
+The goal is zero duplicate accounts. When in doubt, use the existing client.
 
 STEP 3 — CREATE CLIENT (only if new):
 Call sa_create_client with all parsed fields.
@@ -462,12 +478,13 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
   <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>Ticket ID</td><td style=”padding:6px 12px;”>[ticketId]</td></tr>
   <tr><td style=”padding:6px 12px;font-weight:bold;”>Ticket Subject</td><td style=”padding:6px 12px;”>[subject]</td></tr>
   <tr style=”background:#f5f5f5;”><td style=”padding:6px 12px;font-weight:bold;”>Billing Defaults</td><td style=”padding:6px 12px;”>[billing defaults status from STEP 6, or “N/A — existing client”]</td></tr>
+  <tr><td style=”padding:6px 12px;font-weight:bold;”>Account Status</td><td style=”padding:6px 12px;”>[New account created / Existing account used (matched on: [fields]) / Existing account used — possible multi-property (verify)]</td></tr>
 </table>
 
 <h4>Lead Message</h4>
 <p style=”background:#f9f9f9;padding:12px;border-left:3px solid #ccc;”>[brief summary of what they're asking for]</p>
 
-<p><em>Note: [anything Michael should manually verify, e.g. incomplete address, ambiguous business/residential]</em></p>
+<p><em>Note: [anything Michael should manually verify, e.g. incomplete address, ambiguous business/residential, possible duplicate account]</em></p>
 
 ━━━ OTHER SA ACTIONS ━━━
 - If Michael asks to create a ticket, estimate, job, or other SA record: do it now using your tools, then reply with a brief HTML summary.
