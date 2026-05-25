@@ -10,7 +10,7 @@ import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getQBAccessToken } from './qb-token.js';
-import { getAllClients } from './serviceautopilot.js';
+import { getAllClients, getAllLeads } from './serviceautopilot.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
 
@@ -56,11 +56,15 @@ async function getContacts() {
   if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
 
   logger.info('CardDAV: refreshing contact cache');
-  const [customers, vendors, saClients] = await Promise.all([
+  const [customers, vendors, saClients, saLeads] = await Promise.all([
     fetchQBOEntities('Customer'),
     fetchQBOEntities('Vendor'),
     getAllClients().catch(err => {
-      logger.warn('CardDAV: SA fetch failed, proceeding without SA data', { err: err.message });
+      logger.warn('CardDAV: SA client fetch failed', { err: err.message });
+      return [];
+    }),
+    getAllLeads().catch(err => {
+      logger.warn('CardDAV: SA lead fetch failed', { err: err.message });
       return [];
     }),
   ]);
@@ -114,8 +118,16 @@ async function getContacts() {
       return entityToVCard(c, 'customer', saAddrFor(c), extraAddrs);
     });
 
-  // SA-only contacts: in SA but not linked to any active QBO customer
-  const saOnlyVcards = saClients
+  // Merge SA clients + leads, deduplicated by clientId
+  // When a lead converts to a client they may briefly appear in both lists
+  const saAllById = new Map();
+  for (const c of [...saClients, ...saLeads]) {
+    if (c.clientId) saAllById.set(c.clientId, c);
+  }
+
+  // SA-only contacts: in SA but not linked to an active QBO customer
+  // QBO supersedes SA automatically once the SA record has a matching qboId
+  const saOnlyVcards = [...saAllById.values()]
     .filter(c => c.name && c.phone && (!c.qboId || !customerIds.has(String(c.qboId))))
     .map(saClientToVCard);
 
@@ -129,6 +141,8 @@ async function getContacts() {
   logger.info('CardDAV: cache refreshed', {
     qboCustomers: qboVcards.length,
     vendors: vendors.length,
+    saClients: saClients.length,
+    saLeads: saLeads.length,
     saOnly: saOnlyVcards.length,
   });
   return _cache;
