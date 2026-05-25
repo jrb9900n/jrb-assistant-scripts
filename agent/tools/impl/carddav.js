@@ -10,7 +10,7 @@ import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getQBAccessToken } from './qb-token.js';
-import { getAllSAAccounts } from './serviceautopilot.js';
+import { getAllSAAccounts, getSAClientPhone } from './serviceautopilot.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
 
@@ -114,11 +114,36 @@ async function getContacts() {
       return entityToVCard(c, 'customer', saAddrFor(c), extraAddrs);
     });
 
-  // SA-only contacts: in SA (client or lead) but not linked to an active QBO customer.
-  // QBO supersedes SA automatically once the SA record has a matching qboId.
-  const saOnlyVcards = saAccounts
-    .filter(c => c.name && c.phone && (!c.qboId || !customerIds.has(String(c.qboId))))
-    .map(saClientToVCard);
+  // SA-only contacts: in SA but not matched to any active QBO customer by name.
+  // SA's QboID sync is not configured, so we name-match instead of ID-match.
+  // SA bulk list has no phone fields — requires per-account GetClientInfo.
+  // Leads are prioritized first so they always make it within the fetch cap.
+  const qboNormalizedNames = new Set(customers.map(c => normalizeName(c.DisplayName || '')));
+  const saOnlyRaw = saAccounts
+    .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)))
+    .sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
+
+  const PHONE_FETCH_CAP = 150;
+  const PHONE_CONCURRENCY = 5;
+  const saOnlyToFetch = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
+  const saOnlyWithPhone = [];
+  try {
+    for (let i = 0; i < saOnlyToFetch.length; i += PHONE_CONCURRENCY) {
+      const batch = saOnlyToFetch.slice(i, i + PHONE_CONCURRENCY);
+      const batchResults = await Promise.all(
+        batch.map(async c => {
+          try {
+            const phone = await getSAClientPhone(c.clientId);
+            return phone ? { ...c, phone } : null;
+          } catch { return null; }
+        })
+      );
+      saOnlyWithPhone.push(...batchResults.filter(Boolean));
+    }
+  } catch (err) {
+    logger.warn('CardDAV: SA phone fetch failed, skipping SA-only contacts', { err: err.message });
+  }
+  const saOnlyVcards = saOnlyWithPhone.map(saClientToVCard);
 
   _cache = [
     ...qboVcards,

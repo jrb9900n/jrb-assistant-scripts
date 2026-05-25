@@ -959,7 +959,7 @@ function mapSAAccount(a) {
     zip:      a.Zip || a.ZipCode || a.PostalCode || '',
     phone:    a.HomePhone || a.CellPhone || a.WorkPhone || a.OtherPhone || a.Phone1 || a.PhoneNumber || '',
     qboId:    a.QboID || a.QboId || '',
-    isLead:   !!(a.IsLead || a.isLead),
+    isLead:   a.Type === 'Lead',
   };
 }
 
@@ -968,12 +968,23 @@ async function paginateAccountList(referer, max = 10000) {
   let startRow = 1;
   const pageSize = 500;
 
+  // QuerySelection:3 returns Clients + Leads + Closed Leads (vs 0 = Clients only).
+  // FilterData mirrors the exact browser request captured from SA's Leads view —
+  // FieldColumn 28/ContainOperator 7 enables all statuses; FieldColumn 1/ContainOperator 8
+  // targets the SA-side "All Accounts" saved list GUID.
+  const filterData = JSON.stringify({
+    FilterData: [
+      { FieldColumn: '28', ContainOperator: '7', FieldItems: [], Order: 0, SCFilterID: EMPTY_GUID },
+      { FieldColumn: '1', ContainOperator: '8', FieldItems: ['408bb07e-0d58-4a26-8b32-8f4190443a22'], Order: 1, SCFilterID: EMPTY_GUID },
+    ],
+    CustomFields: [],
+    QuerySelection: 3,
+  });
+
   while (results.length < max) {
     const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
       QueryInput: {
-        Settings: {
-          FilterData: JSON.stringify({ FilterData: [], CustomFields: [], QuerySelection: 0 }),
-        },
+        Settings: { FilterData: filterData },
         StartRow: startRow,
         Max: pageSize,
         SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
@@ -1006,4 +1017,15 @@ export async function getAllClients({ max = 10000 } = {}) {
   return all.filter(a => !a.isLead);
 }
 
+/**
+ * Fetch the phone number for a single SA account via GetClientInfo.
+ * The bulk account list has no phone fields; this per-account call is required.
+ * Returns the first non-empty phone found (HomePhone → CellPhone → WorkPhone → OtherPhone).
+ */
+export async function getSAClientPhone(clientId) {
+  const res = await post('/WebServices/ClientEditOverlayWs.asmx/GetClientInfo', { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) return '';
+  return d.HomePhone || d.CellPhone || d.WorkPhone || d.OtherPhone || '';
+}
 
