@@ -194,7 +194,7 @@ Storage bucket: `expense-receipts` (10MB limit, image/* + PDF)
 
 ## Service Autopilot Write Tools (built 2026-05-18)
 
-SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints. Session cached 4 hours.
+SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints. Browser is kept open for the full 4-hour session (not closed after login) and all API calls run via `page.evaluate()` inside Chromium — bypasses Incapsula JA3 TLS fingerprint detection that blocked Node.js `fetch()` calls after rapid restarts.
 
 ### Available SA tools
 - `sa_search_clients` — search by name
