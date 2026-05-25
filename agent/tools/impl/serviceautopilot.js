@@ -109,23 +109,36 @@ const JRB_TAX_REF_BY_CITY = {
 
 const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
-let _sessionCookies = null;
+// Browser kept open for session lifetime so all API calls run inside Chromium.
+// Node.js fetch() has a different TLS fingerprint (JA3) that Incapsula detects as
+// non-browser traffic after repeated rapid logins. Routing via page.evaluate() is
+// indistinguishable from real user XHR requests.
+let _browser      = null;
+let _page         = null;
 let _sessionExpiry  = 0;
 let _loginPromise   = null; // deduplicate concurrent login attempts
 
 // ── Session management ───────────────────────────────────────────────────────
 
 async function getSession(force = false) {
-  if (!force && _sessionCookies && Date.now() < _sessionExpiry) {
-    return _sessionCookies;
+  if (!force && _page && Date.now() < _sessionExpiry) {
+    return _page;
   }
   if (!_loginPromise) {
-    _loginPromise = login()
-      .then(cookies => {
-        _sessionCookies = cookies;
-        _sessionExpiry  = Date.now() + SESSION_TTL_MS;
-        _loginPromise   = null;
-        return cookies;
+    _loginPromise = (async () => {
+      if (_browser) {
+        try { await _browser.close(); } catch {}
+        _browser = null;
+        _page = null;
+      }
+      return login();
+    })()
+      .then(({ browser, page }) => {
+        _browser = browser;
+        _page    = page;
+        _sessionExpiry = Date.now() + SESSION_TTL_MS;
+        _loginPromise  = null;
+        return page;
       })
       .catch(err => {
         _loginPromise = null;
@@ -176,38 +189,39 @@ async function login() {
       { timeout: 30000 }
     );
     await new Promise(r => setTimeout(r, 2000));
-
-    const cookies = await page.cookies();
-    const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     logger.info('SA: login complete');
-    return cookieStr;
-  } finally {
+    return { browser, page }; // keep browser open — API calls route through this page
+  } catch (err) {
     await browser.close();
+    throw err;
   }
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
 
-function apiHeaders(cookieStr, referer) {
-  return {
-    'Content-Type': 'application/json; charset=UTF-8',
-    'Accept': 'application/json, text/javascript, */*; q=0.01',
-    'X-Requested-With': 'XMLHttpRequest',
-    'Referer': `${SA_BASE}/${referer || ''}`,
-    'Origin': SA_BASE,
-    'Cookie': cookieStr,
-  };
-}
+async function saPost(page, path, body, referer) {
+  const url   = `${SA_BASE}${path}`;
+  const saBase = SA_BASE;
+  // Run fetch inside the Puppeteer browser so Incapsula sees real-browser TLS/cookies
+  const result = await page.evaluate(async ({ url, body, referer, saBase }) => {
+    const res = await window.fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json; charset=UTF-8',
+        'Accept': 'application/json, text/javascript, */*; q=0.01',
+        'X-Requested-With': 'XMLHttpRequest',
+        'Referer': `${saBase}/${referer || ''}`,
+        'Origin': saBase,
+      },
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    return { status: res.status, text };
+  }, { url, body, referer, saBase });
 
-async function saPost(cookieStr, path, body, referer) {
-  const res = await fetch(`${SA_BASE}${path}`, {
-    method: 'POST',
-    headers: apiHeaders(cookieStr, referer),
-    body: JSON.stringify(body),
-  });
-  const text = await res.text();
-  const isJson = text.trim().startsWith('{') || text.trim().startsWith('[');
-  return { status: res.status, data: isJson ? JSON.parse(text) : null, text };
+  const isJson = result.text.trim().startsWith('{') || result.text.trim().startsWith('[');
+  return { status: result.status, data: isJson ? JSON.parse(result.text) : null, text: result.text };
 }
 
 function looksLikeLoginPage(res) {
@@ -215,13 +229,25 @@ function looksLikeLoginPage(res) {
     || (res.data === null && typeof res.text === 'string' && res.text.includes('txtLogin'));
 }
 
+function looksLikeIncapsula(res) {
+  return res.data === null && typeof res.text === 'string' && res.text.includes('_Incapsula_Resource');
+}
+
 async function post(path, body, referer) {
-  let cookies = await getSession();
-  let res = await saPost(cookies, path, body, referer);
+  let page = await getSession();
+  let res = await saPost(page, path, body, referer);
   if (looksLikeLoginPage(res)) {
     logger.info('SA: session expired, refreshing');
-    cookies = await getSession(true);
-    res = await saPost(cookies, path, body, referer);
+    page = await getSession(true);
+    res = await saPost(page, path, body, referer);
+  }
+  if (looksLikeIncapsula(res)) {
+    logger.warn('SA: Incapsula challenge on API call, forcing fresh browser session');
+    page = await getSession(true);
+    res = await saPost(page, path, body, referer);
+  }
+  if (looksLikeIncapsula(res)) {
+    throw new Error('SA Incapsula block persists after session refresh — bot protection may have flagged this IP');
   }
   return res;
 }
