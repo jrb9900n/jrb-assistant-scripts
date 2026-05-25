@@ -232,6 +232,10 @@ async function handleTeamsActivity(req, res) {
   const intent = classifyIntent(userText);
   logger.info('Teams message', { intent, text: userText.slice(0, 80) });
 
+  // Track what we're about to run so the catch block can queue a retry if SA is blocked
+  let retryTask = userText;
+  let retryTaskType = 'general';
+
   try {
     let result;
 
@@ -256,6 +260,7 @@ async function handleTeamsActivity(req, res) {
       } catch { /* non-fatal */ }
 
       const systemPrompt = buildSchedulingSystemPrompt(sessionId, null, draftContext, rulesBlock);
+      retryTaskType = 'scheduling';
       ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true }));
 
     } else if (intent === 'crm') {
@@ -270,16 +275,19 @@ Message: "${userText}"
 - If Michael asks to revoke CardDAV for an employee: use carddav_revoke with their email.
 - If Michael asks to list CardDAV credentials: use carddav_list.
 - Always confirm what you did: client name, SA IDs, actions taken.`;
+      retryTask = crmTask; retryTaskType = 'crm';
       ({ result } = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false }));
 
     } else if (intent === 'dev') {
       const devTask = `Michael sent this Teams message:\n\n"${userText}"\n\nFollow the github-dev skill workflow. Reply with a scope proposal:\n- Restate the goal in 2-3 sentences\n- List the files that will be created or changed\n- Identify which repo this belongs in\n- State any assumptions\n- Ask Michael to confirm before you proceed\n\nDo not write any code yet. Return only the reply text.`;
+      retryTask = devTask; retryTaskType = 'code';
       ({ result } = await runAgent({ task: devTask, taskType: 'code', saveContext: false }));
 
     } else if (intent === 'dev_ambiguous') {
       result = `Want to make sure I handle this correctly — are you asking me to build or write code, or looking for information/advice? Reply "yes, build it" and I'll put together a scope plan.`;
 
     } else if (intent === 'report') {
+      retryTaskType = 'report';
       ({ result } = await runAgent({ task: userText, taskType: 'report', saveContext: false }));
 
     } else {
@@ -289,7 +297,44 @@ Message: "${userText}"
     await replyToTeams(activity, result);
   } catch (err) {
     logger.error('Teams handler error', { err: err.message });
-    await replyToTeams(activity, `Error: ${err.message}`);
+
+    if (err.message.includes('Incapsula backoff')) {
+      // Queue the task for automatic retry when the backoff clears
+      try {
+        const { getSABackoffUntil } = await import('../tools/impl/serviceautopilot.js');
+        const backoffUntil = getSABackoffUntil();
+        const runAfter = backoffUntil > Date.now()
+          ? new Date(backoffUntil).toISOString()
+          : new Date(Date.now() + 45 * 60 * 1000).toISOString();
+        const remainingMin = Math.ceil((new Date(runAfter) - Date.now()) / 60000);
+
+        const SUPABASE_URL = process.env.SUPABASE_URL;
+        const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+        await fetch(`${SUPABASE_URL}/rest/v1/agent_tasks`, {
+          method: 'POST',
+          headers: {
+            apikey: SUPABASE_KEY,
+            Authorization: `Bearer ${SUPABASE_KEY}`,
+            'Content-Type': 'application/json',
+            Prefer: 'return=minimal',
+          },
+          body: JSON.stringify({
+            task: retryTask,
+            task_type: retryTaskType,
+            status: 'pending',
+            run_after: runAfter,
+            notify_teams: true,
+            retry_count: 0,
+          }),
+        });
+        await replyToTeams(activity, `SA is temporarily rate-limited by bot protection. I've queued this task and will retry automatically in ~${remainingMin} min — I'll notify you here when it completes.`);
+      } catch (queueErr) {
+        logger.error('Teams handler: failed to queue SA retry task', { err: queueErr.message });
+        await replyToTeams(activity, `Error: ${err.message}`);
+      }
+    } else {
+      await replyToTeams(activity, `Error: ${err.message}`);
+    }
   }
 }
 

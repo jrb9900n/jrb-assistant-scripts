@@ -346,6 +346,9 @@ function extractPlaceholders(text) {
 
 // ── Public API ────────────────────────────────────────────────────────────────
 
+/** Returns the epoch ms timestamp when the Incapsula backoff clears (0 if not active). */
+export function getSABackoffUntil() { return _incapsulaBackoffUntil; }
+
 /**
  * Search SA clients by name.
  * Returns [{ clientId, name, address, type }]
