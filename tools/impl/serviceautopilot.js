@@ -3,6 +3,7 @@
 // Session cookies are cached in-process for 4 hours to avoid repeated browser launches.
 
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import { logger } from '../../core/logger.js';
 
 const SA_BASE    = 'https://my.serviceautopilot.com';
@@ -107,20 +108,60 @@ const JRB_TAX_REF_BY_CITY = {
   'lake geneva':         'f6f4fc4a-a05c-49f7-84c6-e5cc7d06b6f0',
 };
 
-const SESSION_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const SESSION_TTL_MS      = 4 * 60 * 60 * 1000; // 4 hours
+const INCAPSULA_BACKOFF_MS = 45 * 60 * 1000;    // 45 min backoff when IP is flagged
+
+// Cookie cache: restore session on restart to avoid triggering a new login.
+// Path resolves to sa-session-cache.json at the repo root (relative to this file's location).
+const SESSION_CACHE_PATH = fileURLToPath(new URL('../../sa-session-cache.json', import.meta.url));
 
 // Browser kept open for session lifetime so all API calls run inside Chromium.
 // Node.js fetch() has a different TLS fingerprint (JA3) that Incapsula detects as
 // non-browser traffic after repeated rapid logins. Routing via page.evaluate() is
 // indistinguishable from real user XHR requests.
-let _browser      = null;
-let _page         = null;
-let _sessionExpiry  = 0;
-let _loginPromise   = null; // deduplicate concurrent login attempts
+let _browser             = null;
+let _page                = null;
+let _sessionExpiry       = 0;
+let _loginPromise        = null; // deduplicate concurrent login attempts
+let _incapsulaBackoffUntil = 0;  // epoch ms; refuse SA calls until this clears
 
 // ── Session management ───────────────────────────────────────────────────────
 
+async function saveSessionCookies(page) {
+  try {
+    const cookies = await page.cookies();
+    fs.writeFileSync(SESSION_CACHE_PATH, JSON.stringify(cookies), 'utf8');
+    logger.info('SA: session cookies saved to cache');
+  } catch (e) {
+    logger.warn('SA: could not save session cookies', { error: e.message });
+  }
+}
+
+async function tryRestoreSession(page) {
+  try {
+    if (!fs.existsSync(SESSION_CACHE_PATH)) return false;
+    const cookies = JSON.parse(fs.readFileSync(SESSION_CACHE_PATH, 'utf8'));
+    if (!Array.isArray(cookies) || cookies.length === 0) return false;
+    await page.setCookie(...cookies);
+    await page.goto(`${SA_BASE}/Home.aspx`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const url = page.url();
+    if (url.includes('Login') || url === `${SA_BASE}/` || url === `${SA_BASE}`) {
+      logger.info('SA: cached cookies expired, will do full login');
+      return false;
+    }
+    logger.info('SA: session restored from cookie cache — skipped login form');
+    return true;
+  } catch (e) {
+    logger.warn('SA: cookie restore failed, will do full login', { error: e.message });
+    return false;
+  }
+}
+
 async function getSession(force = false) {
+  if (Date.now() < _incapsulaBackoffUntil) {
+    const remainingMin = Math.ceil((_incapsulaBackoffUntil - Date.now()) / 60000);
+    throw new Error(`SA Incapsula backoff active — ${remainingMin} min remaining before SA operations resume`);
+  }
   if (!force && _page && Date.now() < _sessionExpiry) {
     return _page;
   }
@@ -179,7 +220,21 @@ async function login() {
   });
 
   try {
+    // Try restoring from cached cookies first — avoids triggering a new login
+    const restored = await tryRestoreSession(page);
+    if (restored) {
+      logger.info('SA: login complete (cookie restore)');
+      return { browser, page };
+    }
+
+    // Check for Incapsula block on the login page itself before filling the form
     await page.goto(`${SA_BASE}/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
+    const loginHtml = await page.content();
+    if (loginHtml.includes('_Incapsula_Resource')) {
+      await browser.close();
+      throw new Error('SA login page blocked by Incapsula — IP rate-limited, retry after backoff clears');
+    }
+
     await page.waitForSelector('#txtLogin', { timeout: 15000 });
     await page.type('#txtLogin', email);
     await page.type('#txtPassword', password);
@@ -189,6 +244,7 @@ async function login() {
       { timeout: 30000 }
     );
     await new Promise(r => setTimeout(r, 2000));
+    await saveSessionCookies(page);
     logger.info('SA: login complete');
     return { browser, page }; // keep browser open — API calls route through this page
   } catch (err) {
@@ -234,6 +290,10 @@ function looksLikeIncapsula(res) {
 }
 
 async function post(path, body, referer) {
+  if (Date.now() < _incapsulaBackoffUntil) {
+    const remainingMin = Math.ceil((_incapsulaBackoffUntil - Date.now()) / 60000);
+    throw new Error(`SA Incapsula backoff active — ${remainingMin} min remaining before SA operations resume`);
+  }
   let page = await getSession();
   let res = await saPost(page, path, body, referer);
   if (looksLikeLoginPage(res)) {
@@ -242,12 +302,12 @@ async function post(path, body, referer) {
     res = await saPost(page, path, body, referer);
   }
   if (looksLikeIncapsula(res)) {
-    logger.warn('SA: Incapsula challenge on API call, forcing fresh browser session');
-    page = await getSession(true);
-    res = await saPost(page, path, body, referer);
-  }
-  if (looksLikeIncapsula(res)) {
-    throw new Error('SA Incapsula block persists after session refresh — bot protection may have flagged this IP');
+    // Don't retry with another login — that adds another flagged login and makes it worse.
+    // Set the backoff timer and surface a clear error instead.
+    _incapsulaBackoffUntil = Date.now() + INCAPSULA_BACKOFF_MS;
+    const clearAt = new Date(_incapsulaBackoffUntil).toLocaleTimeString();
+    logger.error('SA: Incapsula block on API call — setting 45-min backoff', { clearAt });
+    throw new Error(`SA blocked by Incapsula bot protection. All SA operations paused until ${clearAt}. No further login attempts will be made.`);
   }
   return res;
 }
