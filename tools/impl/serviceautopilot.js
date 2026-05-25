@@ -281,18 +281,24 @@ export async function searchClients({ name, limit = 10 }) {
     QueryInput: {
       Settings: { FilterData: filterData },
       StartRow: 1,
-      Max: limit,
+      Max: limit * 3,
       SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
     },
   }, 'Clients.aspx');
 
   const accounts = (res.data?.d || res.data)?.Accounts || [];
-  return accounts.map(a => ({
-    clientId: a.ClientID,
-    name:     a.ClientName,
-    address:  a.Location || a.Address1 || '',
-    type:     a.Type || '',
-  }));
+  const term = name.toLowerCase();
+  // SA returns its "recent clients" list when no filter matches — filter client-side
+  // to ensure only genuinely matching records are returned.
+  return accounts
+    .filter(a => (a.ClientName || '').toLowerCase().includes(term))
+    .slice(0, limit)
+    .map(a => ({
+      clientId: a.ClientID,
+      name:     a.ClientName,
+      address:  a.Location || a.Address1 || '',
+      type:     a.Type || '',
+    }));
 }
 
 /**
@@ -831,13 +837,18 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   const typeMap = { Task: 2, Call: 3, Email: 4, Note: 1 };
   const ticketEventType = typeMap[ticketType] ?? 2;
 
+  // SA's MyDay view only shows tickets DueDate = today. Default to today so
+  // new tickets are immediately visible in the SA ticket queue.
+  const effectiveDueDate = dueDate ? new Date(dueDate) : new Date();
+  effectiveDueDate.setHours(23, 59, 0, 0);
+
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
       CategoryID:   TICKET_CATEGORIES.OTHER,
       TicketStatus: 0,
       EntityID:     details.customerJobId,
-      EntityType:   'Ticket',
-      DueDate:      dueDate ? new Date(dueDate).toISOString() : '',
+      EntityType:   'Account',
+      DueDate:      effectiveDueDate.toISOString(),
       TicketDetail: {
         TicketEventType: ticketEventType,
         Subject:         subject,

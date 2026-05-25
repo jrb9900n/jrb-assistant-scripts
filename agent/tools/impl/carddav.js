@@ -52,49 +52,85 @@ function normalizeName(s) {
   return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
 
-async function buildSAAddressMap() {
-  try {
-    const clients = await getAllClients();
-    const byQboId = new Map();
-    const byName  = new Map();
-    for (const c of clients) {
-      const addr = c.address ? { Line1: c.address, City: c.city, State: c.state, Zip: c.zip } : null;
-      if (!addr) continue;
-      if (c.qboId) byQboId.set(c.qboId, addr);
-      const key = normalizeName(c.name);
-      if (key) byName.set(key, addr);
-    }
-    logger.info('CardDAV: SA address map built', { byQboId: byQboId.size, byName: byName.size });
-    return { byQboId, byName };
-  } catch (err) {
-    logger.warn('CardDAV: SA address fetch failed, proceeding without SA addresses', { err: err.message });
-    return { byQboId: new Map(), byName: new Map() };
-  }
-}
-
 async function getContacts() {
   if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
 
   logger.info('CardDAV: refreshing contact cache');
-  const [customers, vendors, saMap] = await Promise.all([
+  const [customers, vendors, saClients] = await Promise.all([
     fetchQBOEntities('Customer'),
     fetchQBOEntities('Vendor'),
-    buildSAAddressMap(),
+    getAllClients().catch(err => {
+      logger.warn('CardDAV: SA fetch failed, proceeding without SA data', { err: err.message });
+      return [];
+    }),
   ]);
 
+  // Build SA lookup maps (address overlay + SA-only detection)
+  const saByQboId = new Map();
+  const saByName  = new Map();
+  for (const c of saClients) {
+    const addr = c.address ? { Line1: c.address, City: c.city, State: c.state, Zip: c.zip } : null;
+    if (!addr) continue;
+    if (c.qboId) saByQboId.set(c.qboId, addr);
+    const key = normalizeName(c.name);
+    if (key) saByName.set(key, addr);
+  }
+
   function saAddrFor(entity) {
-    return saMap.byQboId.get(String(entity.Id))
-      || saMap.byName.get(normalizeName(entity.DisplayName || ''))
+    return saByQboId.get(String(entity.Id))
+      || saByName.get(normalizeName(entity.DisplayName || ''))
       || null;
   }
 
+  // Group QBO sub-customers under their parent so they appear as one contact
+  // with multiple addresses instead of separate duplicate entries
+  const customerIds = new Set(customers.map(c => String(c.Id)));
+  const byParent = new Map();
+  for (const c of customers) {
+    if (c.Job && c.ParentRef?.value && customerIds.has(c.ParentRef.value)) {
+      const pid = c.ParentRef.value;
+      if (!byParent.has(pid)) byParent.set(pid, []);
+      byParent.get(pid).push(c);
+    }
+  }
+  const childIds = new Set(
+    customers
+      .filter(c => c.Job && c.ParentRef?.value && customerIds.has(c.ParentRef.value))
+      .map(c => String(c.Id))
+  );
+
+  const qboVcards = customers
+    .filter(c => !childIds.has(String(c.Id)))
+    .map(c => {
+      const children = byParent.get(String(c.Id)) ?? [];
+      const extraAddrs = children.flatMap(child => {
+        const sa = saAddrFor(child);
+        if (sa?.Line1) return [sa];
+        const qbo = (child.ShipAddr?.Line1 ? child.ShipAddr : child.BillAddr) ?? {};
+        return qbo.Line1
+          ? [{ Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode }]
+          : [];
+      });
+      return entityToVCard(c, 'customer', saAddrFor(c), extraAddrs);
+    });
+
+  // SA-only contacts: in SA but not linked to any active QBO customer
+  const saOnlyVcards = saClients
+    .filter(c => c.name && c.phone && (!c.qboId || !customerIds.has(String(c.qboId))))
+    .map(saClientToVCard);
+
   _cache = [
-    ...customers.map(c => entityToVCard(c, 'customer', saAddrFor(c))),
+    ...qboVcards,
     ...vendors.map(v => entityToVCard(v, 'vendor', null)),
+    ...saOnlyVcards,
   ];
   _cacheTime = Date.now();
   _cacheEtag = crypto.createHash('md5').update(String(_cacheTime)).digest('hex');
-  logger.info('CardDAV: cache refreshed', { customers: customers.length, vendors: vendors.length });
+  logger.info('CardDAV: cache refreshed', {
+    qboCustomers: qboVcards.length,
+    vendors: vendors.length,
+    saOnly: saOnlyVcards.length,
+  });
   return _cache;
 }
 
@@ -104,7 +140,7 @@ function escapeVCard(s) {
   return (s ?? '').replace(/\\/g, '\\\\').replace(/,/g, '\\,').replace(/;/g, '\\;').replace(/\n/g, '\\n');
 }
 
-function entityToVCard(entity, type, saAddr) {
+function entityToVCard(entity, type, saAddr, extraAddrs = []) {
   const uid = `JRB-${type.toUpperCase()}-${entity.Id}@jrboehlke.com`;
   const name = escapeVCard(entity.DisplayName || [entity.GivenName, entity.FamilyName].filter(Boolean).join(' ') || 'Unknown');
   const givenName = escapeVCard(entity.GivenName ?? '');
@@ -118,13 +154,23 @@ function entityToVCard(entity, type, saAddr) {
 
   const email = entity.PrimaryEmailAddr?.Address ?? '';
 
-  // Address: SA service address takes priority over QBO ShipAddr/BillAddr
-  let addr;
+  // Primary address: SA service address takes priority over QBO ShipAddr/BillAddr
+  let primaryAddr;
   if (saAddr?.Line1) {
-    addr = saAddr;
+    primaryAddr = saAddr;
   } else {
     const qbo = (type === 'customer' ? (entity.ShipAddr?.Line1 ? entity.ShipAddr : entity.BillAddr) : entity.BillAddr) ?? {};
-    addr = qbo.Line1 ? { Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode } : null;
+    primaryAddr = qbo.Line1 ? { Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode } : null;
+  }
+
+  // Collect all unique addresses (primary + sub-customer extras)
+  const allAddrs = [];
+  const seenAddrs = new Set();
+  for (const a of [primaryAddr, ...extraAddrs]) {
+    if (a?.Line1 && !seenAddrs.has(a.Line1)) {
+      allAddrs.push(a);
+      seenAddrs.add(a.Line1);
+    }
   }
 
   const category = type === 'customer' ? 'JRB Customer' : 'JRB Vendor';
@@ -150,13 +196,44 @@ function entityToVCard(entity, type, saAddr) {
     tel(altPhone, 'WORK,VOICE'),
     tel(faxPhone, 'WORK,FAX'),
     email ? `EMAIL;TYPE=WORK:${escapeVCard(email)}` : null,
-    addr?.Line1 ? `ADR;TYPE=WORK:;;${escapeVCard(addr.Line1)};${escapeVCard(addr.City ?? '')};${escapeVCard(addr.State ?? '')};${escapeVCard(addr.Zip ?? '')};US` : null,
+    ...allAddrs.map(a => `ADR;TYPE=WORK:;;${escapeVCard(a.Line1)};${escapeVCard(a.City ?? '')};${escapeVCard(a.State ?? '')};${escapeVCard(a.Zip ?? '')};US`),
     `CATEGORIES:${category}`,
     `NOTE:${uid}`,
     'END:VCARD',
   ].filter(Boolean).join('\r\n');
 
-  const etag = crypto.createHash('md5').update(uid + name + primaryPhone + mobilePhone + altPhone + email + (addr?.Line1 ?? '')).digest('hex');
+  const etag = crypto.createHash('md5').update(uid + name + primaryPhone + mobilePhone + altPhone + email + allAddrs.map(a => a.Line1).join('|')).digest('hex');
+  return { uid, etag, vcard: lines };
+}
+
+function saClientToVCard(client) {
+  const uid = `JRB-SA-${client.clientId}@jrboehlke.com`;
+  // SA stores names as "Last, First" — reformat to "First Last" for FN field
+  const raw = client.name || '';
+  const parts = raw.split(',');
+  let givenName = '', familyName = '', fn;
+  if (parts.length === 2) {
+    familyName = escapeVCard(parts[0].trim());
+    givenName  = escapeVCard(parts[1].trim());
+    fn = escapeVCard(`${parts[1].trim()} ${parts[0].trim()}`);
+  } else {
+    fn = escapeVCard(raw);
+  }
+
+  const lines = [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    `UID:${uid}`,
+    `FN:${fn}`,
+    `N:${familyName};${givenName};;;`,
+    client.phone ? `TEL;TYPE=WORK,VOICE:${escapeVCard(client.phone)}` : null,
+    client.address ? `ADR;TYPE=WORK:;;${escapeVCard(client.address)};${escapeVCard(client.city ?? '')};${escapeVCard(client.state ?? '')};${escapeVCard(client.zip ?? '')};US` : null,
+    'CATEGORIES:JRB Customer',
+    `NOTE:${uid}`,
+    'END:VCARD',
+  ].filter(Boolean).join('\r\n');
+
+  const etag = crypto.createHash('md5').update(uid + fn + (client.phone ?? '') + (client.address ?? '')).digest('hex');
   return { uid, etag, vcard: lines };
 }
 
