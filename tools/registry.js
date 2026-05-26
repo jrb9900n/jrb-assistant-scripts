@@ -597,14 +597,15 @@ const SA_TOOLS = [
   },
   {
     name: 'sa_add_ticket',
-    description: 'Add a support ticket or follow-up task to a Service Autopilot client record. Ticket appears in the client timeline. Use for follow-ups, inquiries, or action items.',
+    description: 'Add a CRM ticket to a Service Autopilot client record. Ticket appears in the CRM TicketList. For new inbound leads use category="Estimate" (default) so it appears in the Estimate queue.',
     input_schema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string', description: 'SA Client ID (GUID) from sa_search_clients' },
-        subject:  { type: 'string', description: 'Ticket subject/title' },
-        notes:    { type: 'string', description: 'Ticket body / details' },
-        dueDate:  { type: 'string', description: 'Optional due date ISO 8601 (YYYY-MM-DD)' },
+        clientId:  { type: 'string', description: 'SA Client ID (GUID) from sa_search_clients' },
+        subject:   { type: 'string', description: 'Ticket subject/title' },
+        notes:     { type: 'string', description: 'Ticket body / details' },
+        dueDate:   { type: 'string', description: 'Optional due date ISO 8601 (YYYY-MM-DD)' },
+        category:  { type: 'string', description: 'Ticket category: Estimate (default), Other, Schedule_Service, Account_Issue' },
       },
       required: ['clientId', 'subject'],
     },
