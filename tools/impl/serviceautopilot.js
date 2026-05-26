@@ -985,43 +985,30 @@ export async function getTicket({ ticketId }) {
  * ticketType: 'Task' | 'Call' | 'Email' | 'Note' (default 'Task')
  * Returns { ticketId, clientId }
  */
-export async function addTicket({ clientId, subject, body = '', ticketType = 'Task', dueDate }) {
+export async function addTicket({ clientId, subject, body = '', ticketType = 'Task', dueDate, category = 'Estimate' }) {
   const details = await getClientDetails({ clientId });
 
   const typeMap = { Task: 2, Call: 3, Email: 4, Note: 1 };
   const ticketEventType = typeMap[ticketType] ?? 2;
+
+  // category maps to SA's TICKET_CATEGORIES; default Estimate so CRM leads appear in the Estimate TicketList view
+  const categoryId = TICKET_CATEGORIES[category.toUpperCase().replace(/ /g, '_')] ?? TICKET_CATEGORIES.ESTIMATE;
 
   // SA's MyDay view only shows tickets DueDate = today. Default to today so
   // new tickets are immediately visible in the SA ticket queue.
   const effectiveDueDate = dueDate ? new Date(dueDate) : new Date();
   effectiveDueDate.setHours(23, 59, 0, 0);
 
-  // Fetch a valid resource for ticket assignment via TicketEdit_AssignedResources_GetByCompany.
-  // GetCurrentResource was unreliable (returned null ID when browser wasn't on ClientView page).
-  // AssignedResources is required for the ticket to appear in the company-wide MyDay queue.
-  let assignedResourceId   = details.currentUserId;
-  let assignedResourceType = details.currentUserType;
-  logger.info('SA: addTicket fallback resource', { assignedResourceId, assignedResourceType });
-  try {
-    const rRes  = await post('/CRMBFF/TicketEdit/TicketEdit_AssignedResources_GetByCompany', {}, 'ClientView.aspx');
-    const items = rRes.data?.Result ?? rRes.data?.d?.Result ?? rRes.data;
-    logger.info('SA: company resources raw', { status: rRes.status, isArray: Array.isArray(items), count: Array.isArray(items) ? items.length : null, sample: JSON.stringify(items)?.slice(0, 300) });
-    const resources = Array.isArray(items) ? items : (items?.Resources ?? items?.Items ?? []);
-    if (resources.length > 0) {
-      const r = resources[0];
-      assignedResourceId   = r.ID   ?? r.ResourceID   ?? r.Id   ?? assignedResourceId;
-      assignedResourceType = r.Type ?? r.ResourceType ?? r.ResourceTypeID ?? assignedResourceType;
-      logger.info('SA: assigned resource selected', { assignedResourceId, assignedResourceType, resourceName: r.Name ?? r.DisplayName ?? r.FullName });
-    } else {
-      logger.warn('SA: no company resources returned, using currentUserId fallback');
-    }
-  } catch (e) {
-    logger.warn('SA: TicketEdit_AssignedResources_GetByCompany failed', { error: e.message });
-  }
+  // GetByCompany always returns {List:[], Total:N} — the List field is consistently empty (SA bug).
+  // currentUserId from getClientDetails = CurrentUserID = Michael's resource ID (confirmed via
+  // MainSite_ResourcePermissions_GetAsync probe); currentUserType = CurrentUserResourceType = 2.
+  const assignedResourceId   = details.currentUserId;
+  const assignedResourceType = details.currentUserType;
+  logger.info('SA: addTicket resource', { assignedResourceId, assignedResourceType });
 
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
-      CategoryID:        TICKET_CATEGORIES.OTHER,
+      CategoryID:        categoryId,
       TicketStatus:      0,
       EntityID:          details.customerJobId,
       EntityType:        'Account',
