@@ -231,8 +231,11 @@ async function login() {
     await page.goto(`${SA_BASE}/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     const loginHtml = await page.content();
     if (loginHtml.includes('_Incapsula_Resource')) {
+      _incapsulaBackoffUntil = Date.now() + INCAPSULA_BACKOFF_MS;
+      const clearAt = new Date(_incapsulaBackoffUntil).toLocaleTimeString();
+      logger.error('SA: Incapsula block on login page — setting 45-min backoff', { clearAt });
       await browser.close();
-      throw new Error('SA login page blocked by Incapsula — IP rate-limited, retry after backoff clears');
+      throw new Error(`SA login page blocked by Incapsula bot protection. All SA operations paused until ${clearAt}.`);
     }
 
     await page.waitForSelector('#txtLogin', { timeout: 15000 });
