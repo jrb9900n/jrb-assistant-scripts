@@ -417,7 +417,7 @@ Extract every field present in the email body:
 - companyName (only if this is clearly a business customer — look for LLC, Inc, Co., business name, etc. Omit for residential.)
 - address (full street address including number and street name — e.g. “1234 Oak St”)
 - city, state (2-letter abbreviation e.g. “WI” — default to “WI” if not present in form), zip
-- email, phone
+- email, phone (10 digits only — strip country code prefix: “+1” or “1” + 10 digits → use the 10-digit portion)
 If a field is not in the form, omit it from the tool call (except state: always include state, defaulting to “WI”).
 
 STEP 2 — SEARCH FOR EXISTING CLIENT (deduplicate before creating):
