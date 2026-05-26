@@ -289,7 +289,14 @@ function looksLikeLoginPage(res) {
 }
 
 function looksLikeIncapsula(res) {
-  return res.data === null && typeof res.text === 'string' && res.text.includes('_Incapsula_Resource');
+  if (typeof res.text !== 'string') return false;
+  const t = res.text.toLowerCase();
+  return (
+    t.includes('_incapsula_resource') ||
+    t.includes('incapsula')           ||
+    t.includes('imperva')             ||
+    (res.status === 403 && res.data === null)
+  );
 }
 
 async function post(path, body, referer) {
@@ -303,6 +310,10 @@ async function post(path, body, referer) {
     logger.info('SA: session expired, refreshing');
     page = await getSession(true);
     res = await saPost(page, path, body, referer);
+  }
+  // Log any null-data response so we can see the raw content if detection misses
+  if (res.data === null) {
+    logger.warn('SA: null response from API', { path, status: res.status, textSlice: res.text?.slice(0, 300) });
   }
   if (looksLikeIncapsula(res)) {
     // Don't retry with another login — that adds another flagged login and makes it worse.
