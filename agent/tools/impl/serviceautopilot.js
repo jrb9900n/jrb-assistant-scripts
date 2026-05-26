@@ -239,14 +239,32 @@ async function login() {
   const password = process.env.SA_PASSWORD || '';
   if (!email || !password) throw new Error('SA_EMAIL or SA_PASSWORD env vars not set');
 
+  // Residential proxy support — set SA_PROXY_URL=http://user:pass@host:port to bypass Incapsula IP blocks
+  const proxyUrl = process.env.SA_PROXY_URL || '';
+  let proxyArg  = null;
+  let proxyAuth = null;
+  if (proxyUrl) {
+    try {
+      const u = new URL(proxyUrl);
+      proxyArg  = `${u.protocol}//${u.host}`;
+      if (u.username) proxyAuth = { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) };
+      logger.info('SA: using residential proxy', { server: proxyArg });
+    } catch {
+      logger.warn('SA: SA_PROXY_URL is malformed — launching without proxy', { url: proxyUrl });
+    }
+  }
+
   puppeteerExtra.use(StealthPlugin());
+  const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'];
+  if (proxyArg) launchArgs.push(`--proxy-server=${proxyArg}`);
   const browser = await puppeteerExtra.launch({
     executablePath,
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+    args: launchArgs,
   });
 
   const page = await browser.newPage();
+  if (proxyAuth) await page.authenticate(proxyAuth);
   await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
 
   try {
