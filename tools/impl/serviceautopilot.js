@@ -278,7 +278,7 @@ async function login() {
     // Check for Incapsula block on the login page itself before filling the form
     await page.goto(`${SA_BASE}/`, { waitUntil: 'domcontentloaded', timeout: 60000 });
     const loginHtml = await page.content();
-    if (loginHtml.includes('_Incapsula_Resource')) {
+    if (loginHtml.includes('_Incapsula_Resource') && !loginHtml.includes('txtLogin')) {
       _incapsulaBackoffUntil = Date.now() + INCAPSULA_BACKOFF_MS;
       writeSharedBackoff(_incapsulaBackoffUntil);
       const clearAt = new Date(_incapsulaBackoffUntil).toLocaleTimeString();
