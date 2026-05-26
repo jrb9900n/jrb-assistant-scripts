@@ -50,30 +50,32 @@ async function pollTasks() {
     let result, status;
     try {
       const { result: r } = await runAgent({ task: row.task, taskType: row.task_type || 'general' });
-      result = r; status = 'done';
-    } catch (err) {
-      const isIncapsula = err.message.includes('Incapsula backoff');
-      const retryCount  = (row.retry_count || 0) + 1;
 
-      if (isIncapsula && retryCount <= MAX_RETRIES) {
-        // Re-queue with new backoff time instead of marking as error
-        let { getSABackoffUntil } = await import('../tools/impl/serviceautopilot.js');
-        const backoffUntil = getSABackoffUntil();
-        const runAfter = backoffUntil > Date.now()
-          ? new Date(backoffUntil).toISOString()
-          : new Date(Date.now() + 45 * 60 * 1000).toISOString();
-        try {
-          await sb('agent_tasks?id=eq.' + row.id, {
-            method: 'PATCH',
-            body: JSON.stringify({ status: 'pending', run_after: runAfter, retry_count: retryCount }),
-          });
-          logger.warn('[task-poller] SA Incapsula block — re-queued task', { id: row.id, runAfter, retryCount });
-        } catch { /* ignore */ }
-        continue;
+      // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
+      // Check the backoff timer directly to detect if SA was blocked mid-run.
+      const { getSABackoffUntil } = await import('../tools/impl/serviceautopilot.js');
+      const backoffUntil = getSABackoffUntil();
+      if (backoffUntil > Date.now()) {
+        const retryCount = (row.retry_count || 0) + 1;
+        if (retryCount <= MAX_RETRIES) {
+          const runAfter = new Date(backoffUntil).toISOString();
+          try {
+            await sb('agent_tasks?id=eq.' + row.id, {
+              method: 'PATCH',
+              body: JSON.stringify({ status: 'pending', run_after: runAfter, retry_count: retryCount }),
+            });
+            logger.warn('[task-poller] SA Incapsula block detected post-run — re-queued task', { id: row.id, runAfter, retryCount });
+          } catch { /* ignore */ }
+          continue;
+        }
+        result = 'Error: SA Incapsula block — max retries exceeded';
+        status = 'error';
+      } else {
+        result = r; status = 'done';
       }
-
+    } catch (err) {
       result = 'Error: ' + err.message;
-      status = isIncapsula ? 'error' : 'error';
+      status = 'error';
     }
 
     try { await sb('agent_tasks?id=eq.' + row.id, { method: 'PATCH', body: JSON.stringify({ status, result }) }); } catch { /* ignore */ }

@@ -294,47 +294,32 @@ Message: "${userText}"
       ({ result } = await runAgent({ task: userText, taskType: 'general' }));
     }
 
-    await replyToTeams(activity, result);
-  } catch (err) {
-    logger.error('Teams handler error', { err: err.message });
-
-    if (err.message.includes('Incapsula backoff')) {
-      // Queue the task for automatic retry when the backoff clears
+    // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
+    // Check the backoff timer directly to detect if SA was blocked mid-run.
+    const { getSABackoffUntil } = await import('../tools/impl/serviceautopilot.js');
+    const backoffUntil = getSABackoffUntil();
+    if (backoffUntil > Date.now()) {
+      const runAfter = new Date(backoffUntil).toISOString();
+      const remainingMin = Math.ceil((backoffUntil - Date.now()) / 60000);
+      const SUPABASE_URL = process.env.SUPABASE_URL;
+      const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
       try {
-        const { getSABackoffUntil } = await import('../tools/impl/serviceautopilot.js');
-        const backoffUntil = getSABackoffUntil();
-        const runAfter = backoffUntil > Date.now()
-          ? new Date(backoffUntil).toISOString()
-          : new Date(Date.now() + 45 * 60 * 1000).toISOString();
-        const remainingMin = Math.ceil((new Date(runAfter) - Date.now()) / 60000);
-
-        const SUPABASE_URL = process.env.SUPABASE_URL;
-        const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
         await fetch(`${SUPABASE_URL}/rest/v1/agent_tasks`, {
           method: 'POST',
-          headers: {
-            apikey: SUPABASE_KEY,
-            Authorization: `Bearer ${SUPABASE_KEY}`,
-            'Content-Type': 'application/json',
-            Prefer: 'return=minimal',
-          },
-          body: JSON.stringify({
-            task: retryTask,
-            task_type: retryTaskType,
-            status: 'pending',
-            run_after: runAfter,
-            notify_teams: true,
-            retry_count: 0,
-          }),
+          headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+          body: JSON.stringify({ task: retryTask, task_type: retryTaskType, status: 'pending', run_after: runAfter, notify_teams: true, retry_count: 0 }),
         });
         await replyToTeams(activity, `SA is temporarily rate-limited by bot protection. I've queued this task and will retry automatically in ~${remainingMin} min — I'll notify you here when it completes.`);
       } catch (queueErr) {
         logger.error('Teams handler: failed to queue SA retry task', { err: queueErr.message });
-        await replyToTeams(activity, `Error: ${err.message}`);
+        await replyToTeams(activity, result);
       }
     } else {
-      await replyToTeams(activity, `Error: ${err.message}`);
+      await replyToTeams(activity, result);
     }
+  } catch (err) {
+    logger.error('Teams handler error', { err: err.message });
+    await replyToTeams(activity, `Error: ${err.message}`);
   }
 }
 
