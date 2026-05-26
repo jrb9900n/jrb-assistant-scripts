@@ -931,21 +931,27 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   const effectiveDueDate = dueDate ? new Date(dueDate) : new Date();
   effectiveDueDate.setHours(23, 59, 0, 0);
 
-  // Fetch the current SA user's resource record so we can assign the ticket to them.
-  // Without AssignedResources, the ticket only appears on the client CRM page and is
-  // invisible in the company-wide MyDay ticket queue.
+  // Fetch a valid resource for ticket assignment via TicketEdit_AssignedResources_GetByCompany.
+  // GetCurrentResource was unreliable (returned null ID when browser wasn't on ClientView page).
+  // AssignedResources is required for the ticket to appear in the company-wide MyDay queue.
   let assignedResourceId   = details.currentUserId;
   let assignedResourceType = details.currentUserType;
+  logger.info('SA: addTicket fallback resource', { assignedResourceId, assignedResourceType });
   try {
-    const rRes   = await post('/CRMBFF/TicketEdit/GetCurrentResource', {}, 'ClientView.aspx');
-    const rData  = rRes.data?.Result ?? rRes.data?.d?.Result ?? rRes.data;
-    if (rData?.ID && rData.ID !== EMPTY_GUID) {
-      assignedResourceId   = rData.ID;
-      assignedResourceType = rData.Type ?? rData.ResourceType ?? assignedResourceType;
+    const rRes  = await post('/CRMBFF/TicketEdit/TicketEdit_AssignedResources_GetByCompany', {}, 'ClientView.aspx');
+    const items = rRes.data?.Result ?? rRes.data?.d?.Result ?? rRes.data;
+    logger.info('SA: company resources raw', { status: rRes.status, isArray: Array.isArray(items), count: Array.isArray(items) ? items.length : null, sample: JSON.stringify(items)?.slice(0, 300) });
+    const resources = Array.isArray(items) ? items : (items?.Resources ?? items?.Items ?? []);
+    if (resources.length > 0) {
+      const r = resources[0];
+      assignedResourceId   = r.ID   ?? r.ResourceID   ?? r.Id   ?? assignedResourceId;
+      assignedResourceType = r.Type ?? r.ResourceType ?? r.ResourceTypeID ?? assignedResourceType;
+      logger.info('SA: assigned resource selected', { assignedResourceId, assignedResourceType, resourceName: r.Name ?? r.DisplayName ?? r.FullName });
+    } else {
+      logger.warn('SA: no company resources returned, using currentUserId fallback');
     }
-    logger.info('SA: current resource', { assignedResourceId, assignedResourceType, rawKeys: Object.keys(rData || {}) });
   } catch (e) {
-    logger.warn('SA: GetCurrentResource failed, falling back to currentUserId', { error: e.message });
+    logger.warn('SA: TicketEdit_AssignedResources_GetByCompany failed', { error: e.message });
   }
 
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
