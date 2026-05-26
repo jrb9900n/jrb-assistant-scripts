@@ -705,7 +705,7 @@ const SCHEDULING_TOOLS = [
 
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
-  crm:        [...QB_TOOLS, ...SA_TOOLS, ...TEAMS_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
