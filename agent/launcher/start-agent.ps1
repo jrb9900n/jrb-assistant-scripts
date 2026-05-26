@@ -77,6 +77,7 @@ $secrets = @{
     "SA_PASSWORD"          = Get-Secret "SA_PASSWORD"
     "SA_EMAIL_OLD"         = Get-Secret "SA_EMAIL_OLD"
     "SA_PASSWORD_OLD"      = Get-Secret "SA_PASSWORD_OLD"
+    "SA_PROXY_URL"         = Get-Secret "SA_PROXY_URL"
     # Expense capture
     "FLEETOPS_SUPABASE_URL"          = "https://mzywmgesulyalevtzudw.supabase.co"
     "FLEETOPS_SUPABASE_SERVICE_KEY"  = Get-Secret "FLEETOPS_SUPABASE_SERVICE_KEY"
