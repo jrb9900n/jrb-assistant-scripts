@@ -130,10 +130,15 @@ let _incapsulaBackoffUntil = 0;  // epoch ms; refuse SA calls until this clears
 async function saveSessionCookies(page) {
   try {
     const cookies = await page.cookies();
+    logger.info('SA: saving session cookies', { count: cookies.length, path: SESSION_CACHE_PATH });
+    if (cookies.length === 0) {
+      logger.warn('SA: cookie list empty — skipping cache write');
+      return;
+    }
     fs.writeFileSync(SESSION_CACHE_PATH, JSON.stringify(cookies), 'utf8');
-    logger.info('SA: session cookies saved to cache');
+    logger.info('SA: session cookies saved to cache', { count: cookies.length });
   } catch (e) {
-    logger.warn('SA: could not save session cookies', { error: e.message });
+    logger.warn('SA: could not save session cookies', { error: e.message, path: SESSION_CACHE_PATH });
   }
 }
 
@@ -191,11 +196,12 @@ async function getSession(force = false) {
 
 async function login() {
   logger.info('SA: starting browser login');
-  let puppeteer;
+  let puppeteerExtra, StealthPlugin;
   try {
-    puppeteer = (await import('puppeteer-core')).default;
+    puppeteerExtra = (await import('puppeteer-extra')).default;
+    StealthPlugin  = (await import('puppeteer-extra-plugin-stealth')).default;
   } catch {
-    throw new Error('puppeteer-core not installed — run: npm install puppeteer-core');
+    throw new Error('puppeteer-extra or puppeteer-extra-plugin-stealth not installed — run: npm install puppeteer-extra puppeteer-extra-plugin-stealth');
   }
 
   const executablePath = fs.existsSync(EDGE_PATH)   ? EDGE_PATH
@@ -207,17 +213,15 @@ async function login() {
   const password = process.env.SA_PASSWORD || '';
   if (!email || !password) throw new Error('SA_EMAIL or SA_PASSWORD env vars not set');
 
-  const browser = await puppeteer.launch({
+  puppeteerExtra.use(StealthPlugin());
+  const browser = await puppeteerExtra.launch({
     executablePath,
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu', '--disable-blink-features=AutomationControlled'],
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
   });
 
   const page = await browser.newPage();
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36');
-  await page.evaluateOnNewDocument(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  });
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
 
   try {
     // Try restoring from cached cookies first — avoids triggering a new login
