@@ -418,16 +418,15 @@ export function getSABackoffUntil() { return _incapsulaBackoffUntil; }
  * Returns [{ clientId, name, address, type }]
  */
 export async function searchClients({ name, limit = 10 }) {
+  // QuerySelection:3 returns Clients + Leads + Closed Leads (0 = Clients only, misses newly created Leads).
+  // FieldColumn:"28"/ContainOperator:"7" enables all-statuses filter required for QS:3.
   const filterData = JSON.stringify({
-    FilterData: [{
-      FieldColumn: '1',
-      ContainOperator: '1',
-      FieldItems: [name],
-      Order: 0,
-      SCFilterID: EMPTY_GUID,
-    }],
+    FilterData: [
+      { FieldColumn: '1', ContainOperator: '1', FieldItems: [name], Order: 0, SCFilterID: EMPTY_GUID },
+      { FieldColumn: '28', ContainOperator: '7', FieldItems: [], Order: 0, SCFilterID: EMPTY_GUID },
+    ],
     CustomFields: [],
-    QuerySelection: 0,
+    QuerySelection: 3,
   });
 
   const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
@@ -451,6 +450,7 @@ export async function searchClients({ name, limit = 10 }) {
       name:     a.ClientName,
       address:  a.Location || a.Address1 || '',
       type:     a.Type || '',
+      isLead:   a.Type === 'Lead',
     }));
 }
 
@@ -461,6 +461,10 @@ export async function searchClients({ name, limit = 10 }) {
  * Returns { clientId, name }
  */
 export async function createClient({ firstName, lastName, companyName = '', address = '', city = '', state = '', zip = '', email = '', phone = '' }) {
+  // Strip +1 country code and any non-digit characters, then store as 10-digit string.
+  const digits = (phone || '').replace(/\D/g, '');
+  const normalizedPhone = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+
   const clientName = companyName ? companyName : `${firstName} ${lastName}`;
   const stateAbbr = (state || 'WI').toUpperCase();
   const stateId   = STATE_IDS[stateAbbr] || STATE_IDS['WI'];
@@ -478,7 +482,7 @@ export async function createClient({ firstName, lastName, companyName = '', addr
       StateID:        stateId,
       Zip:            zip,
       Email:          email,
-      Phone1:         phone,
+      Phone1:         normalizedPhone,
       Phone1Type:     '1',
       Phone2: '', Phone2Type: '1',
       Phone3: '', Phone3Type: '1',
