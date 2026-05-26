@@ -113,7 +113,28 @@ const INCAPSULA_BACKOFF_MS = 45 * 60 * 1000;    // 45 min backoff when IP is fla
 
 // Cookie cache: restore session on restart to avoid triggering a new login.
 // Path resolves to sa-session-cache.json at the repo root (relative to this file's location).
-const SESSION_CACHE_PATH = fileURLToPath(new URL('../../sa-session-cache.json', import.meta.url));
+const SESSION_CACHE_PATH  = fileURLToPath(new URL('../../sa-session-cache.json', import.meta.url));
+// Shared across all scheduler instances — whichever process hits the block first writes this,
+// and all other instances read it before attempting a login so they don't pile on.
+const BACKOFF_FILE        = fileURLToPath(new URL('../../sa-incapsula-backoff.json', import.meta.url));
+
+function readSharedBackoff() {
+  try {
+    if (!fs.existsSync(BACKOFF_FILE)) return;
+    const { until } = JSON.parse(fs.readFileSync(BACKOFF_FILE, 'utf8'));
+    if (typeof until === 'number' && until > _incapsulaBackoffUntil) {
+      _incapsulaBackoffUntil = until;
+    }
+  } catch { /* ignore corrupt file */ }
+}
+
+function writeSharedBackoff(until) {
+  try {
+    fs.writeFileSync(BACKOFF_FILE, JSON.stringify({ until, setAt: new Date().toISOString() }), 'utf8');
+  } catch (e) {
+    logger.warn('SA: could not write shared backoff file', { error: e.message });
+  }
+}
 
 // Browser kept open for session lifetime so all API calls run inside Chromium.
 // Node.js fetch() has a different TLS fingerprint (JA3) that Incapsula detects as
@@ -195,6 +216,11 @@ async function getSession(force = false) {
 }
 
 async function login() {
+  readSharedBackoff();
+  if (Date.now() < _incapsulaBackoffUntil) {
+    const remainingMin = Math.ceil((_incapsulaBackoffUntil - Date.now()) / 60000);
+    throw new Error(`SA Incapsula backoff active — ${remainingMin} min remaining before SA operations resume`);
+  }
   logger.info('SA: starting browser login');
   let puppeteerExtra, StealthPlugin;
   try {
@@ -236,6 +262,7 @@ async function login() {
     const loginHtml = await page.content();
     if (loginHtml.includes('_Incapsula_Resource')) {
       _incapsulaBackoffUntil = Date.now() + INCAPSULA_BACKOFF_MS;
+      writeSharedBackoff(_incapsulaBackoffUntil);
       const clearAt = new Date(_incapsulaBackoffUntil).toLocaleTimeString();
       logger.error('SA: Incapsula block on login page — setting 45-min backoff', { clearAt });
       await browser.close();
@@ -304,6 +331,7 @@ function looksLikeIncapsula(res) {
 }
 
 async function post(path, body, referer) {
+  readSharedBackoff();
   if (Date.now() < _incapsulaBackoffUntil) {
     const remainingMin = Math.ceil((_incapsulaBackoffUntil - Date.now()) / 60000);
     throw new Error(`SA Incapsula backoff active — ${remainingMin} min remaining before SA operations resume`);
@@ -321,8 +349,9 @@ async function post(path, body, referer) {
   }
   if (looksLikeIncapsula(res)) {
     // Don't retry with another login — that adds another flagged login and makes it worse.
-    // Set the backoff timer and surface a clear error instead.
+    // Set the backoff timer and broadcast to all other scheduler instances via shared file.
     _incapsulaBackoffUntil = Date.now() + INCAPSULA_BACKOFF_MS;
+    writeSharedBackoff(_incapsulaBackoffUntil);
     const clearAt = new Date(_incapsulaBackoffUntil).toLocaleTimeString();
     logger.error('SA: Incapsula block on API call — setting 45-min backoff', { clearAt });
     throw new Error(`SA blocked by Incapsula bot protection. All SA operations paused until ${clearAt}. No further login attempts will be made.`);
