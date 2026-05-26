@@ -492,36 +492,33 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
 
           const crmReplyTo = isFromMichael ? 'michael@jrboehlke.com' : email.from;
           const crmSubject = isFromMichael ? `SA: ${email.subject}` : `Re: ${email.subject}`;
-          let crmReply;
-          try {
-            const crmResult = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false });
-            crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
-          } catch (crmErr) {
-            if (crmErr.message.includes('Incapsula backoff')) {
-              // Queue for retry; send acknowledgment email so the sender isn't left waiting
-              const { getSABackoffUntil } = await import('../tools/impl/serviceautopilot.js');
-              const backoffUntil = getSABackoffUntil();
-              const runAfter = backoffUntil > Date.now()
-                ? new Date(backoffUntil).toISOString()
-                : new Date(Date.now() + 45 * 60 * 1000).toISOString();
-              const remainingMin = Math.ceil((new Date(runAfter) - Date.now()) / 60000);
-              const SUPABASE_URL = process.env.SUPABASE_URL;
-              const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
-              await fetch(`${SUPABASE_URL}/rest/v1/agent_tasks`, {
-                method: 'POST',
-                headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-                body: JSON.stringify({ task: crmTask, task_type: 'crm', status: 'pending', run_after: runAfter, notify_email: crmReplyTo, reply_subject: crmSubject, retry_count: 0 }),
-              });
-              await sendEmail({
-                to: [crmReplyTo],
-                subject: crmSubject,
-                body: `<p>SA is temporarily rate-limited by bot protection. I've queued this task and will retry automatically in ~${remainingMin} min — I'll email you the result when it completes.</p><hr><p style=”color:#888;font-size:12px;”><em>Sent by JRB Executive Assistant</em></p>`,
-              });
-              logger.info(`Email poller: Incapsula block — queued CRM task, notified ${crmReplyTo}`);
-              continue;
-            }
-            throw crmErr;
+
+          // Import here so we can check the backoff timer immediately after runAgent returns.
+          // The dispatcher catches tool-level errors and feeds them to the agent as messages,
+          // so runAgent won't throw on SA blocks — we must poll the timer directly.
+          const { getSABackoffUntil } = await import('../tools/impl/serviceautopilot.js');
+          const crmResult = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false });
+          const backoffUntil = getSABackoffUntil();
+          if (backoffUntil > Date.now()) {
+            const runAfter = new Date(backoffUntil).toISOString();
+            const remainingMin = Math.ceil((backoffUntil - Date.now()) / 60000);
+            const SUPABASE_URL = process.env.SUPABASE_URL;
+            const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
+            await fetch(`${SUPABASE_URL}/rest/v1/agent_tasks`, {
+              method: 'POST',
+              headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+              body: JSON.stringify({ task: crmTask, task_type: 'crm', status: 'pending', run_after: runAfter, notify_email: crmReplyTo, reply_subject: crmSubject, retry_count: 0 }),
+            });
+            await sendEmail({
+              to: [crmReplyTo],
+              subject: crmSubject,
+              body: `<p>SA is temporarily rate-limited by bot protection. I've queued this task and will retry automatically in ~${remainingMin} min — I'll email you the result when it completes.</p><hr><p style=”color:#888;font-size:12px;”><em>Sent by JRB Executive Assistant</em></p>`,
+            });
+            logger.info(`Email poller: Incapsula block detected post-run — queued CRM task, notified ${crmReplyTo}`);
+            continue;
           }
+
+          const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
           // Forwarded leads (from Michael) get an internal summary — don't reply to his own email
           await sendEmail({
             to: [crmReplyTo],
