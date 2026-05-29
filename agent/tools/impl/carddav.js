@@ -123,10 +123,13 @@ async function getContacts() {
     .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)))
     .sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
 
+  // Fetch phones for SA-only contacts. Contacts without a phone are still
+  // included — they appear in the addressbook without a phone number so they
+  // can be looked up / called manually after the number is obtained.
   const PHONE_FETCH_CAP = 150;
   const PHONE_CONCURRENCY = 5;
   const saOnlyToFetch = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
-  const saOnlyWithPhone = [];
+  const saOnlyProcessed = [];
   try {
     for (let i = 0; i < saOnlyToFetch.length; i += PHONE_CONCURRENCY) {
       const batch = saOnlyToFetch.slice(i, i + PHONE_CONCURRENCY);
@@ -134,16 +137,17 @@ async function getContacts() {
         batch.map(async c => {
           try {
             const phone = await getSAClientPhone(c.clientId);
-            return phone ? { ...c, phone } : null;
-          } catch { return null; }
+            return { ...c, phone: phone || null };
+          } catch { return { ...c, phone: null }; }
         })
       );
-      saOnlyWithPhone.push(...batchResults.filter(Boolean));
+      saOnlyProcessed.push(...batchResults);
     }
   } catch (err) {
-    logger.warn('CardDAV: SA phone fetch failed, skipping SA-only contacts', { err: err.message });
+    logger.warn('CardDAV: SA phone fetch failed, falling back to no-phone contacts', { err: err.message });
+    saOnlyProcessed.push(...saOnlyToFetch.map(c => ({ ...c, phone: null })));
   }
-  const saOnlyVcards = saOnlyWithPhone.map(saClientToVCard);
+  const saOnlyVcards = saOnlyProcessed.map(saClientToVCard);
 
   _cache = [
     ...qboVcards,
@@ -169,10 +173,16 @@ function escapeVCard(s) {
 
 function entityToVCard(entity, type, saAddr, extraAddrs = []) {
   const uid = `JRB-${type.toUpperCase()}-${entity.Id}@jrboehlke.com`;
-  const name = escapeVCard(entity.DisplayName || [entity.GivenName, entity.FamilyName].filter(Boolean).join(' ') || 'Unknown');
-  const givenName = escapeVCard(entity.GivenName ?? '');
+  const givenName  = escapeVCard(entity.GivenName  ?? '');
   const familyName = escapeVCard(entity.FamilyName ?? '');
-  const company = escapeVCard(entity.CompanyName ?? '');
+  const company    = escapeVCard(entity.CompanyName ?? '');
+  // FN: prefer "First Last" when structured name is available so iOS Contacts
+  // shows the person's name, with company appearing in the separate ORG field.
+  // Fall back to DisplayName (which may be the company name) only when no
+  // individual name parts exist.
+  const name = (givenName || familyName)
+    ? escapeVCard([entity.GivenName, entity.FamilyName].filter(Boolean).join(' '))
+    : escapeVCard(entity.DisplayName || entity.CompanyName || 'Unknown');
 
   const primaryPhone = entity.PrimaryPhone?.FreeFormNumber ?? '';
   const mobilePhone  = entity.Mobile?.FreeFormNumber ?? '';

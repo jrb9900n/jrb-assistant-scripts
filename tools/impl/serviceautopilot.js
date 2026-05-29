@@ -1074,3 +1074,34 @@ export async function getEstimateList({ dateFrom, dateTo, stages, max = 500 } = 
   logger.info('SA: estimate list fetched', { count: estimates.length, stages, dateFrom, dateTo });
   return estimates;
 }
+
+/**
+ * Fetch line items for a specific estimate via QueryLineItems.
+ * Returns { total, services: string[], items: [{name, rate, qty, total}] }
+ * Used by the overnight report to get accurate totals and service descriptions.
+ */
+export async function getEstimateLineItems(quoteId) {
+  const res = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
+    InputData: { ID: quoteId },
+  }, 'V3Estimate.aspx');
+  const result = res.data?.d?.Result;
+  if (!result) return null;
+
+  const rawItems = result.ServiceLineItems || [];
+  const items = rawItems.map(item => {
+    const svc   = item.Service || item;
+    const rate  = parseFloat(svc.Rate ?? 0);
+    const qty   = parseFloat(svc.Qty ?? 1);
+    // SA may expose service name under different field names — check them all
+    const name  = svc.ServiceTypeName || svc.ServiceName || svc.Name
+               || (svc.EstimateNote ? svc.EstimateNote.split('\n')[0].slice(0, 100).trim() : '')
+               || '';
+    const total = parseFloat(svc.Total != null ? svc.Total : rate * qty);
+    return { name: name.trim(), rate, qty, total: isNaN(total) ? 0 : total };
+  });
+
+  const grandTotal = items.reduce((sum, i) => sum + i.total, 0);
+  const services   = [...new Set(items.map(i => i.name).filter(Boolean))];
+  logger.info('SA: estimate line items fetched', { quoteId, count: items.length, grandTotal });
+  return { total: grandTotal, services, items };
+}
