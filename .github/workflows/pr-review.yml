@@ -1,0 +1,244 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: write
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Skip auto-fix commits
+        id: skip
+        run: |
+          MSG=$(git log -1 --format="%s")
+          if echo "$MSG" | grep -qF "[auto-fix]"; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get diff
+        if: steps.skip.outputs.skip == 'false'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git diff origin/$BASE_REF...HEAD > /tmp/pr.diff
+
+      - name: Claude review
+        if: steps.skip.outputs.skip == 'false'
+        id: review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          cat > /tmp/review.py << 'PYEOF'
+          import os, json, urllib.request, sys
+
+          with open('/tmp/pr.diff') as f:
+              diff = f.read()
+
+          if len(diff) > 15000:
+              diff = diff[:15000] + "\n\n[...diff truncated for length...]"
+
+          if not diff.strip():
+              open('/tmp/review.txt', 'w').write("No diff to review.")
+              open('/tmp/has_issues.txt', 'w').write("false")
+              sys.exit(0)
+
+          def call_claude(prompt):
+              payload = {
+                  "model": "claude-sonnet-4-6",
+                  "max_tokens": 1024,
+                  "messages": [{"role": "user", "content": prompt}]
+              }
+              req = urllib.request.Request(
+                  "https://api.anthropic.com/v1/messages",
+                  data=json.dumps(payload).encode(),
+                  headers={
+                      "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+                      "anthropic-version": "2023-06-01",
+                      "content-type": "application/json"
+                  }
+              )
+              with urllib.request.urlopen(req) as resp:
+                  return json.loads(resp.read())["content"][0]["text"]
+
+          # Pass 1 — Safety: bugs, security, breaking changes
+          safety = call_claude(
+              "Review this diff for SAFETY issues only: bugs, logic errors, security vulnerabilities, "
+              "breaking changes, missing error handling at system boundaries. "
+              "For each issue state the root cause, not just the symptom. "
+              "Skip style. If none, say 'No safety issues found.'\n\n```diff\n" + diff + "\n```"
+          )
+
+          # Pass 2 — Quality: patterns, consistency, edge cases
+          quality = call_claude(
+              "Review this diff for CODE QUALITY issues only: inconsistent patterns, missed edge cases, "
+              "unclear logic, redundant code. Skip anything covered by safety (bugs/security/breaking changes) "
+              "and skip pure style. If none, say 'No quality issues found.'\n\n```diff\n" + diff + "\n```"
+          )
+
+          review = f"### Safety Review\n{safety}\n\n### Quality Review\n{quality}"
+
+          with open('/tmp/review.txt', 'w') as f:
+              f.write(review)
+
+          clean = ["no safety issues","no quality issues","no issues","no bugs",
+                   "looks good","lgtm","no concerns","no problems"]
+          has_issues = not (any(p in safety.lower() for p in clean) and any(p in quality.lower() for p in clean))
+          with open('/tmp/has_issues.txt', 'w') as f:
+              f.write("true" if has_issues else "false")
+          PYEOF
+          python3 /tmp/review.py
+          echo "has_issues=$(cat /tmp/has_issues.txt)" >> $GITHUB_OUTPUT
+
+      - name: Post review comment
+        if: steps.skip.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "## Claude Code Review (Sonnet)"
+            echo ""
+            cat /tmp/review.txt
+            echo ""
+            echo "---"
+            echo "*Flags bugs, security issues, and breaking changes only. Powered by claude-sonnet-4-6.*"
+          } > /tmp/comment.md
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/comment.md
+
+      - name: Auto-fix issues
+        if: steps.skip.outputs.skip == 'false' && steps.review.outputs.has_issues == 'true'
+        continue-on-error: true
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+          REPO: ${{ github.repository }}
+        run: |
+          cat > /tmp/fixer.py << 'PYEOF'
+          import os, json, urllib.request, subprocess, sys
+
+          findings = open('/tmp/review.txt').read()
+
+          changed = subprocess.check_output(
+              ['git', 'diff', f'origin/{os.environ["BASE_REF"]}...HEAD', '--name-only'],
+              encoding='utf8'
+          ).strip().split('\n')
+          changed = [f for f in changed if f]
+
+          file_contents = {}
+          for f in changed:
+              try:
+                  content = open(f, encoding='utf8', errors='replace').read()
+                  file_contents[f] = content[:4000]  # cap per file
+              except:
+                  pass
+
+          if not file_contents:
+              print("No readable files to fix")
+              sys.exit(0)
+
+          file_block = '\n\n'.join(f"### {p}\n```\n{c}\n```" for p, c in file_contents.items())
+
+          tools = [{
+              "name": "apply_fixes",
+              "description": "Apply code fixes",
+              "input_schema": {
+                  "type": "object",
+                  "properties": {
+                      "fixes": {
+                          "type": "array",
+                          "items": {
+                              "type": "object",
+                              "properties": {
+                                  "path": {"type": "string"},
+                                  "content": {"type": "string"}
+                              },
+                              "required": ["path", "content"]
+                          }
+                      }
+                  },
+                  "required": ["fixes"]
+              }
+          }]
+
+          payload = {
+              "model": "claude-sonnet-4-6",
+              "max_tokens": 4096,
+              "tools": tools,
+              "messages": [{
+                  "role": "user",
+                  "content": (
+                      f"A code review found these issues:\n\n{findings}\n\n"
+                      f"Here are the affected files:\n\n{file_block}\n\n"
+                      "Call apply_fixes with corrected complete file contents. "
+                      "Only include files that need changes. "
+                      "If only style issues, call apply_fixes with empty fixes array."
+                  )
+              }]
+          }
+
+          req = urllib.request.Request(
+              "https://api.anthropic.com/v1/messages",
+              data=json.dumps(payload).encode(),
+              headers={
+                  "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+                  "anthropic-version": "2023-06-01",
+                  "content-type": "application/json"
+              }
+          )
+
+          with urllib.request.urlopen(req) as resp:
+              result = json.loads(resp.read())
+
+          tool_use = next((b for b in result.get("content", [])
+                           if b.get("type") == "tool_use" and b.get("name") == "apply_fixes"), None)
+
+          if not tool_use or not tool_use["input"]["fixes"]:
+              print("No code fixes generated")
+              sys.exit(0)
+
+          for fix in tool_use["input"]["fixes"]:
+              os.makedirs(os.path.dirname(fix["path"]) or ".", exist_ok=True)
+              with open(fix["path"], 'w', encoding='utf8') as f:
+                  f.write(fix["content"])
+              print(f"Fixed: {fix['path']}")
+
+          open('/tmp/fixes_applied.txt', 'w').write("yes")
+          PYEOF
+          python3 /tmp/fixer.py
+
+          if [ -f /tmp/fixes_applied.txt ]; then
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git config user.name "github-actions[bot]"
+            git remote set-url origin "https://x-access-token:$GITHUB_TOKEN@github.com/$REPO"
+            git add -A
+            git diff --cached --quiet || git commit -m "[auto-fix] Applied suggested code fixes"
+            git push origin HEAD:$HEAD_REF
+          fi
+
+      - name: Create error issue on failure
+        if: failure()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh issue create \
+            --title "PR review workflow failed (PR #$PR_NUMBER)" \
+            --body "The Claude code review workflow failed on PR #$PR_NUMBER. [View the failed run]($RUN_URL)" \
+            --label "bug"
