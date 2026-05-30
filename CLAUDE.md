@@ -192,12 +192,15 @@ Then restart the agent.
 Full receipt capture workflow for company credit cards. Lives across both repos.
 
 ### How it works
-1. Chase charge hits QBO → webhook fires to `POST /qbo-webhook` → expense report created in Supabase (fleetops) → cardholder texted via email-to-SMS gateway
-2. Employee taps link → FieldOps expense portal (`/expense/:uuid`) → fills form, uploads receipt photo
-3. Receipt saved to Supabase Storage (`expense-receipts` bucket) → automatically attached to QBO Purchase transaction via Attachments API
-4. Alternatively: employee emails receipt photo to `assistant@jrboehlke.com` → matched by card last-four + amount → uploaded to Storage + QBO, confirmation text sent
-5. Daily 8 AM reminders (24h first, 72h subsequent, max 3) for incomplete reports
-6. Monday 7 AM weekly expense report emailed to michael@jrboehlke.com
+1. Chase alert email forwarded to `assistant@jrboehlke.com` → email poller (every 5 min) → `processChaseAlert()` → expense report created → **ACS SMS** sent to cardholder within ~5 minutes of charge
+2. QBO webhook (`POST /qbo-webhook`) fires separately when QBO processes the transaction → reconciles with Chase stub (updates `qbo_transaction_id`) or creates its own report if no stub exists
+3. Employee taps SMS link → FieldOps expense portal (`/expense/:uuid`) → fills form, uploads receipt photo
+4. Receipt saved to Supabase Storage (`expense-receipts` bucket) → automatically attached to QBO Purchase transaction via Attachments API
+5. Alternatively: employee emails receipt photo to `assistant@jrboehlke.com` → matched by card last-four + amount → uploaded to Storage + QBO, confirmation SMS sent
+6. Daily 8 AM reminders (24h first, 72h subsequent, max 3) for incomplete reports
+7. Monday 7 AM weekly expense report emailed to michael@jrboehlke.com
+
+> **QBO webhook status (2026-05-30):** Endpoint is live but has never fired in production. All 9 reports came through the Chase alert path. Entity type mismatch suspected (Chase bank feed may send `BankTransaction` not `Purchase`). Diagnostic deployed: handler now logs all entity types and sends a Teams alert for unhandled types.
 
 ### Key files
 - `tools/impl/expense.js` — core logic (webhook, portal data, submission, reminders, weekly report, email receipt processing)
@@ -207,7 +210,9 @@ Full receipt capture workflow for company credit cards. Lives across both repos.
 - `FieldOps/vercel.json` — rewrite rule for `/expense/*` → `/index.html`
 
 ### SMS approach
-Uses **email-to-carrier gateways** (no Twilio) via existing M365 `sendEmail()` with `contentType: 'Text'`. Gateway addresses stored on `credit_cards.sms_gateway`. `sendEmail` now accepts optional `contentType` param (default `'HTML'`).
+Uses **Azure Communication Services (ACS)** via `@azure/communication-sms@1.1.0`. Phone number stored on `credit_cards.phone_number` (E.164 normalized by `toE164()` helper in expense.js). Secrets: `ACS_CONNECTION_STRING`, `ACS_FROM_PHONE` in Credential Manager. Teams proactive message also sent as backup.
+
+> **Previous approach (abandoned):** email-to-carrier gateways (vtext.com via M365 sendEmail). Silently quarantined by Proofpoint outbound filter (GoDaddy Advanced Email Security) — empty subject + URL body triggers spam detection.
 
 ### Supabase (fleetops — mzywmgesulyalevtzudw)
 New tables: `credit_cards`, `expense_reports`, `menards_rebates`
@@ -228,6 +233,8 @@ Storage bucket: `expense-receipts` (10MB limit, image/* + PDF)
 ### Secrets required
 - `FLEETOPS_SUPABASE_SERVICE_KEY` ✅ configured
 - `QB_WEBHOOK_VERIFIER_TOKEN` ✅ configured
+- `ACS_CONNECTION_STRING` ✅ configured (2026-05-30)
+- `ACS_FROM_PHONE` ✅ configured (2026-05-30)
 - `MENARDS_REBATE_*` (10 keys) — pending
 
 ---
