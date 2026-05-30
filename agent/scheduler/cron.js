@@ -600,31 +600,14 @@ for (const task of SCHEDULED_TASKS) {
 }
 logger.info('All schedules registered. Scheduler running.');
 
-// MCP keepalive — ping our own MCP endpoint every 4 minutes to prevent
-// Claude.ai connector from timing out the session
-const MCP_TOKEN = process.env.CLAUDE_MCP_TOKEN || process.env.CLAUDE_EXECUTE_SECRET;
+// MCP keepalive — ping /health every 4 minutes to verify the bot server is alive
+// (previously pinged /mcp which caused 401s and created orphaned MCP sessions)
 let mcpKeepaliveFailures = 0;
 
 async function pingMcpKeepalive() {
   try {
-    const res = await fetch('http://localhost:3978/mcp', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(MCP_TOKEN ? { 'Authorization': `Bearer ${MCP_TOKEN}` } : {}),
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {
-          protocolVersion: '2024-11-05',
-          capabilities: {},
-          clientInfo: { name: 'keepalive', version: '1.0.0' },
-        },
-      }),
-    });
-    if (res.ok || res.status === 200) {
+    const res = await fetch('http://localhost:3978/health');
+    if (res.ok) {
       mcpKeepaliveFailures = 0;
       logger.info('MCP keepalive ok', { status: res.status });
     } else {

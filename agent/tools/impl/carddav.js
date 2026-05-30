@@ -26,10 +26,22 @@ async function fetchQBOEntities(entityType) {
   const results = [];
   let pos = 1;
   while (true) {
-    const res = await axios.get(`${QB_BASE()}/query`, {
-      params: { query: `SELECT * FROM ${entityType} WHERE Active = true STARTPOSITION ${pos} MAXRESULTS 1000` },
-      headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-    });
+    let res;
+    try {
+      res = await axios.get(`${QB_BASE()}/query`, {
+        params: { query: `SELECT * FROM ${entityType} WHERE Active = true STARTPOSITION ${pos} MAXRESULTS 1000` },
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      });
+    } catch (err) {
+      logger.error('CardDAV: QBO fetch failed', {
+        entity: entityType,
+        status: err.response?.status,
+        url: err.config?.url,
+        data: err.response?.data,
+        message: err.message,
+      });
+      throw err;
+    }
     const rows = res.data.QueryResponse?.[entityType] ?? [];
     results.push(...rows);
     if (rows.length < 1000) break;
@@ -56,14 +68,23 @@ async function getContacts() {
   if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
 
   logger.info('CardDAV: refreshing contact cache');
-  const [customers, vendors, saAccounts] = await Promise.all([
-    fetchQBOEntities('Customer'),
-    fetchQBOEntities('Vendor'),
-    getAllSAAccounts().catch(err => {
-      logger.warn('CardDAV: SA account fetch failed', { err: err.message });
-      return [];
-    }),
-  ]);
+  let customers, vendors, saAccounts;
+  try {
+    [customers, vendors, saAccounts] = await Promise.all([
+      fetchQBOEntities('Customer'),
+      fetchQBOEntities('Vendor'),
+      getAllSAAccounts().catch(err => {
+        logger.warn('CardDAV: SA account fetch failed', { err: err.message });
+        return [];
+      }),
+    ]);
+  } catch (err) {
+    if (_cache) {
+      logger.warn('CardDAV: cache refresh failed — serving stale cache', { err: err.message });
+      return _cache;
+    }
+    throw err;
+  }
 
   // Build SA lookup maps (address overlay + SA-only detection)
   const saByQboId = new Map();
