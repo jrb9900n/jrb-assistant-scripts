@@ -1012,7 +1012,7 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
       CategoryID:        categoryId,
-      TicketStatus:      0,
+      TicketStatus:      1,
       EntityID:          details.customerJobId,
       EntityType:        'Account',
       DueDate:           effectiveDueDate.toISOString(),
