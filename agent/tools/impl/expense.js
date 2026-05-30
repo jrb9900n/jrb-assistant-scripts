@@ -75,6 +75,16 @@ export async function handleQboWebhook(rawBody, signature) {
     entities: allEntities.map(e => ({ name: e.name, operation: e.operation, id: e.id })),
   });
 
+  const unhandled = allEntities.filter(e => !(e.name === 'Purchase' && e.operation === 'Create'));
+  if (unhandled.length > 0) {
+    const summary = unhandled.map(e => `${e.name}/${e.operation}`).join(', ');
+    logger.warn('QBO webhook: unhandled entity types', { entities: summary });
+    sendProactiveMessage(
+      `QBO webhook diagnostic: received entity types not yet handled — ${summary}.\n` +
+      `Update handleQboWebhook in expense.js to process these.`
+    ).catch(() => {});
+  }
+
   for (const entity of allEntities) {
     if (entity.name === 'Purchase' && entity.operation === 'Create') {
       processNewPurchase(entity.id).catch(err =>
