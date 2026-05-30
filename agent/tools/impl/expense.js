@@ -5,6 +5,7 @@ import { logger } from '../../core/logger.js';
 import { getPurchase, uploadReceiptToQbo } from './quickbooks.js';
 import { sendEmail } from './m365.js';
 import { sendProactiveMessage } from '../../teams/notify.js';
+import { SmsClient } from '@azure/communication-sms';
 
 const supabase = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
@@ -12,6 +13,24 @@ const supabase = createClient(
 );
 
 const PORTAL_BASE = 'https://fieldops.jrboehlke.com';
+
+// ── ACS SMS ───────────────────────────────────────────────────
+
+function toE164(phone) {
+  const digits = String(phone).replace(/\D/g, '');
+  return digits.startsWith('1') ? `+${digits}` : `+1${digits}`;
+}
+
+async function sendSms(phoneNumber, message) {
+  const connStr   = process.env.ACS_CONNECTION_STRING;
+  const fromPhone = process.env.ACS_FROM_PHONE;
+  if (!connStr || !fromPhone) throw new Error('ACS_CONNECTION_STRING / ACS_FROM_PHONE not configured');
+  const client  = new SmsClient(connStr);
+  const results = await client.send({ from: fromPhone, to: [toE164(phoneNumber)], message });
+  const result  = results[0];
+  if (!result.successful) throw new Error(`ACS SMS rejected: ${result.errorMessage}`);
+  return result;
+}
 
 // Categories that trigger Section 3 (asset required)
 const ASSET_CATEGORIES = new Set([
@@ -137,14 +156,14 @@ async function processNewPurchase(purchaseId) {
     return;
   }
 
-  if (card.sms_gateway) {
-    await sendExpenseSms(card.sms_gateway, { report, amount, vendor, date, cardLastFour });
+  if (card.phone_number) {
+    await sendExpenseSms(card.phone_number, { report, amount, vendor, date, cardLastFour });
     await supabase
       .from('expense_reports')
       .update({ sms_sent_at: new Date().toISOString() })
       .eq('id', report.id);
   } else {
-    logger.warn('Cardholder has no SMS gateway', { card: cardLastFour });
+    logger.warn('Cardholder has no phone number for SMS', { card: cardLastFour });
   }
 
   logger.info('Expense report created', { reportId: report.id, employee: card.employee_name, vendor, amount });
@@ -166,16 +185,16 @@ function parsePurchase(purchase) {
   return { amount, vendor, date, cardLastFour };
 }
 
-// ── SMS via email-to-carrier gateway ──────────────────────────
+// ── SMS via Azure Communication Services ──────────────────────
 
-async function sendExpenseSms(gateway, { report, amount, vendor, date, cardLastFour }) {
+async function sendExpenseSms(phoneNumber, { report, amount, vendor, date, cardLastFour }) {
   const fmtAmount = `$${Number(amount).toFixed(2)}`;
   const fmtDate   = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const link      = `${PORTAL_BASE}/expense/${report.id}`;
-  const text      = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link} Or email photo to assistant@jrboehlke.com (include card/amount in subject).`;
+  const message   = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link}`;
 
-  await sendEmail({ to: [gateway], subject: '', body: text, contentType: 'Text' });
-  logger.info('SMS sent via gateway', { gateway, reportId: report.id });
+  await sendSms(phoneNumber, message);
+  logger.info('SMS sent via ACS', { phone: phoneNumber, reportId: report.id });
 
   const teamsMsg = `New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}\nSubmit receipt: ${link}`;
   sendProactiveMessage(teamsMsg).catch(err =>
@@ -416,10 +435,12 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
   const fmtVendor = report.vendor || 'your recent charge';
   const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
 
-  // Confirmation SMS to the cardholder via gateway
-  if (report.sms_gateway) {
+  // Confirmation SMS to the cardholder
+  if (report.phone_number) {
     const confirmText = `JRB: Got your receipt for ${fmtAmount} at ${fmtVendor}. Please complete the form: ${portalUrl}`;
-    await sendEmail({ to: [report.sms_gateway], subject: '', body: confirmText, contentType: 'Text' });
+    await sendSms(report.phone_number, confirmText).catch(err =>
+      logger.warn('Confirmation SMS failed', { err: err.message, reportId: report.id })
+    );
   }
 
   // Reply email (back to whoever sent it)
@@ -531,8 +552,8 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
     return true;
   }
 
-  if (card.sms_gateway) {
-    await sendExpenseSms(card.sms_gateway, { report, amount, vendor: merchant, date: transactionDate, cardLastFour });
+  if (card.phone_number) {
+    await sendExpenseSms(card.phone_number, { report, amount, vendor: merchant, date: transactionDate, cardLastFour });
     await supabase.from('expense_reports').update({ sms_sent_at: new Date().toISOString() }).eq('id', report.id);
   }
 
@@ -611,7 +632,7 @@ export async function sendExpenseReminders() {
 
   const { data: reports, error } = await supabase
     .from('expense_reports')
-    .select('id, amount, vendor, transaction_date, card_last_four, sms_gateway, sms_sent_at, reminder_count, last_reminder_sent_at')
+    .select('id, amount, vendor, transaction_date, card_last_four, phone_number, sms_sent_at, reminder_count, last_reminder_sent_at')
     .eq('status', 'pending_employee')
     .not('sms_sent_at', 'is', null)
     .lt('reminder_count', MAX_REMINDERS);
@@ -628,8 +649,8 @@ export async function sendExpenseReminders() {
 
     if (hoursSince < waitHours) continue;
 
-    const gateway = report.sms_gateway;
-    if (!gateway) continue;
+    const phoneNumber = report.phone_number;
+    if (!phoneNumber) continue;
 
     const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
     const fmtDate   = report.transaction_date
@@ -637,10 +658,10 @@ export async function sendExpenseReminders() {
       : 'recent';
     const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
 
-    const message = `The expense report for the ${fmtAmount} charge ${fmtDate} is not complete. Please follow this link to complete: ${portalUrl}`;
+    const message = `JRB: Reminder — the expense report for your ${fmtAmount} charge on ${fmtDate} is not complete. Submit here: ${portalUrl}`;
 
     try {
-      await sendEmail({ to: [gateway], subject: '', body: message, contentType: 'Text' });
+      await sendSms(phoneNumber, message);
       await supabase
         .from('expense_reports')
         .update({
