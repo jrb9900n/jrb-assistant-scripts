@@ -585,7 +585,10 @@ function parseChaseAlert(text) {
   ];
   for (const pat of merchantPatterns) {
     const m = text.match(pat);
-    if (m && m[1].trim().length > 1) { merchant = m[1].trim(); break; }
+    if (m && m[1].trim().length > 1) {
+      merchant = m[1].trim().replace(/\s*This transaction is above the level you set\.?/i, '').trim();
+      break;
+    }
   }
 
   // Date — "05/20/2026", "May 20, 2026", "May 20 2026"
