@@ -69,14 +69,17 @@ export async function handleQboWebhook(rawBody, signature) {
   try { payload = JSON.parse(rawBody); } catch { return; }
 
   const events = payload?.eventNotifications ?? [];
-  for (const event of events) {
-    const entities = event?.dataChangeEvent?.entities ?? [];
-    for (const entity of entities) {
-      if (entity.name === 'Purchase' && entity.operation === 'Create') {
-        processNewPurchase(entity.id).catch(err =>
-          logger.error('Failed to process QBO purchase', { id: entity.id, err: err.message })
-        );
-      }
+  const allEntities = events.flatMap(e => e?.dataChangeEvent?.entities ?? []);
+  logger.info('QBO webhook received', {
+    eventCount: events.length,
+    entities: allEntities.map(e => ({ name: e.name, operation: e.operation, id: e.id })),
+  });
+
+  for (const entity of allEntities) {
+    if (entity.name === 'Purchase' && entity.operation === 'Create') {
+      processNewPurchase(entity.id).catch(err =>
+        logger.error('Failed to process QBO purchase', { id: entity.id, err: err.message })
+      );
     }
   }
 }
