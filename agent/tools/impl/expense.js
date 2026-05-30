@@ -4,6 +4,7 @@ import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getPurchase, uploadReceiptToQbo } from './quickbooks.js';
 import { sendEmail } from './m365.js';
+import { sendProactiveMessage } from '../../teams/notify.js';
 
 const supabase = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
@@ -152,10 +153,11 @@ async function processNewPurchase(purchaseId) {
 function parsePurchase(purchase) {
   const amount = purchase.TotalAmt;
   const date = purchase.TxnDate;
-  const vendor =
+  const rawVendor =
     purchase.EntityRef?.name ??
     purchase.PayeeRef?.name ??
     'Unknown Vendor';
+  const vendor = rawVendor.replace(/\s*This transaction is above the level you set\.?/i, '').trim();
 
   // Card last four: typically in AccountRef name e.g. "Chase Visa ...1234" or "Chase ...1234"
   const accountName = purchase.AccountRef?.name ?? '';
@@ -174,6 +176,11 @@ async function sendExpenseSms(gateway, { report, amount, vendor, date, cardLastF
 
   await sendEmail({ to: [gateway], subject: '', body: text, contentType: 'Text' });
   logger.info('SMS sent via gateway', { gateway, reportId: report.id });
+
+  const teamsMsg = `New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}\nSubmit receipt: ${link}`;
+  sendProactiveMessage(teamsMsg).catch(err =>
+    logger.warn('Teams expense notification failed', { err: err.message, reportId: report.id })
+  );
 }
 
 // ── Expense Data (read) ────────────────────────────────────────
