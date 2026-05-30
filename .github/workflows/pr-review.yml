@@ -70,8 +70,12 @@ jobs:
                       "content-type": "application/json"
                   }
               )
-              with urllib.request.urlopen(req) as resp:
-                  return json.loads(resp.read())["content"][0]["text"]
+              try:
+                  with urllib.request.urlopen(req) as resp:
+                      return json.loads(resp.read())["content"][0]["text"]
+              except urllib.error.HTTPError as e:
+                  print(f"Claude API error: {e.code} {e.reason}", file=sys.stderr)
+                  sys.exit(1)
 
           # Pass 1 — Safety: bugs, security, breaking changes
           safety = call_claude(
@@ -93,14 +97,20 @@ jobs:
           with open('/tmp/review.txt', 'w') as f:
               f.write(review)
 
-          clean = ["no safety issues","no quality issues","no issues","no bugs",
-                   "looks good","lgtm","no concerns","no problems"]
-          has_issues = not (any(p in safety.lower() for p in clean) and any(p in quality.lower() for p in clean))
+          safety_clean = ["no safety issues found","no safety issues","no issues found",
+                          "no bugs","no security","nothing significant","no concerns"]
+          quality_clean = ["no quality issues found","no quality issues","no issues found",
+                           "looks good","lgtm","no concerns","no problems"]
+          has_safety_issues = not any(p in safety.lower() for p in safety_clean)
+          has_issues = has_safety_issues or not any(p in quality.lower() for p in quality_clean)
           with open('/tmp/has_issues.txt', 'w') as f:
               f.write("true" if has_issues else "false")
+          with open('/tmp/has_safety_issues.txt', 'w') as f:
+              f.write("true" if has_safety_issues else "false")
           PYEOF
           python3 /tmp/review.py
           echo "has_issues=$(cat /tmp/has_issues.txt)" >> $GITHUB_OUTPUT
+          echo "has_safety_issues=$(cat /tmp/has_safety_issues.txt)" >> $GITHUB_OUTPUT
 
       - name: Post review comment
         if: steps.skip.outputs.skip == 'false'
@@ -120,7 +130,7 @@ jobs:
           gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file /tmp/comment.md
 
       - name: Auto-fix issues
-        if: steps.skip.outputs.skip == 'false' && steps.review.outputs.has_issues == 'true'
+        if: steps.skip.outputs.skip == 'false' && steps.review.outputs.has_safety_issues == 'true'
         continue-on-error: true
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -132,6 +142,7 @@ jobs:
           cat > /tmp/fixer.py << 'PYEOF'
           import os, json, urllib.request, subprocess, sys
 
+          workspace = os.path.realpath(os.getcwd())
           findings = open('/tmp/review.txt').read()
 
           changed = subprocess.check_output(
@@ -140,11 +151,17 @@ jobs:
           ).strip().split('\n')
           changed = [f for f in changed if f]
 
+          MAX_FILE_BYTES = 8000
           file_contents = {}
+          truncated = set()
           for f in changed:
               try:
                   content = open(f, encoding='utf8', errors='replace').read()
-                  file_contents[f] = content[:4000]  # cap per file
+                  if len(content) > MAX_FILE_BYTES:
+                      file_contents[f] = content[:MAX_FILE_BYTES]
+                      truncated.add(f)
+                  else:
+                      file_contents[f] = content
               except:
                   pass
 
@@ -152,11 +169,14 @@ jobs:
               print("No readable files to fix")
               sys.exit(0)
 
-          file_block = '\n\n'.join(f"### {p}\n```\n{c}\n```" for p, c in file_contents.items())
+          def file_header(p):
+              return f"### {p}\n{'[TRUNCATED — do not emit full replacement for this file]' if p in truncated else ''}"
+
+          file_block = '\n\n'.join(f"{file_header(p)}\n```\n{c}\n```" for p, c in file_contents.items())
 
           tools = [{
               "name": "apply_fixes",
-              "description": "Apply code fixes",
+              "description": "Apply code fixes. Never include files marked TRUNCATED.",
               "input_schema": {
                   "type": "object",
                   "properties": {
@@ -183,42 +203,55 @@ jobs:
               "messages": [{
                   "role": "user",
                   "content": (
-                      f"A code review found these issues:\n\n{findings}\n\n"
+                      f"A code review found these SAFETY issues:\n\n{findings}\n\n"
                       f"Here are the affected files:\n\n{file_block}\n\n"
                       "Call apply_fixes with corrected complete file contents. "
-                      "Only include files that need changes. "
-                      "If only style issues, call apply_fixes with empty fixes array."
+                      "Only include files that need changes and are NOT marked TRUNCATED. "
+                      "If no safe auto-fix is possible, call apply_fixes with an empty fixes array."
                   )
               }]
           }
 
-          req = urllib.request.Request(
-              "https://api.anthropic.com/v1/messages",
-              data=json.dumps(payload).encode(),
-              headers={
-                  "x-api-key": os.environ["ANTHROPIC_API_KEY"],
-                  "anthropic-version": "2023-06-01",
-                  "content-type": "application/json"
-              }
-          )
-
-          with urllib.request.urlopen(req) as resp:
-              result = json.loads(resp.read())
+          try:
+              req = urllib.request.Request(
+                  "https://api.anthropic.com/v1/messages",
+                  data=json.dumps(payload).encode(),
+                  headers={
+                      "x-api-key": os.environ["ANTHROPIC_API_KEY"],
+                      "anthropic-version": "2023-06-01",
+                      "content-type": "application/json"
+                  }
+              )
+              with urllib.request.urlopen(req) as resp:
+                  result = json.loads(resp.read())
+          except urllib.error.HTTPError as e:
+              print(f"Claude API error: {e.code} {e.reason}", file=sys.stderr)
+              sys.exit(1)
 
           tool_use = next((b for b in result.get("content", [])
                            if b.get("type") == "tool_use" and b.get("name") == "apply_fixes"), None)
 
-          if not tool_use or not tool_use["input"]["fixes"]:
+          if not tool_use or not tool_use["input"].get("fixes"):
               print("No code fixes generated")
               sys.exit(0)
 
+          any_written = False
           for fix in tool_use["input"]["fixes"]:
-              os.makedirs(os.path.dirname(fix["path"]) or ".", exist_ok=True)
-              with open(fix["path"], 'w', encoding='utf8') as f:
+              if fix["path"] in truncated:
+                  print(f"Skipping truncated file: {fix['path']}")
+                  continue
+              dest = os.path.realpath(os.path.join(workspace, fix["path"]))
+              if not dest.startswith(workspace + os.sep):
+                  print(f"Skipping unsafe path: {fix['path']}")
+                  continue
+              os.makedirs(os.path.dirname(dest), exist_ok=True)
+              with open(dest, 'w', encoding='utf8') as f:
                   f.write(fix["content"])
               print(f"Fixed: {fix['path']}")
+              any_written = True
 
-          open('/tmp/fixes_applied.txt', 'w').write("yes")
+          if any_written:
+              open('/tmp/fixes_applied.txt', 'w').write("yes")
           PYEOF
           python3 /tmp/fixer.py
 
