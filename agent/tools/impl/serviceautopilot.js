@@ -41,6 +41,9 @@ const STATE_IDS = {
   WY: '90f7e575-9148-4ade-8890-57fcc9fb8d77',
 };
 
+// SA TicketStatus values — TicketList default view filters for Status:1 (Open); Status:0 tickets are hidden
+const TICKET_STATUS_OPEN = 1;
+
 // SA ticket category IDs (from TicketEdit_TicketCategoryDropdown_GetByCompany)
 const TICKET_CATEGORIES = {
   OTHER:            'e74cbced-0bf3-43ef-9fee-f7564af541da',
@@ -1012,7 +1015,7 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
       CategoryID:        categoryId,
-      TicketStatus:      0,
+      TicketStatus:      TICKET_STATUS_OPEN,
       EntityID:          details.customerJobId,
       EntityType:        'Account',
       DueDate:           effectiveDueDate.toISOString(),
