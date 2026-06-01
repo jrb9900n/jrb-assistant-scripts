@@ -526,6 +526,16 @@ export async function setClientBillingDefaults({ clientId }) {
 
   function parseSaDate(v) {
     if (!v) return { Month: -1, Day: -1, Year: -1 };
+    // GetClientInfo returns dates as {Month, Day, Year} objects — validate before round-tripping
+    // (SA can store invalid dates like April 31 which the server rejects on save)
+    if (typeof v === 'object' && 'Month' in v && 'Day' in v && 'Year' in v) {
+      const { Month, Day, Year } = v;
+      if (Month > 0 && Day > 0 && Year > 0) {
+        const dt = new Date(Year, Month - 1, Day);
+        if (dt.getMonth() + 1 === Month && dt.getDate() === Day) return { Month, Day, Year };
+      }
+      return { Month: -1, Day: -1, Year: -1 };
+    }
     const ms = String(v).match(/\/Date\((-?\d+)\)\//);
     const dt = ms ? new Date(parseInt(ms[1])) : new Date(v);
     if (isNaN(dt.getTime())) return { Month: -1, Day: -1, Year: -1 };
@@ -619,10 +629,29 @@ export async function setClientBillingDefaults({ clientId }) {
   if (result?.response?.Errors?.length > 0) {
     throw new Error(`SA setClientBillingDefaults SaveClient errors: ${JSON.stringify(result.response.Errors)}`);
   }
+  // SA returns 500 for QBO-synced clients with valid data due to a server-side bug in post-save
+  // QBO sync code. SA auto-applies company billing defaults on client creation, so the defaults
+  // are already correct even when SaveClient fails. Report current defaults from GetClientInfo.
   const city = (d.City || '').toLowerCase().trim();
   const taxRefId = JRB_TAX_REF_BY_CITY[city] || JRB_TAX_REF_DEFAULT;
+  if (saveRes.status === 500) {
+    logger.warn('SA: SaveClient returned 500 (SA QBO-sync bug) — billing defaults read from GetClientInfo', {
+      clientId, city: d.City,
+      sendInvoiceBy: d.SendInvoiceBy,
+      taxCode: d.SalesTaxCodeInfo?.Text,
+      taxRef: d.SalesTaxInfo?.Text,
+    });
+    return {
+      clientId,
+      sendInvoiceBy: d.SendInvoiceBy || 'unknown',
+      taxable: !!(d.SalesTaxCodeInfo?.Value && d.SalesTaxCodeInfo.Value !== EMPTY_GUID),
+      city: d.City,
+      taxRefId: d.SalesTaxInfo?.Value || taxRefId,
+      savedViaApi: false,
+    };
+  }
   logger.info('SA: billing defaults set', { clientId, city: d.City, taxRefId });
-  return { clientId, sendInvoiceBy: 'Email', taxable: true, city: d.City, taxRefId };
+  return { clientId, sendInvoiceBy: 'Email', taxable: true, city: d.City, taxRefId, savedViaApi: true };
 }
 
 /**
