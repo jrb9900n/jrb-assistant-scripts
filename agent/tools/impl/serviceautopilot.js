@@ -977,8 +977,8 @@ export async function addNote({ clientId, noteText }) {
 
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
-      CategoryID:   null,
-      TicketStatus: 0,
+      CategoryID:   TICKET_CATEGORIES.OTHER,
+      TicketStatus: TICKET_STATUS_OPEN,
       EntityID:     details.customerJobId,
       EntityType:   'Account',
       DueDate:      '',
