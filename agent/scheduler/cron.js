@@ -39,15 +39,6 @@ function releaseRunLock(taskName) {
 
 const SCHEDULED_TASKS = [
   {
-    schedule: '0 8 * * 1-5',
-    name: 'daily_email_digest',
-    run: () => runAgent({
-      task: 'List unread emails from the past 24 hours. Group by urgency: urgent, pending, FYI. Draft brief replies for urgent emails. Save summary to OneDrive at /Agent Reports/Email Digests/YYYY-MM-DD.md',
-      taskType: 'email',
-      saveContext: true,
-    }),
-  },
-  {
     // Daily 8 AM — send follow-up SMS to employees with incomplete expense reports
     schedule: '0 8 * * *',
     name: 'expense_reminders',
@@ -225,6 +216,62 @@ const SCHEDULED_TASKS = [
         body:    report.body,
       });
       logger.info('overnight_sa_report: sent', { subject: report.subject });
+    },
+  },
+  {
+    // Every 15 minutes — autonomous triage of michael@jrboehlke.com inbox
+    schedule: '*/15 * * * *',
+    name: 'michael_inbox_processor',
+    run: async () => {
+      if (!acquireRunLock('michael_inbox_processor', 14 * 60_000)) {
+        logger.debug('michael_inbox_processor: skipped (another instance running)');
+        return;
+      }
+      try {
+        const { processInbox } = await import('../tools/impl/inbox-processor.js');
+        const result = await processInbox();
+        logger.info('michael_inbox_processor: complete', result);
+      } finally {
+        releaseRunLock('michael_inbox_processor');
+      }
+    },
+  },
+  {
+    // 7:00 AM daily — scan Michael's sent folder for unanswered emails
+    schedule: '0 7 * * *',
+    name: 'followup_scanner',
+    run: async () => {
+      const { scanFollowups } = await import('../tools/impl/inbox-processor.js');
+      const result = await scanFollowups();
+      logger.info('followup_scanner: complete', result);
+    },
+  },
+  {
+    // 7:30 AM daily — morning briefing Teams message + email to Michael
+    schedule: '30 7 * * *',
+    name: 'morning_briefing',
+    run: async () => {
+      const { generateMorningBriefing } = await import('../tools/impl/morning-briefing.js');
+      const { sendEmail }               = await import('../tools/impl/m365.js');
+      const { sendProactiveMessage }    = await import('../teams/notify.js');
+
+      const briefing = await generateMorningBriefing();
+
+      // Teams message first — fast, Michael may be on his phone
+      try {
+        await sendProactiveMessage(briefing.teamsMessage);
+        logger.info('morning_briefing: Teams message sent');
+      } catch (err) {
+        logger.warn('morning_briefing: Teams send failed', { err: err.message });
+      }
+
+      // Full HTML email
+      await sendEmail({
+        to:      ['michael@jrboehlke.com'],
+        subject: briefing.emailSubject,
+        body:    briefing.emailBody,
+      });
+      logger.info('morning_briefing: email sent', { subject: briefing.emailSubject });
     },
   },
   {

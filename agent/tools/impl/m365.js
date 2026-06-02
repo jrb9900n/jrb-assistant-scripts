@@ -62,14 +62,19 @@ export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = f
   }));
 }
 
-export async function getEmail({ email_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}?$select=id,subject,from,body,receivedDateTime`);
+export async function getEmail({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${email_id}?$select=id,subject,from,to,body,receivedDateTime,conversationId,hasAttachments`);
   return {
-    id:      data.id,
-    from:    data.from?.emailAddress?.address,
-    subject: data.subject,
-    date:    data.receivedDateTime,
-    body:    data.body?.content,
+    id:              data.id,
+    from:            data.from?.emailAddress?.address,
+    from_name:       data.from?.emailAddress?.name,
+    to:              (data.toRecipients ?? []).map(r => r.emailAddress?.address),
+    subject:         data.subject,
+    date:            data.receivedDateTime,
+    thread_id:       data.conversationId,
+    has_attachments: data.hasAttachments,
+    body:            data.body?.content,
   };
 }
 
@@ -166,8 +171,9 @@ export async function listOneDrive({ folder }) {
   }));
 }
 
-export async function markEmailRead({ email_id }) {
-  await graph('PATCH', `/users/${USER()}/messages/${email_id}`, { isRead: true });
+export async function markEmailRead({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  await graph('PATCH', `/users/${user}/messages/${email_id}`, { isRead: true });
   return { marked_read: true, email_id };
 }
 
@@ -423,4 +429,61 @@ export async function listSharePointSites({ query } = {}) {
     url:         s.webUrl,
     description: s.description,
   }));
+}
+
+// ── Inbox assistant helpers ───────────────────────────────────────────────────
+
+export async function listSentEmails({ userEmail, limit = 30, afterDate } = {}) {
+  const user = userEmail ?? USER();
+  const after = afterDate ? `&$filter=sentDateTime ge ${new Date(afterDate).toISOString()}` : '';
+  const data = await graph(
+    'GET',
+    `/users/${user}/mailFolders/SentItems/messages?$top=${limit}&$select=id,subject,toRecipients,sentDateTime,conversationId,bodyPreview${after}&$orderby=sentDateTime desc`
+  );
+  return (data.value ?? []).map(m => ({
+    id:        m.id,
+    subject:   m.subject,
+    to:        (m.toRecipients ?? []).map(r => r.emailAddress?.address),
+    date:      m.sentDateTime,
+    thread_id: m.conversationId,
+    snippet:   m.bodyPreview?.slice(0, 200),
+  }));
+}
+
+export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph(
+    'GET',
+    `/users/${user}/messages?$filter=conversationId eq '${thread_id}'&$top=${limit}&$select=id,subject,from,sentDateTime,receivedDateTime,conversationId&$orderby=receivedDateTime desc`
+  );
+  return (data.value ?? []).map(m => ({
+    id:        m.id,
+    from:      m.from?.emailAddress?.address,
+    subject:   m.subject,
+    date:      m.receivedDateTime ?? m.sentDateTime,
+    thread_id: m.conversationId,
+  }));
+}
+
+// Creates a draft reply in Michael's mailbox, preserving the email thread.
+// Returns the draft message ID so it can be sent later or reviewed in Outlook.
+export async function createReplyDraft({ userEmail, email_id, body } = {}) {
+  const user = userEmail ?? USER();
+  // Step 1: create the reply stub (preserves thread headers, To, Subject)
+  const stub = await graph('POST', `/users/${user}/messages/${email_id}/createReply`, {});
+  const draftId = stub.id;
+  // Step 2: patch the body onto the draft
+  await graph('PATCH', `/users/${user}/messages/${draftId}`, {
+    body: { contentType: 'HTML', content: body },
+  });
+  logger.info('Reply draft created', { user, draftId, sourceMessageId: email_id });
+  return { draft_id: draftId };
+}
+
+// Send a saved draft by ID.
+export async function sendDraft({ userEmail, draft_id } = {}) {
+  const user = userEmail ?? USER();
+  await graph('POST', `/users/${user}/messages/${draft_id}/send`);
+  logger.info('Draft sent', { user, draft_id });
+  return { sent: true, draft_id };
 }
