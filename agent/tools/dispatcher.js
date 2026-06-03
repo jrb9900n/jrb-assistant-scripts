@@ -34,6 +34,29 @@ const HANDLERS = {
   move_email:            (i) => m365.moveEmail(i),
   catalog_email:         (i) => m365.catalogEmail(i),
   get_email_catalog:     (i) => m365.getEmailCatalog(i),
+  send_draft_reply:      (i) => m365.sendDraft({ userEmail: 'michael@jrboehlke.com', ...i }),
+
+  // Inbox assistant (on-demand)
+  run_inbox_processor: async () => {
+    const { processInbox } = await import('./impl/inbox-processor.js');
+    return processInbox();
+  },
+  get_email_triage: async ({ hours = 24, priority } = {}) => {
+    const { createClient } = await import('@supabase/supabase-js');
+    const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    let q = db.from('email_triage')
+      .select('from_name,from_address,subject,priority,category,intent,folder_moved_to,draft_id,hot_trigger,meeting_detected,action_items,processed_at')
+      .eq('mailbox', 'michael@jrboehlke.com')
+      .gte('processed_at', since)
+      .order('priority', { ascending: true })
+      .order('processed_at', { ascending: false })
+      .limit(50);
+    if (priority) q = q.eq('priority', priority);
+    const { data, error } = await q;
+    if (error) throw new Error(`email_triage query failed: ${error.message}`);
+    return data ?? [];
+  },
 
   // Calendar
   create_reminder:        (i) => m365.createReminder(i),

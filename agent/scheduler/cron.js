@@ -380,6 +380,17 @@ const SCHEDULED_TASKS = [
         const body = full.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
         const fullText = email.subject + ' ' + body;
 
+        // ── Feedback capture — runs on every Michael email before routing ────────
+        try {
+          const { detectAndCaptureFeedback } = await import('../tools/impl/feedback-capture.js');
+          const fb = await detectAndCaptureFeedback(fullText, 'email');
+          if (fb.captured) {
+            logger.info(`Email poller: feedback rule captured`, { rule: fb.rule, agent: fb.agent });
+          }
+        } catch (err) {
+          logger.warn('Email poller: feedback capture error (non-fatal)', { err: err.message });
+        }
+
         // ── Dev task detection ──────────────────────────────────────────────────
         const isExplicitDev = isExplicitDevTask(fullText);
         const isAmbiguousDev = !isExplicitDev && isAmbiguousDevTask(fullText);
