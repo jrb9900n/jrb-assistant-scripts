@@ -19,6 +19,7 @@ import {
   moveEmail,
   listMailFolders,
   createMailFolder,
+  renameMailFolder,
   createReplyDraft,
 } from './m365.js';
 import { sendProactiveMessage } from '../../teams/notify.js';
@@ -47,6 +48,16 @@ const FOLDER_MAP = {
   other:            null,           // leave in inbox
 };
 
+// Old folder names (pre-aaa prefix) that need renaming on first run
+const LEGACY_FOLDER_NAMES = {
+  'Quotes & Estimates': 'aaa Quotes & Estimates',
+  'Customers':          'aaa Customers',
+  'Vendors':            'aaa Vendors',
+  'Invoices':           'aaa Invoices',
+  'Crew':               'aaa Crew',
+  'Admin':              'aaa Admin',
+};
+
 // Cache folder name → id for Michael's mailbox (reset on each run)
 let _folderCache = null;
 
@@ -58,6 +69,28 @@ async function getFolderCache() {
   return _folderCache;
 }
 
+// Rename any legacy (non-prefixed) folders to their aaa versions.
+// Called once per processInbox run before any moves.
+async function migrateLegacyFolders() {
+  const cache = await getFolderCache();
+  const renamed = [];
+  for (const [oldName, newName] of Object.entries(LEGACY_FOLDER_NAMES)) {
+    if (cache[oldName] && !cache[newName]) {
+      try {
+        await renameMailFolder({ userEmail: MICHAEL, folder_id: cache[oldName], name: newName });
+        cache[newName] = cache[oldName];
+        delete cache[oldName];
+        renamed.push(`${oldName} → ${newName}`);
+        logger.info(`inbox-processor: renamed folder "${oldName}" → "${newName}"`);
+      } catch (err) {
+        logger.warn(`inbox-processor: could not rename folder "${oldName}"`, { err: err.message });
+      }
+    }
+  }
+  return renamed;
+}
+
+// Ensure all target folders exist, creating any that are missing.
 async function ensureFolder(name) {
   const cache = await getFolderCache();
   if (cache[name]) return cache[name];
@@ -296,6 +329,15 @@ export async function processInbox() {
   logger.info('inbox-processor: starting run');
   _folderCache = null; // reset folder cache each run
 
+  // 0. Rename any legacy folders (Admin → aaa Admin, etc.) so they sort to top
+  let renamedFolders = [];
+  try {
+    renamedFolders = await migrateLegacyFolders();
+    if (renamedFolders.length) logger.info('inbox-processor: migrated folders', { renamedFolders });
+  } catch (err) {
+    logger.warn('inbox-processor: folder migration error (non-fatal)', { err: err.message });
+  }
+
   // 1. Fetch unread emails from Michael's inbox (last 48h)
   const cutoff48h = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
   let unread;
@@ -346,6 +388,7 @@ export async function processInbox() {
   // 4. Process each email
   const triageRows  = [];
   const teamsAlerts = [];
+  const moveErrors  = [];
   let drafted = 0;
   let moved   = 0;
   let alerted = 0;
@@ -384,8 +427,15 @@ export async function processInbox() {
         await moveEmail({ userEmail: MICHAEL, email_id: email.id, destination_folder_id: folderId });
         folder_moved_to = targetFolder;
         moved++;
+        logger.info(`inbox-processor: moved "${email.subject}" → ${targetFolder}`);
       } catch (err) {
-        logger.warn('inbox-processor: could not move email', { id: email.id, err: err.message });
+        logger.warn('inbox-processor: move failed', {
+          subject: email.subject,
+          from: email.from,
+          target: targetFolder,
+          err: err.message,
+        });
+        moveErrors.push(`${email.subject}: ${err.message}`);
       }
     }
 
@@ -451,14 +501,16 @@ export async function processInbox() {
   }
 
   const summary = {
-    processed:    toProcess.length,
+    processed:       toProcess.length,
     moved,
     drafted,
     alerted,
-    p1_count:     triageRows.filter(r => r.priority === 'p1').length,
-    p2_count:     triageRows.filter(r => r.priority === 'p2').length,
-    p3_count:     triageRows.filter(r => r.priority === 'p3').length,
-    duration_ms:  Date.now() - start,
+    folders_renamed: renamedFolders.length,
+    p1_count:        triageRows.filter(r => r.priority === 'p1').length,
+    p2_count:        triageRows.filter(r => r.priority === 'p2').length,
+    p3_count:        triageRows.filter(r => r.priority === 'p3').length,
+    move_errors:     moveErrors.length ? moveErrors : undefined,
+    duration_ms:     Date.now() - start,
   };
 
   logger.info('inbox-processor: run complete', summary);
