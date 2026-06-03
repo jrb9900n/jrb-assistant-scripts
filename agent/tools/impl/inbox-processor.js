@@ -102,6 +102,45 @@ async function ensureFolder(name) {
   return folder_id;
 }
 
+// ── Known notification senders — always P3, never hot trigger ────────────────
+// These are automated services whose emails are informational only.
+// They are pre-classified before hitting the LLM to avoid false P1 alerts.
+
+const NOTIFICATION_SENDER_DOMAINS = [
+  'callrail.com',       // call tracking notifications
+  'mail.callrail.com',
+  'notifications.google.com',
+  'googlealerts-noreply.google.com',
+  'docusign.net',       // signature completed notifications
+  'hellosign.com',
+  'noreply.github.com',
+  'notifications.github.com',
+  'mail.notion.so',
+  'zapier.com',
+];
+
+const NOTIFICATION_SENDER_PREFIXES = [
+  'no-reply@',
+  'noreply@',
+  'donotreply@',
+  'notifications@',
+  'notify@',
+  'alert@',
+  'alerts@',
+  'mailer@',
+  'bounce@',
+  'auto@',
+  'automated@',
+];
+
+function isKnownNotificationSender(fromAddress) {
+  if (!fromAddress) return false;
+  const addr = fromAddress.toLowerCase();
+  if (NOTIFICATION_SENDER_DOMAINS.some(d => addr.endsWith(`@${d}`) || addr.includes(`.${d}`))) return true;
+  if (NOTIFICATION_SENDER_PREFIXES.some(p => addr.startsWith(p))) return true;
+  return false;
+}
+
 // ── Already-processed check ──────────────────────────────────────────────────
 
 async function getProcessedIds(messageIds) {
@@ -153,14 +192,20 @@ Priority rules:
   p3: newsletters; automated notifications; payment receipts; marketing; promotional emails; general FYI
 
 Hot trigger rules (immediate Teams alert regardless of time):
-  • New quote or lead request from a prospective customer
+  • A DIRECT email from a prospective customer asking for a quote or service
   • Legal notice, lien, lawsuit, or permit issue
   • Bank fraud alert or account issue
   • Any email referencing a deadline TODAY or TOMORROW
   • Email from an attorney or with subject containing "legal action", "lien", "complaint"
   • Anything referencing a large dollar amount (> $5000) that needs a decision
 
-Draft-needed: true when the email is a p1 that clearly warrants a reply (not spam, not FYI).`;
+NEVER hot trigger (even if content mentions a lead or customer):
+  • Automated notification emails (CallRail call alerts, Google alerts, form submission notifications)
+  • Any email from a no-reply address — these are system-generated, not from a human
+  • CRM or call tracking software notifications about activity
+  • These should always be p3 / admin
+
+Draft-needed: true when the email is a p1 that clearly warrants a reply — must be from a real human, not an automated system.`;
 
 async function batchClassify(emails) {
   if (!emails.length) return [];
@@ -385,19 +430,45 @@ export async function processInbox() {
     return { processed: 0, duration_ms: Date.now() - start };
   }
 
-  logger.info(`inbox-processor: classifying ${toProcess.length} new emails`);
+  // 2b. Pre-classify known notification senders as P3/admin — skip LLM for these
+  const preClassified = [];
+  const needsClassification = [];
+  for (const email of toProcess) {
+    if (isKnownNotificationSender(email.from)) {
+      preClassified.push({
+        message_id:      email.id,
+        priority:        'p3',
+        category:        'admin',
+        intent:          'Automated notification — no action required.',
+        meeting_request: false,
+        draft_needed:    false,
+        action_items:    [],
+        hot_trigger:     false,
+        hot_reason:      '',
+      });
+    } else {
+      needsClassification.push(email);
+    }
+  }
+  if (preClassified.length) {
+    logger.info(`inbox-processor: pre-classified ${preClassified.length} notification sender(s) as P3`);
+  }
+
+  logger.info(`inbox-processor: classifying ${needsClassification.length} new emails`);
 
   // 3. Batch classify
   let classifications;
   try {
-    classifications = await batchClassify(toProcess);
+    classifications = needsClassification.length ? await batchClassify(needsClassification) : [];
   } catch (err) {
     logger.error('inbox-processor: classify failed', { err: err.message });
     return { error: err.message };
   }
 
-  // Build a map for quick lookup
-  const classMap = Object.fromEntries(classifications.map(c => [c.message_id, c]));
+  // Build a map for quick lookup — merge LLM results with pre-classified
+  const classMap = Object.fromEntries(
+    [...preClassified, ...classifications].map(c => [c.message_id, c])
+  );
 
   // 4. Process each email
   const triageRows  = [];
