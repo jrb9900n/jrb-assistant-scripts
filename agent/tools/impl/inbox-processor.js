@@ -43,9 +43,10 @@ const FOLDER_MAP = {
   invoice:          'aaa Invoices',
   crew:             'aaa Crew',
   admin:            'aaa Admin',
-  legal:            'aaa Admin',    // legal goes into Admin; flag in triage
-  spam:             'Junk Email',
-  other:            null,           // leave in inbox
+  legal:            'aaa Admin',        // legal goes into Admin; flag in triage
+  promotional:      'aaa Low Priority', // ads, newsletters, marketing, solicitations
+  other:            'aaa Low Priority', // unclassified → low priority, not inbox clutter
+  spam:             'Junk Email',       // true spam → Outlook's built-in junk
 };
 
 // Old folder names (pre-aaa prefix) that need renaming on first run
@@ -56,6 +57,7 @@ const LEGACY_FOLDER_NAMES = {
   'Invoices':           'aaa Invoices',
   'Crew':               'aaa Crew',
   'Admin':              'aaa Admin',
+  'Low Priority':       'aaa Low Priority',
 };
 
 // Cache folder name → id for Michael's mailbox (reset on each run)
@@ -124,7 +126,7 @@ Return a JSON object: { "classifications": [...] }
 For each email include:
   message_id    — echo back unchanged
   priority      — "p1" | "p2" | "p3"
-  category      — "quote_request" | "customer" | "vendor" | "invoice" | "crew" | "admin" | "legal" | "spam" | "other"
+  category      — "quote_request" | "customer" | "vendor" | "invoice" | "crew" | "admin" | "legal" | "promotional" | "spam" | "other"
   intent        — one sentence: what the sender wants or is communicating
   meeting_request — boolean
   draft_needed  — boolean (true when a prompt reply would be useful)
@@ -132,11 +134,23 @@ For each email include:
   hot_trigger   — boolean (needs immediate alert, can't wait until morning)
   hot_reason    — string (why — empty if not hot)
 
+Category definitions:
+  quote_request  — prospective customer asking for a price, estimate, or service
+  customer       — existing or active customer: job question, follow-up, complaint
+  vendor         — supplier, subcontractor, material order, delivery notice
+  invoice        — billing statement, payment confirmation, receipt from a vendor
+  crew           — message from field staff (Dave, Noah, Eric, Don)
+  admin          — bank alerts, insurance, M365 system emails, government, permits
+  legal          — contracts, legal notices, liens, attorney correspondence
+  promotional    — newsletters, advertisements, marketing emails, sales pitches, solicitations, subscription digests, coupon/promo emails, event invites from companies you don't have a direct relationship with
+  spam           — unsolicited junk with no relevance, phishing attempts, obvious bulk spam
+  other          — doesn't fit any above category
+
 Priority rules:
   p1: new quote/lead requests; active customer with job question; legal/insurance notices with deadlines;
       bank issues (fraud, large overdraft); meeting requests; emails mentioning a date/deadline ≤ 7 days out
   p2: vendor follow-ups; general customer inquiries; routine billing/invoices; estimate follow-ups
-  p3: newsletters; automated notifications; payment receipts; marketing; general FYI
+  p3: newsletters; automated notifications; payment receipts; marketing; promotional emails; general FYI
 
 Hot trigger rules (immediate Teams alert regardless of time):
   • New quote or lead request from a prospective customer
