@@ -229,6 +229,17 @@ async function handleTeamsActivity(req, res) {
   // Persist conversation reference so we can send proactive messages later
   saveConversationRef(activity);
 
+  // Capture any standing rules/corrections before routing — non-blocking
+  try {
+    const { detectAndCaptureFeedback } = await import('../tools/impl/feedback-capture.js');
+    const fb = await detectAndCaptureFeedback(userText, 'teams');
+    if (fb.captured) {
+      logger.info('Teams: feedback rule captured', { rule: fb.rule, agent: fb.agent });
+    }
+  } catch (err) {
+    logger.warn('Teams: feedback capture error (non-fatal)', { err: err.message });
+  }
+
   const intent = classifyIntent(userText);
   logger.info('Teams message', { intent, text: userText.slice(0, 80) });
 
