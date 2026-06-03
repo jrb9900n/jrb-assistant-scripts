@@ -431,6 +431,13 @@ export async function listSharePointSites({ query } = {}) {
   }));
 }
 
+export async function renameMailFolder({ userEmail, folder_id, name } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('PATCH', `/users/${user}/mailFolders/${folder_id}`, { displayName: name });
+  logger.info('Mail folder renamed', { user, folder_id, name });
+  return { renamed: true, folder_id: data.id, name: data.displayName };
+}
+
 // ── Inbox assistant helpers ───────────────────────────────────────────────────
 
 export async function listSentEmails({ userEmail, limit = 30, afterDate } = {}) {
