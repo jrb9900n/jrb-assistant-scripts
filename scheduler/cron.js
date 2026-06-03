@@ -216,6 +216,16 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Every hour — check fleetops auth sequence drift and auto-fix
+    schedule: '0 * * * *',
+    name: 'fleetops_healthcheck',
+    run: async () => {
+      const { runFleetopsHealthcheck } = await import('../agent/tools/impl/fleetops-healthcheck.js');
+      const result = await runFleetopsHealthcheck();
+      logger.info('fleetops_healthcheck complete', result);
+    },
+  },
+  {
     // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
     schedule: '0 1 * * *',
     name: 'sa_nightly_sync',
