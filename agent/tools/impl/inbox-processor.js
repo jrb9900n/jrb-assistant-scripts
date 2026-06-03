@@ -36,13 +36,13 @@ function supabase() {
 // ── Folder routing ───────────────────────────────────────────────────────────
 
 const FOLDER_MAP = {
-  quote_request:    'Quotes & Estimates',
-  customer:         'Customers',
-  vendor:           'Vendors',
-  invoice:          'Invoices',
-  crew:             'Crew',
-  admin:            'Admin',
-  legal:            'Admin',       // legal goes into Admin; flag in triage
+  quote_request:    'aaa Quotes & Estimates',
+  customer:         'aaa Customers',
+  vendor:           'aaa Vendors',
+  invoice:          'aaa Invoices',
+  crew:             'aaa Crew',
+  admin:            'aaa Admin',
+  legal:            'aaa Admin',    // legal goes into Admin; flag in triage
   spam:             'Junk Email',
   other:            null,           // leave in inbox
 };

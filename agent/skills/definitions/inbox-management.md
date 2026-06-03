@@ -76,12 +76,12 @@ what has already been processed, then use Graph API tools for live data.
 
 ## Folder Structure — michael@jrboehlke.com
 
-- `Quotes & Estimates` — inbound quote requests
-- `Customers` — ongoing customer threads
-- `Vendors` — supplier communications
-- `Invoices` — billing to review/approve
-- `Crew` — staff messages
-- `Admin` — banking, insurance, legal
+- `aaa Quotes & Estimates` — inbound quote requests
+- `aaa Customers` — ongoing customer threads
+- `aaa Vendors` — supplier communications
+- `aaa Invoices` — billing to review/approve
+- `aaa Crew` — staff messages
+- `aaa Admin` — banking, insurance, legal
 - `Archive` — older resolved items
 
 ---
