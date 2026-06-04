@@ -45,6 +45,7 @@ const FOLDER_MAP = {
   admin:            'aaa Admin',
   legal:            'aaa Admin',        // legal goes into Admin; flag in triage
   promotional:      'aaa Low Priority', // ads, newsletters, marketing, solicitations
+  marketing:        'aaa Low Priority', // alias — classifier sometimes uses this instead of promotional
   other:            'aaa Low Priority', // unclassified → low priority, not inbox clutter
   spam:             'Junk Email',       // true spam → Outlook's built-in junk
 };
