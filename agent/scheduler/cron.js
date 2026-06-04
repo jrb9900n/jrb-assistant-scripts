@@ -604,6 +604,19 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
           }
 
           const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
+          const isTicketFailure = /warning.*ticket not verified|ticket not verified|not verified|sa.*unreachable|sa.*fail|could not create|ticket.*fail/i.test(crmReply);
+          if (isTicketFailure && crmReplyTo !== 'michael@jrboehlke.com') {
+            try {
+              await sendEmail({
+                to: ['michael@jrboehlke.com'],
+                subject: `⚠️ Ticket Creation Failed — ${email.subject}`,
+                body: `<p style=”color:#c00;font-weight:bold;font-family:Arial,sans-serif;”>A lead came in but ticket creation in SA failed. Manual entry may be required.</p><div style=”font-family:Arial,sans-serif;max-width:640px;”>${crmReply}</div><hr style=”margin:20px 0;”><p style=”color:#888;font-size:12px;”><em>Sent by JRB Executive Assistant</em></p>`,
+              });
+              logger.info('Email poller: ticket failure notification sent to Michael', { subject: email.subject });
+            } catch (notifyErr) {
+              logger.warn('Email poller: failed to send ticket failure notification', { err: notifyErr.message });
+            }
+          }
           // Forwarded leads (from Michael) get an internal summary — don't reply to his own email
           await sendEmail({
             to: [crmReplyTo],
