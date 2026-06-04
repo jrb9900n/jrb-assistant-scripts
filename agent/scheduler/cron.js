@@ -37,6 +37,8 @@ function releaseRunLock(taskName) {
   try { unlinkSync(lockFile); } catch { }
 }
 
+let saWasDown = false;
+
 const SCHEDULED_TASKS = [
   {
     // Daily 8 AM — send follow-up SMS to employees with incomplete expense reports
@@ -300,6 +302,31 @@ const SCHEDULED_TASKS = [
       });
       child.on('error', reject);
     }),
+  },
+  {
+    // Every 30 minutes — check SA connectivity, alert Michael on first failure and on recovery
+    schedule: '*/30 * * * *',
+    name: 'sa_connectivity_check',
+    run: async () => {
+      const { searchClients } = await import('../tools/impl/serviceautopilot.js');
+      const { sendProactiveMessage } = await import('../teams/notify.js');
+      try {
+        await searchClients({ name: 'APIProbe', limit: 1 });
+        if (saWasDown) {
+          saWasDown = false;
+          logger.info('sa_connectivity_check: SA connectivity restored');
+          try { await sendProactiveMessage('✅ SA connectivity restored — ticket creation and CRM tools are back online.'); } catch {}
+        } else {
+          logger.debug('sa_connectivity_check: SA reachable');
+        }
+      } catch (err) {
+        logger.warn('sa_connectivity_check: SA unreachable', { err: err.message });
+        if (!saWasDown) {
+          saWasDown = true;
+          try { await sendProactiveMessage(`⚠️ SA connectivity lost — ticket creation and CRM tools are offline.\n\nError: ${err.message.slice(0, 200)}`); } catch {}
+        }
+      }
+    },
   },
   {
     schedule: '*/5 * * * *',
