@@ -39,8 +39,14 @@ async function getToken() {
 async function graph(method, path, data) {
   const token = await getToken();
   const url = path.startsWith('http') ? path : `${GRAPH}${path}`;
-  const res = await axios({ method, url, data, headers: { Authorization: `Bearer ${token}` } });
-  return res.data;
+  try {
+    const res = await axios({ method, url, data, headers: { Authorization: `Bearer ${token}` } });
+    return res.data;
+  } catch (err) {
+    const body = err.response?.data;
+    const msg = body?.error?.message ?? body?.error?.code ?? JSON.stringify(body);
+    throw new Error(`Graph ${method} ${path.slice(0, 80)} → ${err.response?.status}: ${msg}`);
+  }
 }
 
 const USER = () => process.env.M365_USER_EMAIL;

@@ -496,9 +496,15 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
 
   if (!isFromChase && !subjectLooksLikeAlert) return false;
 
-  // Fetch full body for parsing
-  const full = await getEmail({ email_id: email.id });
-  const bodyText = (full.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+  // Fetch full body for parsing; fall back to snippet if Graph returns an error
+  let bodyText = '';
+  try {
+    const full = await getEmail({ email_id: email.id });
+    bodyText = (full.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+  } catch (err) {
+    logger.warn('Chase alert: getEmail failed, falling back to snippet', { err: err.message, subject: email.subject });
+    bodyText = (email.snippet || '');
+  }
   const searchText = `${email.subject || ''} ${bodyText}`;
 
   // If not directly from Chase, confirm the body also looks like a Chase alert
