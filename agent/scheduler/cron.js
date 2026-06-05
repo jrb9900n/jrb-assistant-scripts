@@ -220,62 +220,23 @@ const SCHEDULED_TASKS = [
       logger.info('overnight_sa_report: sent', { subject: report.subject });
     },
   },
-  {
-    // Every 15 minutes — autonomous triage of michael@jrboehlke.com inbox
-    schedule: '*/15 * * * *',
-    name: 'michael_inbox_processor',
-    run: async () => {
-      if (!acquireRunLock('michael_inbox_processor', 14 * 60_000)) {
-        logger.debug('michael_inbox_processor: skipped (another instance running)');
-        return;
-      }
-      try {
-        const { processInbox } = await import('../tools/impl/inbox-processor.js');
-        const result = await processInbox();
-        logger.info('michael_inbox_processor: complete', result);
-      } finally {
-        releaseRunLock('michael_inbox_processor');
-      }
-    },
-  },
-  {
-    // 7:00 AM daily — scan Michael's sent folder for unanswered emails
-    schedule: '0 7 * * *',
-    name: 'followup_scanner',
-    run: async () => {
-      const { scanFollowups } = await import('../tools/impl/inbox-processor.js');
-      const result = await scanFollowups();
-      logger.info('followup_scanner: complete', result);
-    },
-  },
-  {
-    // 7:30 AM daily — morning briefing Teams message + email to Michael
-    schedule: '30 7 * * *',
-    name: 'morning_briefing',
-    run: async () => {
-      const { generateMorningBriefing } = await import('../tools/impl/morning-briefing.js');
-      const { sendEmail }               = await import('../tools/impl/m365.js');
-      const { sendProactiveMessage }    = await import('../teams/notify.js');
-
-      const briefing = await generateMorningBriefing();
-
-      // Teams message first — fast, Michael may be on his phone
-      try {
-        await sendProactiveMessage(briefing.teamsMessage);
-        logger.info('morning_briefing: Teams message sent');
-      } catch (err) {
-        logger.warn('morning_briefing: Teams send failed', { err: err.message });
-      }
-
-      // Full HTML email
-      await sendEmail({
-        to:      ['michael@jrboehlke.com'],
-        subject: briefing.emailSubject,
-        body:    briefing.emailBody,
-      });
-      logger.info('morning_briefing: email sent', { subject: briefing.emailSubject });
-    },
-  },
+  // DISABLED — inbox processor, followup scanner, morning briefing
+  // Re-enable when inbox processing behavior is ready.
+  // {
+  //   schedule: '*/15 * * * *',
+  //   name: 'michael_inbox_processor',
+  //   ...
+  // },
+  // {
+  //   schedule: '0 7 * * *',
+  //   name: 'followup_scanner',
+  //   ...
+  // },
+  // {
+  //   schedule: '30 7 * * *',
+  //   name: 'morning_briefing',
+  //   ...
+  // },
   {
     // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
     schedule: '0 1 * * *',
