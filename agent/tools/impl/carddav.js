@@ -60,8 +60,19 @@ export function invalidateContactCache() {
   _cacheTime = 0;
 }
 
+const LEGAL_SUFFIXES = /\s+(inc|llc|corp|ltd|co|incorporated|corporation|limited)\s*$/;
+
 function normalizeName(s) {
-  return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
+  return (s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(LEGAL_SUFFIXES, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizePhone(p) {
+  return (p || '').replace(/\D/g, '');
 }
 
 async function getContacts() {
@@ -84,6 +95,18 @@ async function getContacts() {
       return _cache;
     }
     throw err;
+  }
+
+  // Build phone + email sets from all QBO entities for cross-source dedup
+  const qboPhones = new Set();
+  const qboEmails = new Set();
+  for (const e of [...customers, ...vendors]) {
+    for (const num of [e.PrimaryPhone?.FreeFormNumber, e.Mobile?.FreeFormNumber, e.AlternatePhone?.FreeFormNumber]) {
+      const n = normalizePhone(num);
+      if (n.length >= 7) qboPhones.add(n);
+    }
+    const em = e.PrimaryEmailAddr?.Address?.toLowerCase();
+    if (em) qboEmails.add(em);
   }
 
   // Build SA lookup maps (address overlay + SA-only detection)
@@ -168,7 +191,18 @@ async function getContacts() {
     logger.warn('CardDAV: SA phone fetch failed, falling back to no-phone contacts', { err: err.message });
     saOnlyProcessed.push(...saOnlyToFetch.map(c => ({ ...c, phone: null })));
   }
-  const saOnlyVcards = saOnlyProcessed.map(saClientToVCard);
+  // Aggressive dedup before serving to iPhone:
+  // - drop SA contacts that share a phone number with any QBO/vendor contact
+  // - drop SA contacts with neither phone nor address (no useful info in a dialer)
+  const saOnlyDeduped = saOnlyProcessed.filter(c => {
+    if (!c.phone && !c.address) return false;
+    if (c.phone) {
+      const n = normalizePhone(c.phone);
+      if (n.length >= 7 && qboPhones.has(n)) return false;
+    }
+    return true;
+  });
+  const saOnlyVcards = saOnlyDeduped.map(saClientToVCard);
 
   _cache = [
     ...qboVcards,
@@ -182,6 +216,7 @@ async function getContacts() {
     vendors: vendors.length,
     saAccounts: saAccounts.length,
     saOnly: saOnlyVcards.length,
+    saOnlyDropped: saOnlyProcessed.length - saOnlyDeduped.length,
   });
   return _cache;
 }
