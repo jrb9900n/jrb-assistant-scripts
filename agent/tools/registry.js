@@ -660,6 +660,43 @@ const SA_TOOLS = [
       required: ['clientId'],
     },
   },
+  {
+    name: 'sa_fuzzy_match_client',
+    description: 'Compare incoming contact form data against a list of SA search results to find duplicate accounts. Handles nicknames (Deborah/Debbie, Robert/Bob, etc.), address abbreviations (St/Street, Dr/Drive), spouse/same-address matches, and normalized phone/email. Returns the best match with a recommendation: USE_EXISTING, USE_EXISTING_VERIFY, or CREATE_NEW.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        incoming: {
+          type: 'object',
+          description: 'Contact data from the web form',
+          properties: {
+            firstName: { type: 'string' },
+            lastName:  { type: 'string' },
+            address:   { type: 'string', description: 'Street address only (no city/state/zip)' },
+            email:     { type: 'string' },
+            phone:     { type: 'string' },
+          },
+        },
+        candidates: {
+          type: 'array',
+          description: 'SA search results from one or more sa_search_clients calls — merge all results before passing here',
+          items: {
+            type: 'object',
+            properties: {
+              clientId:  { type: 'string' },
+              name:      { type: 'string', description: 'Full name as stored in SA' },
+              firstName: { type: 'string' },
+              lastName:  { type: 'string' },
+              address:   { type: 'string' },
+              email:     { type: 'string' },
+              phone:     { type: 'string' },
+            },
+          },
+        },
+      },
+      required: ['incoming', 'candidates'],
+    },
+  },
 ];
 
 const SCHEDULING_TOOLS = [
