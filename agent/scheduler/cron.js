@@ -475,19 +475,22 @@ If a field is not in the form, omit it from the tool call (except state: always 
 STEP 2 — SEARCH FOR EXISTING CLIENT (deduplicate before creating):
 Run multiple SA searches to check for an existing account. SA client names are stored as "First Last" or "Company Name".
 
-a) Search by firstName: call sa_search_clients with firstName (finds residential clients by first name).
-b) Search by lastName: call sa_search_clients with lastName (catches reversed entries).
-c) If the name looks like a business (has LLC, Inc, Co, or companyName is set): also call sa_search_clients with companyName.
-d) Merge results from all searches. Evaluate each unique result against the incoming contact data:
-   - Name match: same first+last name or same company name (case-insensitive)
-   - Address match: same street number AND street name (ignore unit/apt, city, zip differences)
-   - Email match: identical email address
-   - Phone match: same 10 digits (ignore dashes, spaces, parentheses)
+a) Search by firstName: call sa_search_clients with firstName.
+b) Search by lastName: call sa_search_clients with lastName.
+c) If the name looks like a business (has LLC, Inc, Co, or companyName is set): also search by companyName.
+d) Collect all unique results into a single candidates array.
 
-DUPLICATE DECISION RULES:
-- If ANY result matches on 2 or more fields (name + address, name + email, name + phone, address + email) → treat as EXISTING CLIENT. Use that clientId. Skip STEP 3.
-- If a result matches on name only but has a DIFFERENT address → this may be a GC, property manager, or business owner with multiple properties. Note it in the STEP 7 summary as "Possible existing client [name] found at different address — Michael should verify". Still use the existing clientId (do NOT create a duplicate account).
-- If search returns no matches on any field → proceed to STEP 3 (create new client).
+e) Call sa_fuzzy_match_client with:
+   - incoming: { firstName, lastName, address, email, phone } from STEP 1
+   - candidates: merged array of all sa_search_clients results (include clientId, name, address, email, phone for each)
+
+   The fuzzy matcher handles nicknames (Deborah↔Debbie, Robert↔Bob, etc.), address abbreviations
+   (St↔Street, Dr↔Drive, etc.), normalized phone numbers, and spouse/same-address matching.
+
+DUPLICATE DECISION RULES based on sa_fuzzy_match_client recommendation:
+- USE_EXISTING → treat as EXISTING CLIENT. Use bestMatch.clientId. Skip STEP 3.
+- USE_EXISTING_VERIFY → use bestMatch.clientId but note "Possible match on [matchedOn fields] — Michael should verify" in the STEP 7 summary.
+- CREATE_NEW → proceed to STEP 3.
 
 The goal is zero duplicate accounts. When in doubt, use the existing client.
 
@@ -501,7 +504,26 @@ STEP 4 — ADD TICKET:
 Call sa_add_ticket with:
 - clientId from the client search or creation
 - subject: “Web Lead — [brief description of request]”
-- notes: Begin with “Created by AI on [today's date, e.g. 'May 21, 2026']. Verify contact information before proceeding.” then a blank line, then the full message from the contact form including all details
+- notes: Format with clear paragraphs and double line breaks between sections:
+
+  “Created by AI on [today's date, e.g. 'June 5, 2026']. Verify contact information before proceeding.
+
+  [blank line]
+
+  Name: [firstName lastName]
+  Phone: [phone]
+  Email: [email]
+  Address: [address], [city], [state] [zip]
+
+  [blank line]
+
+  Service Requested: [SelectService value]
+
+  [blank line]
+
+  [If a Message field is present:]
+  Customer Message:
+  [message text]”
 
 STEP 5 — VERIFY TICKET:
 Call sa_get_ticket with the returned ticketId.

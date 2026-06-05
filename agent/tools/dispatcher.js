@@ -19,6 +19,7 @@ import * as scripts     from './impl/scripts.js';
 import * as vercel      from './impl/vercel.js';
 import * as scheduling  from './impl/scheduling.js';
 import * as sa          from './impl/serviceautopilot.js';
+import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 
@@ -109,6 +110,7 @@ const HANDLERS = {
   sa_add_ticket:           ({ notes, ...rest }) => sa.addTicket({ ...rest, body: notes }),
   sa_get_ticket:           (i) => sa.getTicket(i),
   sa_set_billing_defaults: (i) => sa.setClientBillingDefaults(i),
+  sa_fuzzy_match_client:   (i) => fuzzyMatch.runFuzzyMatchClient(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),
