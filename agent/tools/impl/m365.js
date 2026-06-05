@@ -64,7 +64,7 @@ export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = f
 
 export async function getEmail({ email_id, userEmail } = {}) {
   const user = userEmail ?? USER();
-  const data = await graph('GET', `/users/${user}/messages/${email_id}?$select=id,subject,from,to,body,receivedDateTime,conversationId,hasAttachments`);
+  const data = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}?$select=id,subject,from,toRecipients,body,receivedDateTime,conversationId,hasAttachments`);
   return {
     id:              data.id,
     from:            data.from?.emailAddress?.address,
@@ -92,7 +92,7 @@ export async function draftEmail({ to, subject, body, cc = [] }) {
 
 export async function sendEmail({ draft_id, to, subject, body, contentType = 'HTML', attachments = [] }) {
   if (draft_id) {
-    await graph('POST', `/users/${USER()}/messages/${draft_id}/send`);
+    await graph('POST', `/users/${USER()}/messages/${encodeURIComponent(draft_id)}/send`);
     return { sent: true, draft_id };
   }
   const message = {
@@ -173,7 +173,7 @@ export async function listOneDrive({ folder }) {
 
 export async function markEmailRead({ email_id, userEmail } = {}) {
   const user = userEmail ?? USER();
-  await graph('PATCH', `/users/${user}/messages/${email_id}`, { isRead: true });
+  await graph('PATCH', `/users/${user}/messages/${encodeURIComponent(email_id)}`, { isRead: true });
   return { marked_read: true, email_id };
 }
 
@@ -181,7 +181,7 @@ export async function markEmailRead({ email_id, userEmail } = {}) {
  * List attachments on an email. Returns metadata only (no content bytes).
  */
 export async function listEmailAttachments({ email_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}/attachments?$select=id,name,contentType,size`);
+  const data = await graph('GET', `/users/${USER()}/messages/${encodeURIComponent(email_id)}/attachments?$select=id,name,contentType,size`);
   return (data.value ?? []).map(a => ({
     id:          a.id,
     name:        a.name,
@@ -195,7 +195,7 @@ export async function listEmailAttachments({ email_id }) {
  * Graph returns contentBytes as base64 for small files (< 3 MB).
  */
 export async function getEmailAttachmentBytes({ email_id, attachment_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}/attachments/${attachment_id}`);
+  const data = await graph('GET', `/users/${USER()}/messages/${encodeURIComponent(email_id)}/attachments/${encodeURIComponent(attachment_id)}`);
   if (!data.contentBytes) throw new Error('Attachment has no content bytes (may be a reference attachment)');
   return Buffer.from(data.contentBytes, 'base64');
 }
@@ -238,7 +238,7 @@ export async function createMailFolder({ userEmail, name, parentFolderId } = {})
 
 export async function moveEmail({ userEmail, email_id, destination_folder_id } = {}) {
   const user = userEmail ?? USER();
-  const data = await graph('POST', `/users/${user}/messages/${email_id}/move`, {
+  const data = await graph('POST', `/users/${user}/messages/${encodeURIComponent(email_id)}/move`, {
     destinationId: destination_folder_id,
   });
   return { moved: true, new_id: data.id, folder_id: destination_folder_id };
@@ -282,7 +282,7 @@ export async function searchEmails({ userEmail, query, from, subject, limit = 20
 
 export async function catalogEmail({ email_id, userEmail, category, action_taken = 'none', action_notes = '', folder_name } = {}) {
   const user = userEmail ?? USER();
-  const msg = await graph('GET', `/users/${user}/messages/${email_id}?$select=id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments,conversationId,parentFolderId`);
+  const msg = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}?$select=id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments,conversationId,parentFolderId`);
 
   const row = {
     message_id:      msg.id,
@@ -477,10 +477,10 @@ export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {})
 export async function createReplyDraft({ userEmail, email_id, body } = {}) {
   const user = userEmail ?? USER();
   // Step 1: create the reply stub (preserves thread headers, To, Subject)
-  const stub = await graph('POST', `/users/${user}/messages/${email_id}/createReply`, {});
+  const stub = await graph('POST', `/users/${user}/messages/${encodeURIComponent(email_id)}/createReply`, {});
   const draftId = stub.id;
   // Step 2: patch the body onto the draft
-  await graph('PATCH', `/users/${user}/messages/${draftId}`, {
+  await graph('PATCH', `/users/${user}/messages/${encodeURIComponent(draftId)}`, {
     body: { contentType: 'HTML', content: body },
   });
   logger.info('Reply draft created', { user, draftId, sourceMessageId: email_id });
@@ -490,7 +490,7 @@ export async function createReplyDraft({ userEmail, email_id, body } = {}) {
 // Send a saved draft by ID.
 export async function sendDraft({ userEmail, draft_id } = {}) {
   const user = userEmail ?? USER();
-  await graph('POST', `/users/${user}/messages/${draft_id}/send`);
+  await graph('POST', `/users/${user}/messages/${encodeURIComponent(draft_id)}/send`);
   logger.info('Draft sent', { user, draft_id });
   return { sent: true, draft_id };
 }

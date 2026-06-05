@@ -364,8 +364,14 @@ const SCHEDULED_TASKS = [
         await markEmailRead({ email_id: email.id });
 
         logger.info(`Email poller: processing email from ${email.from}`, { subject: email.subject });
-        const full = await getEmail({ email_id: email.id });
-        const body = full.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+        let full;
+        try {
+          full = await getEmail({ email_id: email.id });
+        } catch (fetchErr) {
+          logger.warn('Email poller: getEmail failed, using snippet fallback', { err: fetchErr.message, subject: email.subject });
+          full = { body: email.snippet ?? '' };
+        }
+        const body = (full.body ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
         const fullText = email.subject + ' ' + body;
 
         // ── Feedback capture — runs on every Michael email before routing ────────
