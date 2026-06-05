@@ -44,8 +44,8 @@ async function graph(method, path, data) {
     return res.data;
   } catch (err) {
     const body = err.response?.data;
-    const msg = body?.error?.message ?? body?.error?.code ?? JSON.stringify(body);
-    throw new Error(`Graph ${method} ${path.slice(0, 80)} → ${err.response?.status}: ${msg}`);
+    const msg = body?.error?.message ?? body?.error?.code ?? JSON.stringify(body) ?? err.message;
+    throw new Error(`Graph ${method} ${path.slice(0, 80)} → ${err.response?.status ?? err.code ?? 'network'}: ${msg}`);
   }
 }
 
