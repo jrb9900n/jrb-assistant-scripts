@@ -7,6 +7,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
+import { sendProactiveMessage } from '../teams/notify.js';
 
 // Kill any previous scheduler instance via PID file (wmic not available; this works cross-session)
 const SCHEDULER_PID_FILE = join(tmpdir(), 'jrb-scheduler.pid');
@@ -364,7 +365,16 @@ const SCHEDULED_TASKS = [
         await markEmailRead({ email_id: email.id });
 
         logger.info(`Email poller: processing email from ${email.from}`, { subject: email.subject });
-        const full = await getEmail({ email_id: email.id });
+        let full;
+        try {
+          full = await getEmail({ email_id: email.id });
+        } catch (err) {
+          logger.warn('Email poller: getEmail failed, skipping', { err: err.message, subject: email.subject });
+          sendProactiveMessage(
+            `⚠️ Email from Michael could not be read and was skipped.\nSubject: "${email.subject}"\nError: ${err.message}\nPlease resend or check the assistant inbox.`
+          ).catch(() => {});
+          continue;
+        }
         const body = full.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
         const fullText = email.subject + ' ' + body;
 
