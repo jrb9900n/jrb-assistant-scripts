@@ -127,6 +127,22 @@ foreach ($mode in $restartsNeeded) {
     Start-Sleep -Seconds 2
 }
 
+# ── Google Ads Python scheduler watchdog ─────────────────────────────────────
+$adsRunning = Get-WmiObject Win32_Process -Filter "name='python.exe'" |
+    Where-Object { $_.CommandLine -like '*scheduler.py*' } |
+    Select-Object -First 1
+
+if (-not $adsRunning) {
+    $restartTs = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Add-Content -Path $LOG_FILE -Value "$restartTs  RESTART reason=ads-scheduler-dead  action=Start-ScheduledTask 'Google Ads Agent'" -Encoding UTF8
+    try {
+        Start-ScheduledTask -TaskName "Google Ads Agent"
+        $killed.Add(@{ pid = "N/A"; reason = "ads-scheduler-dead"; cmd = "python scheduler.py --daemon"; time = $restartTs })
+    } catch {
+        Add-Content -Path $LOG_FILE -Value "$restartTs  ERROR ads-scheduler restart failed: $_" -Encoding UTF8
+    }
+}
+
 # ── Update memory file ──────────────────────────────────────────────────────────
 if ($killed.Count -gt 0) {
     $newLines = ($killed | ForEach-Object {
