@@ -1117,6 +1117,7 @@ function mapSAAccount(a) {
     phone:    a.HomePhone || a.CellPhone || a.WorkPhone || a.OtherPhone || a.Phone1 || a.PhoneNumber || '',
     qboId:    a.QboID || a.QboId || '',
     isLead:   a.Type === 'Lead',
+    type:     a.Type || '',
   };
 }
 

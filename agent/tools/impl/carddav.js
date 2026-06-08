@@ -164,7 +164,7 @@ async function getContacts() {
   // Leads are prioritized first so they always make it within the fetch cap.
   const qboNormalizedNames = new Set(customers.map(c => normalizeName(c.DisplayName || '')));
   const saOnlyRaw = saAccounts
-    .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)))
+    .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)) && !c.type.toLowerCase().includes('closed'))
     .sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
 
   // Fetch phones for SA-only contacts. Contacts without a phone are still
