@@ -7,6 +7,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
+import { sendProactiveMessage } from '../teams/notify.js';
 
 // Kill any previous scheduler instance via PID file (wmic not available; this works cross-session)
 const SCHEDULER_PID_FILE = join(tmpdir(), 'jrb-scheduler.pid');
@@ -329,17 +330,6 @@ const SCHEDULED_TASKS = [
           logger.warn('Receipt email check failed', { err: err.message, from: email.from });
         }
 
-        // ── Chase transaction alert check (before michael-only filter — alerts may arrive directly from chase.com) ──
-        try {
-          const chaseHandled = await processChaseAlert(email, { getEmail, sendEmail });
-          if (chaseHandled) {
-            await markEmailRead({ email_id: email.id });
-            continue;
-          }
-        } catch (err) {
-          logger.warn('Chase alert check failed', { err: err.message, from: email.from });
-        }
-
         // Only process non-receipt emails from Michael
         if (!email.from || email.from.toLowerCase() !== 'michael@jrboehlke.com') {
           await markEmailRead({ email_id: email.id });
@@ -368,8 +358,11 @@ const SCHEDULED_TASKS = [
         try {
           full = await getEmail({ email_id: email.id });
         } catch (fetchErr) {
-          logger.warn('Email poller: getEmail failed, using snippet fallback', { err: fetchErr.message, subject: email.subject });
-          full = { body: email.snippet ?? '' };
+          logger.warn('Email poller: getEmail failed, skipping', { err: fetchErr.message, subject: email.subject });
+          sendProactiveMessage(
+            `⚠️ Email from Michael could not be read and was skipped.\nSubject: "${email.subject}"\nError: ${fetchErr.message}\nPlease resend or check the assistant inbox.`
+          ).catch(() => {});
+          continue;
         }
         const body = (full.body ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
         const fullText = email.subject + ' ' + body;
