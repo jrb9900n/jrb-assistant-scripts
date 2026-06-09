@@ -661,6 +661,15 @@ h2{color:#00cc66;margin-bottom:12px}p{color:#888;font-size:13px}</style></head>
 
 await loadMcpHandler();
 
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    logger.error(`Teams bot: port ${PORT} already in use — another instance is running. Exiting.`, { code: err.code });
+  } else {
+    logger.error('Teams bot server error', { err: err.message, code: err.code });
+  }
+  process.exit(1);
+});
+
 server.listen(PORT, () => {
   logger.info(`Teams bot listening on port ${PORT}`);
 });
