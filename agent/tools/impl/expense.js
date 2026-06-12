@@ -5,7 +5,7 @@ import { logger } from '../../core/logger.js';
 import { getPurchase, uploadReceiptToQbo } from './quickbooks.js';
 import { sendEmail } from './m365.js';
 import { sendProactiveMessage } from '../../teams/notify.js';
-import { SmsClient } from '@azure/communication-sms';
+import twilio from 'twilio';
 
 const supabase = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
@@ -14,7 +14,7 @@ const supabase = createClient(
 
 const PORTAL_BASE = 'https://fieldops.jrboehlke.com';
 
-// ── ACS SMS ───────────────────────────────────────────────────
+// ── Twilio SMS ────────────────────────────────────────────────
 
 function toE164(phone) {
   const digits = String(phone).replace(/\D/g, '');
@@ -22,14 +22,14 @@ function toE164(phone) {
 }
 
 async function sendSms(phoneNumber, message) {
-  const connStr   = process.env.ACS_CONNECTION_STRING;
-  const fromPhone = process.env.ACS_FROM_PHONE;
-  if (!connStr || !fromPhone) throw new Error('ACS_CONNECTION_STRING / ACS_FROM_PHONE not configured');
-  const client  = new SmsClient(connStr);
-  const results = await client.send({ from: fromPhone, to: [toE164(phoneNumber)], message });
-  const result  = results[0];
-  if (!result.successful) throw new Error(`ACS SMS rejected: ${result.errorMessage}`);
-  return result;
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken  = process.env.TWILIO_AUTH_TOKEN;
+  const fromPhone  = process.env.TWILIO_FROM_PHONE;
+  if (!accountSid || !authToken || !fromPhone) throw new Error('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_PHONE not configured');
+  const client = twilio(accountSid, authToken);
+  const msg = await client.messages.create({ body: message, from: fromPhone, to: toE164(phoneNumber) });
+  if (msg.errorCode) throw new Error(`Twilio error ${msg.errorCode}: ${msg.errorMessage}`);
+  return msg;
 }
 
 // Categories that trigger Section 3 (asset required)
@@ -207,7 +207,7 @@ async function sendExpenseSms(phoneNumber, { report, amount, vendor, date, cardL
   const message   = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link}`;
 
   await sendSms(phoneNumber, message);
-  logger.info('SMS sent via ACS', { phone: phoneNumber, reportId: report.id });
+  logger.info('SMS sent via Twilio', { phone: phoneNumber, reportId: report.id });
 
   const teamsMsg = `New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}\nSubmit receipt: ${link}`;
   sendProactiveMessage(teamsMsg).catch(err =>
