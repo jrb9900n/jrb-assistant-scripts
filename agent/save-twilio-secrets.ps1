@@ -1,7 +1,8 @@
-Add-Type -TypeDefinition @"
+if (-not ([System.Management.Automation.PSTypeName]'TwilioCredWriter').Type) {
+    Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-public class CredWriter2 {
+public class TwilioCredWriter {
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
     public struct CREDENTIAL {
         public uint Flags; public uint Type; public string TargetName; public string Comment;
@@ -21,21 +22,22 @@ public class CredWriter2 {
     }
 }
 "@
+}
 
 function Save-Secret {
     param([string]$Name, [string]$Prompt)
-    $val = Read-Host -Prompt $Prompt -AsSecureString
-    $plain = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
-        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($val))
+    $secure = Read-Host -Prompt $Prompt -AsSecureString
+    $plain  = [System.Net.NetworkCredential]::new("", $secure).Password
     if ([string]::IsNullOrWhiteSpace($plain)) { Write-Warning "Skipped $Name (empty)"; return }
-    $ok = [CredWriter2]::Write("JRBAgent:$Name", $plain)
-    if ($ok) { Write-Host "Saved $Name" } else { Write-Warning "Failed to save $Name" }
+    $ok = [TwilioCredWriter]::Write("JRBAgent:$Name", $plain)
+    if ($ok) { Write-Host "  Saved $Name" -ForegroundColor Green }
+    else     { Write-Warning "Failed to save $Name (error $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))" }
 }
 
-Write-Host "Twilio credential setup — values are masked as you type."
+Write-Host "Twilio credential setup - values are masked as you type." -ForegroundColor Cyan
 Write-Host ""
 Save-Secret "TWILIO_ACCOUNT_SID" "Account SID (starts with AC)"
 Save-Secret "TWILIO_AUTH_TOKEN"  "Auth Token"
-Save-Secret "TWILIO_FROM_PHONE"  "From phone number (E.164, e.g. +12622001234)"
+Save-Secret "TWILIO_FROM_PHONE"  "From phone number (e.g. +14145551234)"
 Write-Host ""
-Write-Host "Done. Restart the agent after merging the PR for these to take effect."
+Write-Host "Done. Restart the agent after merging the PR for these to take effect." -ForegroundColor Cyan
