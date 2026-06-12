@@ -83,8 +83,9 @@ $secrets = @{
     "FLEETOPS_SUPABASE_SERVICE_KEY"  = Get-Secret "FLEETOPS_SUPABASE_SERVICE_KEY"
     "QB_WEBHOOK_VERIFIER_TOKEN"      = Get-Secret "QB_WEBHOOK_VERIFIER_TOKEN"
     "EXPENSE_PORTAL_BASE"            = "https://fieldops.jrboehlke.com/expense"
-    "ACS_CONNECTION_STRING"          = Get-Secret "ACS_CONNECTION_STRING"
-    "ACS_FROM_PHONE"                 = Get-Secret "ACS_FROM_PHONE"
+    "TWILIO_ACCOUNT_SID"             = Get-Secret "TWILIO_ACCOUNT_SID"
+    "TWILIO_AUTH_TOKEN"              = Get-Secret "TWILIO_AUTH_TOKEN"
+    "TWILIO_FROM_PHONE"              = Get-Secret "TWILIO_FROM_PHONE"
     # Menards rebate automation
     "EDGE_PATH"                      = "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
     "REBATE_URL"                     = Get-Secret "REBATE_URL"

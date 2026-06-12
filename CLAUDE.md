@@ -192,7 +192,7 @@ Then restart the agent.
 Full receipt capture workflow for company credit cards. Lives across both repos.
 
 ### How it works
-1. Chase alert email forwarded to `assistant@jrboehlke.com` → email poller (every 5 min) → `processChaseAlert()` → expense report created → **ACS SMS** sent to cardholder within ~5 minutes of charge
+1. Chase alert email forwarded to `assistant@jrboehlke.com` → email poller (every 5 min) → `processChaseAlert()` → expense report created → **Twilio SMS** sent to cardholder within ~5 minutes of charge
 2. QBO webhook (`POST /qbo-webhook`) fires separately when QBO processes the transaction → reconciles with Chase stub (updates `qbo_transaction_id`) or creates its own report if no stub exists
 3. Employee taps SMS link → FieldOps expense portal (`/expense/:uuid`) → fills form, uploads receipt photo
 4. Receipt saved to Supabase Storage (`expense-receipts` bucket) → automatically attached to QBO Purchase transaction via Attachments API
@@ -210,9 +210,9 @@ Full receipt capture workflow for company credit cards. Lives across both repos.
 - `FieldOps/vercel.json` — rewrite rule for `/expense/*` → `/index.html`
 
 ### SMS approach
-Uses **Azure Communication Services (ACS)** via `@azure/communication-sms@1.1.0`. Phone number stored on `credit_cards.phone_number` (E.164 normalized by `toE164()` helper in expense.js). Secrets: `ACS_CONNECTION_STRING`, `ACS_FROM_PHONE` in Credential Manager. Teams proactive message also sent as backup.
+Uses **Twilio** via `twilio` npm package. Phone number stored on `credit_cards.phone_number` (E.164 normalized by `toE164()` helper in expense.js). Secrets: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_PHONE` in Credential Manager. Teams proactive message also sent as backup.
 
-> **Previous approach (abandoned):** email-to-carrier gateways (vtext.com via M365 sendEmail). Silently quarantined by Proofpoint outbound filter (GoDaddy Advanced Email Security) — empty subject + URL body triggers spam detection.
+> **Previous approaches (abandoned):** (1) email-to-carrier gateways — silently quarantined by Proofpoint outbound filter. (2) Azure Communication Services (ACS) toll-free number — ACS accepted sends but Verizon silently dropped all messages due to missing Toll-Free Verification (TFV).
 
 ### Supabase (fleetops — mzywmgesulyalevtzudw)
 New tables: `credit_cards`, `expense_reports`, `menards_rebates`
@@ -233,8 +233,9 @@ Storage bucket: `expense-receipts` (10MB limit, image/* + PDF)
 ### Secrets required
 - `FLEETOPS_SUPABASE_SERVICE_KEY` ✅ configured
 - `QB_WEBHOOK_VERIFIER_TOKEN` ✅ configured
-- `ACS_CONNECTION_STRING` ✅ configured (2026-05-30)
-- `ACS_FROM_PHONE` ✅ configured (2026-05-30)
+- `TWILIO_ACCOUNT_SID` ✅ configured (2026-06-12)
+- `TWILIO_AUTH_TOKEN` ✅ configured (2026-06-12)
+- `TWILIO_FROM_PHONE` ✅ configured (2026-06-12)
 - `MENARDS_REBATE_*` (10 keys) — pending
 
 ---
