@@ -81,6 +81,7 @@ $secrets = @{
     # Expense capture
     "FLEETOPS_SUPABASE_URL"          = "https://mzywmgesulyalevtzudw.supabase.co"
     "FLEETOPS_SUPABASE_SERVICE_KEY"  = Get-Secret "FLEETOPS_SUPABASE_SERVICE_KEY"
+    "FIELDOPS_SUPABASE_KEY"          = Get-Secret "FIELDOPS_SUPABASE_KEY"
     "QB_WEBHOOK_VERIFIER_TOKEN"      = Get-Secret "QB_WEBHOOK_VERIFIER_TOKEN"
     "EXPENSE_PORTAL_BASE"            = "https://fieldops.jrboehlke.com/expense"
     "TWILIO_ACCOUNT_SID"             = Get-Secret "TWILIO_ACCOUNT_SID"
