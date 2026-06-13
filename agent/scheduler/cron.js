@@ -155,10 +155,7 @@ const SCHEDULED_TASKS = [
     run: () => new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['weekly-sync.js'], {
         cwd: 'C:\\Users\\Assistant\\BTA Reporting',
-        env: {
-          ...process.env,
-          FIELDOPS_SUPABASE_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
-        },
+        env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 900_000,
       });
@@ -245,11 +242,7 @@ const SCHEDULED_TASKS = [
     run: () => new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['sa-nightly-sync.js'], {
         cwd: 'C:\\Users\\Assistant\\BTA Reporting',
-        env: {
-          ...process.env,
-          // Script uses FIELDOPS_SUPABASE_KEY; launcher injects FLEETOPS_SUPABASE_SERVICE_KEY
-          FIELDOPS_SUPABASE_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
-        },
+        env: { ...process.env },
         stdio: ['ignore', 'pipe', 'pipe'],
         timeout: 600_000,
       });

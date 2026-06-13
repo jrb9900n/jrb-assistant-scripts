@@ -49,7 +49,11 @@ async function pollTasks() {
     try { await sb('agent_tasks?id=eq.' + row.id, { method: 'PATCH', body: JSON.stringify({ status: 'running' }) }); } catch { /* ignore */ }
     let result, status;
     try {
-      const { result: r } = await runAgent({ task: row.task, taskType: row.task_type || 'general' });
+      const { result: r } = await runAgent({
+        task: row.task,
+        taskType: row.task_type || 'general',
+        ...(row.system_prompt_override ? { systemPromptOverride: row.system_prompt_override } : {}),
+      });
 
       // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
       // Check the backoff timer directly to detect if SA was blocked mid-run.
