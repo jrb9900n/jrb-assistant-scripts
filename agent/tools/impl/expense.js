@@ -496,9 +496,17 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
 
   if (!isFromChase && !subjectLooksLikeAlert) return false;
 
-  // Fetch full body for parsing
-  const full = await getEmail({ email_id: email.id });
-  const bodyText = (full.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+  // Fetch full body for parsing; fall back to snippet if Graph returns an error
+  let bodyText = '';
+  let snippetFallback = false;
+  try {
+    const full = await getEmail({ email_id: email.id });
+    bodyText = (full.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+  } catch (err) {
+    logger.warn('Chase alert: getEmail failed, falling back to snippet', { err: err.message, subject: email.subject });
+    bodyText = (email.snippet || '');
+    snippetFallback = true;
+  }
   const searchText = `${email.subject || ''} ${bodyText}`;
 
   // If not directly from Chase, confirm the body also looks like a Chase alert
@@ -508,6 +516,15 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
 
   const parsed = parseChaseAlert(searchText);
   if (!parsed) {
+    if (snippetFallback) {
+      // Card pattern likely appears past the 200-char snippet — can't parse safely.
+      // Return true so the email isn't routed to CRM; alert Michael to review manually.
+      logger.warn('Chase alert: getEmail unavailable and snippet too short to parse — manual review needed', { subject: email.subject });
+      sendProactiveMessage(
+        `⚠️ Chase alert detected but could not be parsed (email body unavailable).\nSubject: "${email.subject}"\nCheck your Chase app and submit the expense manually at https://fieldops.jrboehlke.com`
+      ).catch(() => {});
+      return true;
+    }
     logger.warn('Chase alert: could not parse transaction details — will need format update', { subject: email.subject });
     return false;
   }

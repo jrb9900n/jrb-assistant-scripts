@@ -22,7 +22,16 @@ const supabase = createClient(
 // ── QBO data fetch ────────────────────────────────────────────
 
 async function fetchQBOEntities(entityType) {
-  const token = await getQBAccessToken();
+  let token;
+  try {
+    token = await getQBAccessToken();
+  } catch (err) {
+    logger.error('CardDAV: QB token refresh failed — re-auth required at /qb-reauth', {
+      status: err.response?.status,
+      err: err.message,
+    });
+    throw err;
+  }
   const results = [];
   let pos = 1;
   while (true) {
