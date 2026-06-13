@@ -82,7 +82,8 @@ export async function getWeatherForecast({ days = 14 } = {}) {
   const url =
     `https://api.open-meteo.com/v1/forecast` +
     `?latitude=43.0389&longitude=-87.9065` +
-    `&daily=precipitation_probability_max,temperature_2m_max,temperature_2m_min,weathercode,windspeed_10m_max` +
+    `&hourly=precipitation_probability,precipitation,temperature_2m,weathercode` +
+    `&daily=temperature_2m_max,temperature_2m_min,weathercode,windspeed_10m_max` +
     `&forecast_days=${n}&timezone=America%2FChicago`;
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Weather API HTTP ${res.status}`);
@@ -92,18 +93,57 @@ export async function getWeatherForecast({ days = 14 } = {}) {
   const SNOW = new Set([71,73,75,77,85,86]);
   const toF  = c => Math.round(c * 9/5 + 32);
 
+  // Build hourly lookup by date string
+  const hourlyByDate = {};
+  d.hourly.time.forEach((ts, i) => {
+    const [date, time] = ts.split('T');
+    if (!hourlyByDate[date]) hourlyByDate[date] = [];
+    hourlyByDate[date].push({
+      hour: parseInt(time.split(':')[0]),
+      precip_prob: d.hourly.precipitation_probability[i],
+      precip_mm:   d.hourly.precipitation[i],
+      temp_f:      toF(d.hourly.temperature_2m[i]),
+      code:        d.hourly.weathercode[i],
+    });
+  });
+
+  function slotSummary(hours, fromH, toH) {
+    const slots = hours.filter(h => h.hour >= fromH && h.hour < toH);
+    if (!slots.length) return null;
+    const maxProb = Math.max(...slots.map(h => h.precip_prob));
+    const totalMm = slots.reduce((s, h) => s + h.precip_mm, 0);
+    const hasRain = slots.some(h => RAIN.has(h.code));
+    const hasSnow = slots.some(h => SNOW.has(h.code));
+    const avgTemp = Math.round(slots.reduce((s, h) => s + h.temp_f, 0) / slots.length);
+    return {
+      precip_prob: maxProb,
+      precip_mm:   Math.round(totalMm * 10) / 10,
+      condition:   hasSnow ? 'snow' : hasRain ? 'rain' : maxProb >= 40 ? 'chance_rain' : 'clear',
+      avg_temp_f:  avgTemp,
+    };
+  }
+
   return d.daily.time.map((date, i) => {
-    const hiF  = toF(d.daily.temperature_2m_max[i]);
-    const rain = d.daily.precipitation_probability_max[i];
-    const code = d.daily.weathercode[i];
+    const hiF    = toF(d.daily.temperature_2m_max[i]);
+    const loF    = toF(d.daily.temperature_2m_min[i]);
+    const code   = d.daily.weathercode[i];
+    const hours  = hourlyByDate[date] || [];
+    const morning   = slotSummary(hours, 6, 12);   // 6am–noon
+    const afternoon = slotSummary(hours, 12, 18);  // noon–6pm
+    const evening   = slotSummary(hours, 18, 22);  // 6pm–10pm
+
+    // safe_for_fert: morning OR afternoon slot has < 40% rain and temp in range
+    const fertWindow = (morning?.precip_prob ?? 100) < 40 || (afternoon?.precip_prob ?? 100) < 40;
     return {
       date,
       temp_high:   hiF,
-      temp_low:    toF(d.daily.temperature_2m_min[i]),
-      precip_prob: rain,
+      temp_low:    loF,
       wind_mph:    Math.round(d.daily.windspeed_10m_max[i] * 0.621371),
       condition:   SNOW.has(code) ? 'snow' : RAIN.has(code) ? 'rain' : code <= 3 ? 'clear' : 'cloudy',
-      safe_for_fert: rain < 40 && hiF >= 45 && hiF <= 95,
+      morning,
+      afternoon,
+      evening,
+      safe_for_fert: fertWindow && hiF >= 45 && hiF <= 95,
     };
   });
 }

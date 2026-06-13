@@ -754,7 +754,7 @@ const SCHEDULING_TOOLS = [
   },
   {
     name: 'get_weather_forecast',
-    description: 'Get 14-day weather forecast for SE Wisconsin including safe_for_fert flag per day.',
+    description: 'Get 14-day weather forecast for SE Wisconsin. Each day includes morning (6am-noon), afternoon (noon-6pm), and evening (6pm-10pm) slots with precip_prob and condition. safe_for_fert is true when at least one daytime slot has <40% rain and temp 45-95F. Use slot data to determine if rain is only evening — morning/afternoon work can still proceed.',
     input_schema: {
       type: 'object',
       properties: {
