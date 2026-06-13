@@ -543,6 +543,23 @@ const server = http.createServer(async (req, res) => {
     await handleFieldOpsChat(req, res); return;
   }
 
+  // FieldOps Refresh button — sync SA waiting list via puppeteer session
+  if (req.method === 'POST' && url === '/sync-waiting-list') {
+    const auth = req.headers['x-execute-secret'];
+    if (!EXECUTE_SECRET || auth !== EXECUTE_SECRET) { res.writeHead(401); res.end('Unauthorized'); return; }
+    try {
+      const { syncWaitingList } = await import('../tools/impl/serviceautopilot.js');
+      const result = await syncWaitingList();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      logger.error('sync-waiting-list error', { err: err.message });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // ── Expense capture endpoints ─────────────────────────────────
 
   // QBO webhook — fires when a new Purchase entity is created
