@@ -128,7 +128,7 @@ foreach ($mode in $restartsNeeded) {
 }
 
 # ── Google Ads Python scheduler watchdog ─────────────────────────────────────
-$adsRunning = Get-WmiObject Win32_Process -Filter "name='python.exe'" |
+$adsRunning = Get-WmiObject Win32_Process -Filter "name='pythonw.exe'" |
     Where-Object { $_.CommandLine -like '*scheduler.py*' } |
     Select-Object -First 1
 
