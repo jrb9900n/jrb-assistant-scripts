@@ -43,7 +43,7 @@ const BOT_APP_ID     = process.env.TEAMS_BOT_APP_ID;
 const BOT_APP_SECRET = process.env.TEAMS_BOT_APP_SECRET;
 const EXECUTE_SECRET = process.env.CLAUDE_EXECUTE_SECRET;
 
-function buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock = '') {
+function buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock = '', memoryBlock = '') {
   const skillSection = SCHEDULING_SKILL
     ? `\n\n---\n\n${SCHEDULING_SKILL}\n\n---`
     : '';
@@ -70,7 +70,7 @@ Load with get_schedule_draft (session_id: "${sessionId}"), modify, then save_sch
 
 ## Confirmation
 When user says "looks good / write it to SA / confirm": update draft status to 'confirmed' and note that SA write-back will be available once the endpoint is configured.
-${rulesBlock}${draftContext}`.trim();
+${rulesBlock}${draftContext}${memoryBlock ? `\n\n${memoryBlock}` : ''}`.trim();
 }
 
 let _botToken = null;
@@ -270,7 +270,13 @@ async function handleTeamsActivity(req, res) {
         }
       } catch { /* non-fatal */ }
 
-      const systemPrompt = buildSchedulingSystemPrompt(sessionId, null, draftContext, rulesBlock);
+      let memoryBlock = '';
+      try {
+        const { loadContext } = await import('../memory/memory.js');
+        memoryBlock = await loadContext({ topic: 'scheduling', limit: 3 });
+      } catch { /* non-fatal */ }
+
+      const systemPrompt = buildSchedulingSystemPrompt(sessionId, null, draftContext, rulesBlock, memoryBlock);
       retryTaskType = 'scheduling';
       ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true }));
 
@@ -385,7 +391,16 @@ async function handleFieldOpsChat(req, res) {
     logger.warn('Could not load draft context', { err: e.message });
   }
 
-  const systemPrompt = buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock);
+  // Load memory from past scheduling sessions
+  let memoryBlock = '';
+  try {
+    const { loadContext } = await import('../memory/memory.js');
+    memoryBlock = await loadContext({ topic: 'scheduling', limit: 3 });
+  } catch (e) {
+    logger.warn('Could not load scheduling memory', { err: e.message });
+  }
+
+  const systemPrompt = buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock, memoryBlock);
 
   try {
     const { result } = await runAgent({
