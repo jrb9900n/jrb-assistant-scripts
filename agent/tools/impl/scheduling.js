@@ -19,10 +19,11 @@ export async function getCrews() {
   return data;
 }
 
-export async function getWaitingList({ service_filter, limit = 500 } = {}) {
+export async function getWaitingList({ service_filter, limit = 2000 } = {}) {
   const { data, error } = await db()
     .from('sa_waiting_list')
-    .select('job_id,client_id,client_name,address,city,zip,service_code,category,date_added,days_waiting,amount,budgeted_hours,notes,internal_notes,target_date,sales_rep,service_timing')
+    .select('job_id,client_id,client_name,address,city,zip,service_code,category,date_added,amount,budgeted_hours,notes,internal_notes,target_date,sales_rep,service_timing')
+    .in('status', ['6', '7', '1'])
     .order('date_added', { ascending: true })
     .limit(limit);
   if (error) throw new Error(`get_waiting_list: ${error.message}`);

@@ -735,7 +735,7 @@ const SCHEDULING_TOOLS = [
       type: 'object',
       properties: {
         service_filter: { type: 'string', description: 'Keyword to filter by service type, e.g. "app 3" or "fert"' },
-        limit: { type: 'number', description: 'Max records to return (default 500)', default: 500 },
+        limit: { type: 'number', description: 'Max records to return (default 2000)', default: 2000 },
       },
       required: [],
     },
@@ -798,7 +798,7 @@ const TOOL_MAP = {
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS, ...TEAMS_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS.filter(t => ['sa_search_clients','sa_fuzzy_match_client','sa_get_client_profile','sa_get_client_notes'].includes(t.name)), ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],
