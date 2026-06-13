@@ -45,12 +45,11 @@ function routeModel(taskPrompt, forceModel, taskType) {
         // Analysis or multi-step reasoning
         /\b(analys|strateg|compar|synthesiz|report|forecast|explain why|plan|review)\b/i.test(taskPrompt) ||
         // Anything touching external systems with side effects
-        /\b(invoice|payment|schedule|invoice|estimate|quickbooks|hubspot)\b/i.test(taskPrompt);
+        /\b(invoice|payment|schedule|estimate|quickbooks|hubspot)\b/i.test(taskPrompt);
     return isComplex ? SONNET : HAIKU;
 }
 
-async function buildSystemPrompt(memoryContext, taskType) {
-  const rulesAndPatterns = await buildContextBlock(taskType);
+async function buildSystemPrompt(memoryContext, rulesAndPatterns, taskType) {
   return `You are an AI executive assistant for J.R. Boehlke, LLC (JRB Boehlke LLC), an asphalt, concrete, landscape, and snow contractor in southeast Wisconsin and metro Milwaukee. Michael Boehlke is the owner and your primary user.
 
 ## Your role
@@ -86,7 +85,7 @@ You help Michael manage every hat he wears: bookkeeping, finance, operations, sc
 Date/time: ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })}
 Task type: ${taskType}
 
-${memoryContext}${rulesAndPatterns}`.trim();
+${memoryContext}${rulesAndPatterns ?? ''}`.trim();
 }
 
 export async function runAgent({
@@ -97,10 +96,18 @@ export async function runAgent({
     const model = routeModel(task, forceModel, taskType);
     logger.info('Agent run started', { runId, taskType, model, task: task.slice(0, 80) });
 
-    const memoryContext = await loadContext({ topic: taskType });
     const tools = getTools(taskType);
     const messages = [...extraMessages, { role: 'user', content: task }];
-    const systemPrompt = systemPromptOverride ?? await buildSystemPrompt(memoryContext, taskType);
+    let systemPrompt;
+    if (systemPromptOverride) {
+        systemPrompt = systemPromptOverride;
+    } else {
+        const [memoryContext, rulesAndPatterns] = await Promise.all([
+            loadContext({ topic: taskType }),
+            buildContextBlock(taskType),
+        ]);
+        systemPrompt = await buildSystemPrompt(memoryContext, rulesAndPatterns, taskType);
+    }
 
     let totalInput = 0, totalOutput = 0, finalText = '';
 

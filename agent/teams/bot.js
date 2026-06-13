@@ -43,7 +43,7 @@ const BOT_APP_ID     = process.env.TEAMS_BOT_APP_ID;
 const BOT_APP_SECRET = process.env.TEAMS_BOT_APP_SECRET;
 const EXECUTE_SECRET = process.env.CLAUDE_EXECUTE_SECRET;
 
-function buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock = '') {
+function buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock = '', memoryBlock = '') {
   const skillSection = SCHEDULING_SKILL
     ? `\n\n---\n\n${SCHEDULING_SKILL}\n\n---`
     : '';
@@ -70,7 +70,17 @@ Load with get_schedule_draft (session_id: "${sessionId}"), modify, then save_sch
 
 ## Confirmation
 When user says "looks good / write it to SA / confirm": update draft status to 'confirmed' and note that SA write-back will be available once the endpoint is configured.
-${rulesBlock}${draftContext}`.trim();
+${rulesBlock}${draftContext}${memoryBlock ? `\n\n${memoryBlock}` : ''}`.trim();
+}
+
+async function loadSchedulingMemory() {
+  try {
+    const { loadContext } = await import('../memory/memory.js');
+    return await loadContext({ topic: 'scheduling', limit: 3 });
+  } catch (e) {
+    logger.warn('Could not load scheduling memory', { err: e.message });
+    return '';
+  }
 }
 
 let _botToken = null;
@@ -246,6 +256,7 @@ async function handleTeamsActivity(req, res) {
   // Track what we're about to run so the catch block can queue a retry if SA is blocked
   let retryTask = userText;
   let retryTaskType = 'general';
+  let retrySystemPrompt = null;
 
   try {
     let result;
@@ -258,7 +269,7 @@ async function handleTeamsActivity(req, res) {
       try {
         const ctx = await buildContextBlock('scheduling');
         if (ctx) rulesBlock = `\n\n${ctx}`;
-      } catch { /* non-fatal */ }
+      } catch (e) { logger.warn('Could not load scheduling rules', { err: e.message }); }
 
       let draftContext = '';
       try {
@@ -268,10 +279,12 @@ async function handleTeamsActivity(req, res) {
           const preview = JSON.stringify(draft.schedule_data, null, 2).slice(0, 2000);
           draftContext = `\n\n## Current Draft (ID: ${draft.id})\nDirective: ${draft.directive}\nWeek: ${draft.week_start || 'TBD'}\n\n${preview}`;
         }
-      } catch { /* non-fatal */ }
+      } catch (e) { logger.warn('Could not load draft context', { err: e.message }); }
 
-      const systemPrompt = buildSchedulingSystemPrompt(sessionId, null, draftContext, rulesBlock);
+      const memoryBlock = await loadSchedulingMemory();
+      const systemPrompt = buildSchedulingSystemPrompt(sessionId, null, draftContext, rulesBlock, memoryBlock);
       retryTaskType = 'scheduling';
+      retrySystemPrompt = systemPrompt;
       ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true }));
 
     } else if (intent === 'crm') {
@@ -318,7 +331,7 @@ Message: "${userText}"
         await fetch(`${SUPABASE_URL}/rest/v1/agent_tasks`, {
           method: 'POST',
           headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ task: retryTask, task_type: retryTaskType, status: 'pending', run_after: runAfter, notify_teams: true, retry_count: 0 }),
+          body: JSON.stringify({ task: retryTask, task_type: retryTaskType, status: 'pending', run_after: runAfter, notify_teams: true, retry_count: 0, ...(retrySystemPrompt ? { system_prompt_override: retrySystemPrompt } : {}) }),
         });
         await replyToTeams(activity, `SA is temporarily rate-limited by bot protection. I've queued this task and will retry automatically in ~${remainingMin} min — I'll notify you here when it completes.`);
       } catch (queueErr) {
@@ -385,7 +398,8 @@ async function handleFieldOpsChat(req, res) {
     logger.warn('Could not load draft context', { err: e.message });
   }
 
-  const systemPrompt = buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock);
+  const memoryBlock = await loadSchedulingMemory();
+  const systemPrompt = buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock, memoryBlock);
 
   try {
     const { result } = await runAgent({
