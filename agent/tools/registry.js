@@ -730,12 +730,12 @@ const SCHEDULING_TOOLS = [
   },
   {
     name: 'get_waiting_list',
-    description: 'Load unscheduled jobs from the SA waiting list. Optionally filter by service keyword.',
+    description: 'Load unscheduled jobs from the SA waiting list. Each job includes internal_notes (SA job-level scheduling notes — timing preferences, access requirements, special instructions), target_date, amount, and budgeted_hours. Optionally filter by service keyword.',
     input_schema: {
       type: 'object',
       properties: {
         service_filter: { type: 'string', description: 'Keyword to filter by service type, e.g. "app 3" or "fert"' },
-        limit: { type: 'number', description: 'Max records to return', default: 100 },
+        limit: { type: 'number', description: 'Max records to return (default 500)', default: 500 },
       },
       required: [],
     },
