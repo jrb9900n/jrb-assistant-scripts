@@ -697,6 +697,29 @@ const SA_TOOLS = [
       required: ['incoming', 'candidates'],
     },
   },
+  {
+    name: 'sa_get_client_profile',
+    description: 'Fetch scheduling-relevant client profile from SA: office notes (gate codes, property access instructions, special crew notes), billing notes, address, and phone. Call this before scheduling a client\'s jobs to get property context. Also returns custom fields if configured in SA (CustomField1-6).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID from sa_search_clients' },
+      },
+      required: ['clientId'],
+    },
+  },
+  {
+    name: 'sa_get_client_notes',
+    description: 'Fetch recent CRM notes and tickets for a client — call history, site visit notes, consultation records, issue logs. Returns newest first. Useful for scheduling context: know what was discussed, what issues exist, what services were requested.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID' },
+        limit:    { type: 'number', description: 'Max notes to return (default 10)' },
+      },
+      required: ['clientId'],
+    },
+  },
 ];
 
 const SCHEDULING_TOOLS = [
@@ -707,12 +730,12 @@ const SCHEDULING_TOOLS = [
   },
   {
     name: 'get_waiting_list',
-    description: 'Load unscheduled jobs from the SA waiting list. Optionally filter by service keyword.',
+    description: 'Load unscheduled jobs from the SA waiting list. Each job includes internal_notes (SA job-level scheduling notes — timing preferences, access requirements, special instructions), target_date, amount, and budgeted_hours. Optionally filter by service keyword.',
     input_schema: {
       type: 'object',
       properties: {
         service_filter: { type: 'string', description: 'Keyword to filter by service type, e.g. "app 3" or "fert"' },
-        limit: { type: 'number', description: 'Max records to return', default: 100 },
+        limit: { type: 'number', description: 'Max records to return (default 2000)', default: 2000 },
       },
       required: [],
     },
@@ -775,7 +798,7 @@ const TOOL_MAP = {
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS.filter(t => ['sa_search_clients','sa_fuzzy_match_client','sa_get_client_profile','sa_get_client_notes'].includes(t.name)), ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],

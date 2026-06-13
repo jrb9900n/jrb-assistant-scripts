@@ -1187,3 +1187,58 @@ export async function getSAClientPhone(clientId) {
   return d.HomePhone || d.CellPhone || d.WorkPhone || d.OtherPhone || '';
 }
 
+/**
+ * Fetch scheduling-relevant client profile: OfficeNotes (gate codes, property access,
+ * special instructions), BillingNotes, contact info, and custom fields (CustomField1-6)
+ * if configured in SA Admin → Account Settings → Custom Fields.
+ */
+export async function getClientProfile({ clientId }) {
+  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getClientProfile: no data returned for clientId ${clientId}`);
+
+  logger.info('SA: getClientProfile complete', { clientId });
+  return {
+    clientId,
+    name:         d.PropertyName || `${d.FirstName || ''} ${d.LastName || ''}`.trim(),
+    address:      [d.Address, d.City, d.PostalCode].filter(Boolean).join(', '),
+    phone:        d.HomePhone || d.CellPhone || d.WorkPhone || d.OtherPhone || '',
+    officeNotes:  d.OfficeNotes  || '',
+    billingNotes: d.BillingNotes || '',
+  };
+}
+
+/**
+ * Fetch recent CRM notes/tickets for a client — call history, site visits, consultation notes.
+ * Uses MyDay_GetTickets with CustomerJobID filter (discovered 2026-06-13).
+ * Returns newest first, limited to `limit` entries.
+ */
+export async function getClientNotes({ clientId, limit = 10 }) {
+  const details = await getClientDetails(clientId);
+  const { customerJobId } = details;
+
+  const res = await post('/CRMBFF/TicketList/MyDay_GetTickets', {
+    QueryInput: { MaxRows: limit, AllTickets: true, StartingRow: 0, CustomerJobID: customerJobId },
+  }, 'ClientView.aspx');
+
+  const tickets = res.data?.Tickets || [];
+  logger.info('SA: getClientNotes complete', { clientId, count: tickets.length });
+
+  return tickets.map(t => {
+    const d = t.RequestDate || t.StartDate || {};
+    const date = (d.Year > 0)
+      ? `${d.Year}-${String(d.Month).padStart(2, '0')}-${String(d.Day).padStart(2, '0')}`
+      : '';
+    return {
+      ticketId:   t.ID,
+      date,
+      type:       t.TicketTypeDescription || '',
+      subject:    t.Notes    || '',
+      comment:    t.Comment  || '',
+      assignedTo: t.AssignedResourceName || '',
+      status:     t.TicketStatus === 1 ? 'open' : 'closed',
+    };
+  });
+}
+
