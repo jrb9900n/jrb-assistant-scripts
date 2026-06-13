@@ -4,8 +4,8 @@ import { logger } from '../../core/logger.js';
 
 const FIELDOPS_URL = 'https://mzywmgesulyalevtzudw.supabase.co';
 function db() {
-  const key = process.env.FIELDOPS_SUPABASE_KEY;
-  if (!key) throw new Error('FIELDOPS_SUPABASE_KEY env var not set');
+  const key = process.env.FLEETOPS_SUPABASE_SERVICE_KEY;
+  if (!key) throw new Error('FLEETOPS_SUPABASE_SERVICE_KEY env var not set');
   return createClient(FIELDOPS_URL, key);
 }
 
