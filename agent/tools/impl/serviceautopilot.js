@@ -1242,3 +1242,87 @@ export async function getClientNotes({ clientId, limit = 10 }) {
   });
 }
 
+/**
+ * Sync the SA waiting list to Supabase (sa_waiting_list table).
+ * Uses the puppeteer session to bypass Incapsula — raw HTTP calls fail.
+ * Called by the /sync-waiting-list endpoint (FieldOps Refresh button).
+ * Returns { synced: number, extractedAt: string }.
+ */
+export async function syncWaitingList() {
+  const today = new Date();
+  const body = {
+    OnNewDispatchBoard: true,
+    QueryData: {
+      IsWaitingList: true,
+      StartDate: { Month: 1, Day: 1, Year: today.getFullYear() + 1 },
+      EndDate:   { Month: today.getMonth() + 1, Day: today.getDate(), Year: today.getFullYear() },
+      ServiceIDs: [], CrewIDs: [], CustomFields: [], Divisions: [],
+      Tags: [], TicketTypes: [], DOW: -1,
+      DispatchID: EMPTY_GUID, DispatchedOnly: false, FilterProximity: false,
+      IncludeUnassignedWork: false, IsCloseOutDay: false, IsSnow: false,
+      LoadAppointmentTimes: false, MapCode: '', MapCodeOperator: '0', MultiDay: false,
+      Priority: '0', ProximityAddress: '', ProximityMiles: '5.00',
+      ResourceID: 1, ResourceTags: '', ScheduleStatus: '0',
+      ScreenViewID: EMPTY_GUID, ShowProductTotals: true, UseMinDays: true,
+      Address: '', City: '', Client: '', Zip: '',
+    },
+  };
+
+  const res = await post('/WebServices/ScheduledWorkWs.asmx/Query', body, 'DispatchBoard.aspx');
+  const items = res.data?.ScheduledItems || [];
+  logger.info('SA syncWaitingList: fetched from SA', { count: items.length });
+
+  if (items.length === 0) return { synced: 0, extractedAt: today.toISOString() };
+
+  function parseWLDate(str) {
+    if (!str) return null;
+    const clean = str.replace(/<[^>]+>/g, '').trim().split('\n')[0].trim();
+    const parts = clean.split('/');
+    if (parts.length < 3) return null;
+    const [m, d, y] = parts;
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  function parseWLStartDate(str) {
+    if (!str) return { targetDate: null, addedDate: null };
+    const stripped = str.replace(/<br\/>/gi, '|').replace(/<[^>]+>/g, '');
+    const parts = stripped.split('|').map(s => s.replace(/[()]/g, '').trim());
+    return { targetDate: parseWLDate(parts[0]), addedDate: parseWLDate(parts[1]) };
+  }
+
+  const records = items.map(item => {
+    const { targetDate, addedDate } = parseWLStartDate(item.StartDate);
+    const dateAddedStr = parseWLDate(item.DateAdded) || addedDate;
+    const daysWaiting  = dateAddedStr ? Math.floor((today - new Date(dateAddedStr)) / 86400000) : null;
+    return {
+      job_id: item.ID, sa_job_id: item.ID, client_id: item.CustomerID,
+      client_name: item.Client, address: item.Address, city: item.City,
+      state: item.State, zip: item.Zip, service_code: item.Service,
+      amount: item.Amount, date_added: dateAddedStr, target_date: targetDate,
+      sales_rep: item.SalesRep,
+      internal_notes: item.InternalSchedulingNotes || null,
+      notes:          item.InternalSchedulingNotes || null,
+      status: String(item.Status), service_timing: item.ServiceTiming,
+      latitude: item.Latitude || null, longitude: item.Longitude || null,
+      budgeted_hours: item.BudgetedHours || null, days_waiting: daysWaiting,
+      extracted_at: today.toISOString(),
+    };
+  });
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const db = createClient(
+    'https://mzywmgesulyalevtzudw.supabase.co',
+    process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+  );
+
+  const BATCH = 500;
+  let upserted = 0;
+  for (let i = 0; i < records.length; i += BATCH) {
+    const { error } = await db.from('sa_waiting_list').upsert(records.slice(i, i + BATCH), { onConflict: 'job_id' });
+    if (error) throw new Error(`syncWaitingList upsert batch ${i}: ${error.message}`);
+    upserted += Math.min(BATCH, records.length - i);
+  }
+
+  logger.info('SA syncWaitingList complete', { returned: items.length, upserted });
+  return { synced: upserted, extractedAt: today.toISOString() };
+}
+
