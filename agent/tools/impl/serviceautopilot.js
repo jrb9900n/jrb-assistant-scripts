@@ -1269,7 +1269,7 @@ export async function syncWaitingList() {
   };
 
   const res = await post('/WebServices/ScheduledWorkWs.asmx/Query', body, 'DispatchBoard.aspx');
-  const items = res.data?.ScheduledItems || [];
+  const items = res.data?.d?.ScheduledItems || res.data?.ScheduledItems || [];
   logger.info('SA syncWaitingList: fetched from SA', { count: items.length });
 
   if (items.length === 0) return { synced: 0, extractedAt: today.toISOString() };
