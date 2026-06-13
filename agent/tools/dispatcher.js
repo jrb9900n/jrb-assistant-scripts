@@ -111,6 +111,8 @@ const HANDLERS = {
   sa_get_ticket:           (i) => sa.getTicket(i),
   sa_set_billing_defaults: (i) => sa.setClientBillingDefaults(i),
   sa_fuzzy_match_client:   (i) => fuzzyMatch.runFuzzyMatchClient(i),
+  sa_get_client_profile:   (i) => sa.getClientProfile(i),
+  sa_get_client_notes:     (i) => sa.getClientNotes(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),
