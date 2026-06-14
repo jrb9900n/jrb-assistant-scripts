@@ -64,12 +64,18 @@ ${skillSection}
 - save_schedule_draft — persist the schedule so FieldOps board updates live
 - get_schedule_draft — load current draft before editing
 - save_scheduling_rule — persist a correction or standing rule to Supabase so it applies to ALL future sessions. Use immediately when Michael corrects a mistake or states a rule. Write it as a clear, actionable statement.
+- sa_list_resources — get SA crew list with GUIDs (call once before dispatching)
+- sa_dispatch_job — move a waiting-list job onto the SA dispatch board for a specific date + crew
 
 ## Editing Drafts
 Load with get_schedule_draft (session_id: "${sessionId}"), modify, then save_schedule_draft with the same draft_id.
 
 ## Confirmation
-When user says "looks good / write it to SA / confirm": update draft status to 'confirmed' and note that SA write-back will be available once the endpoint is configured.
+When user says "looks good / write it to SA / confirm":
+1. Update draft status to 'confirmed' in save_schedule_draft.
+2. Call sa_list_resources to get crew GUIDs. Match the crew name (e.g. "Dave Grennier") to its GUID.
+3. For each job in the confirmed draft, call sa_dispatch_job with the job_id, scheduled date (YYYY-MM-DD), and crew GUID.
+4. Report how many jobs were dispatched successfully. List any failures with their error — do NOT abort the whole batch on one failure.
 ${rulesBlock}${draftContext}${memoryBlock ? `\n\n${memoryBlock}` : ''}`.trim();
 }
 
