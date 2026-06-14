@@ -1391,7 +1391,7 @@ export async function dispatchWaitingListJob({ wlItemId, scheduleDate, resourceI
     throw new Error(`SA dispatchWaitingListJob failed: ${JSON.stringify(errors)}`);
   }
 
-  logger.info('SA: WL job dispatched', { wlItemId, scheduleDate, resourceId });
+  logger.info('SA: WL job dispatched', { wlItemId, scheduleDate, resourceId, responseKeys: Object.keys(response) });
   return {
     success: true,
     wlItemId,
@@ -1420,7 +1420,7 @@ export async function updateRouteOrder({ resourceId, scheduleDate, jobIds }) {
 
   const res = await post('/WebServices/ScheduledWorkWs.asmx/UpdateRouteOrder', {
     RouteOrderData: {
-      IDs: jobIds,
+      IDs: jobIds.map((id, i) => ({ ID: id, Order: i + 1 })),
       ResourceID: resourceId,
       Date: dateTime,
       StartDate: dateTime,

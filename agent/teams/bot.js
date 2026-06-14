@@ -658,6 +658,77 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // POST /enroll — SMS double opt-in enrollment from FieldOps form
+  if (req.method === 'POST' && url === '/enroll') {
+    let body = '';
+    req.on('data', d => body += d);
+    await new Promise(r => req.on('end', r));
+    let parsed;
+    try { parsed = JSON.parse(body); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+    }
+    const { phone, name } = parsed;
+    if (!phone) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'phone is required' })); return;
+    }
+    try {
+      const { enrollPhone } = await import('../tools/impl/sms-enrollment.js');
+      const ip = req.headers['x-forwarded-for']?.split(',')[0].trim() || req.socket.remoteAddress;
+      await enrollPhone(phone, name, ip, req.headers['user-agent']);
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (err) {
+      logger.error('Enroll error', { err: err.message });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // POST /sms-webhook — Twilio inbound SMS (YES/STOP/HELP responses)
+  if (req.method === 'POST' && url === '/sms-webhook') {
+    let body = '';
+    req.on('data', d => body += d);
+    await new Promise(r => req.on('end', r));
+
+    const params = Object.fromEntries(new URLSearchParams(body));
+    const fromPhone = params.From;
+    const messageBody = params.Body;
+
+    // Validate Twilio request signature
+    const sig = req.headers['x-twilio-signature'];
+    const authToken = process.env.TWILIO_AUTH_TOKEN;
+    if (sig && authToken) {
+      const { default: twilioLib } = await import('twilio');
+      const valid = twilioLib.validateRequest(authToken, sig, 'https://agent.jrboehlke.com/sms-webhook', params);
+      if (!valid) {
+        logger.warn('SMS webhook: invalid Twilio signature');
+        res.writeHead(403, { 'Content-Type': 'text/plain' });
+        res.end('Forbidden'); return;
+      }
+    }
+
+    try {
+      const { handleInboundSms } = await import('../tools/impl/sms-enrollment.js');
+      const reply = await handleInboundSms(fromPhone, messageBody);
+      const escaped = reply
+        ? reply.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        : null;
+      const twiml = escaped
+        ? `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escaped}</Message></Response>`
+        : '<?xml version="1.0" encoding="UTF-8"?><Response></Response>';
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end(twiml);
+    } catch (err) {
+      logger.error('SMS webhook error', { err: err.message });
+      res.writeHead(200, { 'Content-Type': 'text/xml' });
+      res.end('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    }
+    return;
+  }
+
   // Health check
   if (req.method === 'GET' && url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
