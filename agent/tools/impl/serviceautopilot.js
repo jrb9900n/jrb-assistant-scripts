@@ -1426,7 +1426,7 @@ export async function updateRouteOrder({ scheduleDate, jobIds }) {
     RouteOrderData: {
       Items: jobIds.map((id, i) => ({
         id,
-        order: i,
+        order: i + 1,
         Type: 'S',
         Mileage: '0.00',
         ScheduledServiceAssignmentID: EMPTY_GUID,
