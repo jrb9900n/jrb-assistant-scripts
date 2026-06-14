@@ -60,7 +60,11 @@ export async function handleQboWebhook(rawBody, signature) {
       .update(rawBody)
       .digest('base64');
     if (signature !== expected) {
-      logger.warn('QBO webhook signature mismatch — ignoring');
+      logger.warn('QBO webhook signature mismatch — ignoring', {
+        receivedPrefix: signature.slice(0, 12) || '(empty)',
+        expectedPrefix: expected.slice(0, 12),
+        bodyLength: rawBody.length,
+      });
       return;
     }
   }

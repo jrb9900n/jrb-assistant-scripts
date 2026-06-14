@@ -613,8 +613,24 @@ const server = http.createServer(async (req, res) => {
 
   // ── Expense capture endpoints ─────────────────────────────────
 
+  // QBO webhook verification challenge — Intuit sends GET with verificationToken query param
+  if (req.method === 'GET' && url.startsWith('/qbo-webhook')) {
+    const vt = new URL(req.url, 'https://agent.jrboehlke.com').searchParams.get('verificationToken');
+    if (vt) {
+      logger.info('QBO webhook: verification challenge received', { tokenLength: vt.length });
+      res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end(vt);
+    } else {
+      res.writeHead(200); res.end('OK');
+    }
+    return;
+  }
+
   // QBO webhook — fires when a new Purchase entity is created
   if (req.method === 'POST' && url === '/qbo-webhook') {
+    logger.info('QBO webhook: incoming POST', {
+      contentLength: req.headers['content-length'] ?? 'unknown',
+      sigPresent: !!req.headers['intuit-signature'],
+    });
     let rawBody = '';
     req.on('data', d => rawBody += d);
     await new Promise(r => req.on('end', r));

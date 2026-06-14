@@ -11,6 +11,7 @@ import { sendProactiveMessage } from '../teams/notify.js';
 
 // Kill any previous scheduler instance via PID file (wmic not available; this works cross-session)
 const SCHEDULER_PID_FILE = join(tmpdir(), 'jrb-scheduler.pid');
+const SCHEDULER_HEARTBEAT_FILE = join(tmpdir(), 'jrb-scheduler-heartbeat.txt');
 try {
   if (existsSync(SCHEDULER_PID_FILE)) {
     const oldPid = parseInt(readFileSync(SCHEDULER_PID_FILE, 'utf8').trim(), 10);
@@ -666,6 +667,7 @@ for (const task of SCHEDULED_TASKS) {
     try {
       await task.run();
       logger.info(`Scheduled task complete: ${task.name}`);
+      try { writeFileSync(SCHEDULER_HEARTBEAT_FILE, String(Date.now()), 'utf8'); } catch {}
     } catch (err) {
       logger.error(`Scheduled task failed: ${task.name}`, { err: err.message });
     }
