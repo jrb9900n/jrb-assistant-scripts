@@ -66,6 +66,7 @@ ${skillSection}
 - save_scheduling_rule — persist a correction or standing rule to Supabase so it applies to ALL future sessions. Use immediately when Michael corrects a mistake or states a rule. Write it as a clear, actionable statement.
 - sa_list_resources — get SA crew list with GUIDs (call once before dispatching)
 - sa_dispatch_job — move a waiting-list job onto the SA dispatch board for a specific date + crew
+- sa_update_route_order — set the stop sequence on the SA dispatch board after all jobs are dispatched
 
 ## Editing Drafts
 Load with get_schedule_draft (session_id: "${sessionId}"), modify, then save_schedule_draft with the same draft_id.
@@ -75,8 +76,8 @@ When user says "looks good / write it to SA / confirm":
 1. Update draft status to 'confirmed' in save_schedule_draft.
 2. Call sa_list_resources to get crew GUIDs. Match the crew name (e.g. "Dave Grennier") to its GUID.
 3. For each job in the confirmed draft, call sa_dispatch_job with the job_id, scheduled date (YYYY-MM-DD), and crew GUID.
-4. Report how many jobs were dispatched. List any failures — do NOT abort the batch on a single failure.
-5. Print the intended stop order as a numbered list (stop 1 → stop N) so Michael can drag them into sequence on the SA dispatch board. Route order cannot be set via API.
+4. After ALL jobs are dispatched, call sa_update_route_order once per day with the job_ids in stop order (same order as the draft). This sets the stop sequence on the SA dispatch board.
+5. Report how many jobs were dispatched and confirm route order was set. List any failures — do NOT abort the batch on a single failure.
 ${rulesBlock}${draftContext}${memoryBlock ? `\n\n${memoryBlock}` : ''}`.trim();
 }
 
