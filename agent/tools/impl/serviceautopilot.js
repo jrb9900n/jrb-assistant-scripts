@@ -1401,4 +1401,51 @@ export async function dispatchWaitingListJob({ wlItemId, scheduleDate, resourceI
   };
 }
 
+/**
+ * Set the route stop order for a set of jobs already on the SA dispatch board.
+ * Must be called after all jobs for the day+crew have been dispatched.
+ *
+ * Payload structure confirmed via browser DevTools (2026-06-14):
+ *   RouteOrderData.Items = [{id, order, Type:"S", Mileage:"0.00", ScheduledServiceAssignmentID: EMPTY_GUID}]
+ *   RouteOrderData.Mode = "1"
+ *   RouteOrderData.StartDate = BrowserDate {Month, Day, Year}  (NOT BrowserDateTime)
+ *   OnNewDispatchBoard = true
+ *   No ResourceID — SA infers resource from the item GUIDs.
+ *
+ * @param {object} opts
+ * @param {string}   opts.scheduleDate  ISO date YYYY-MM-DD
+ * @param {string[]} opts.jobIds        Job IDs in desired stop order (index 0 = stop 1)
+ */
+export async function updateRouteOrder({ scheduleDate, jobIds }) {
+  if (!jobIds?.length) return { success: true, count: 0 };
 
+  const dt = new Date(scheduleDate + 'T12:00:00');
+  const startDate = toSaBrowserDate(dt);
+
+  const res = await post('/WebServices/ScheduledWorkWs.asmx/UpdateRouteOrder', {
+    RouteOrderData: {
+      Items: jobIds.map((id, i) => ({
+        id,
+        order: i,
+        Type: 'S',
+        Mileage: '0.00',
+        ScheduledServiceAssignmentID: EMPTY_GUID,
+      })),
+      Mode: '1',
+      StartDate: startDate,
+    },
+    OnNewDispatchBoard: true,
+  }, 'DispatchBoard.aspx');
+
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA updateRouteOrder: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const errors = d.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA updateRouteOrder failed: ${JSON.stringify(errors)}`);
+  }
+
+  logger.info('SA: route order updated', { scheduleDate, count: jobIds.length });
+  return { success: true, count: jobIds.length };
+}

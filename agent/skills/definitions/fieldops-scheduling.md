@@ -188,8 +188,8 @@ When Michael says "looks good," "write it to SA," "confirm," or similar:
 1. Update draft status to `confirmed` in `save_schedule_draft`.
 2. Call `sa_list_resources` to get the current crew list and look up the GUID for the assigned crew (e.g. "Dave Grennier").
 3. For each job in the confirmed draft, call `sa_dispatch_job` with the `job_id` (from the waiting list), the scheduled date (YYYY-MM-DD), and the crew's resource GUID.
-4. Report how many jobs were dispatched. Flag any failures with their error — do NOT abort the batch on a single failure.
-5. Print the intended stop order as a numbered list (stop 1 → stop N) so Michael can drag them into sequence on the SA dispatch board. Route order cannot be set via API.
+4. After ALL jobs are dispatched, call `sa_update_route_order` once with `schedule_date` and `job_ids` in stop order (same order as the draft). This sets the stop sequence numbers on the SA dispatch board.
+5. Report how many jobs were dispatched and confirm route order was set. Flag any failures with their error — do NOT abort the batch on a single failure.
 
 ---
 
