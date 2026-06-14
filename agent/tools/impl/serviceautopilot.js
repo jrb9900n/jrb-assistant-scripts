@@ -1425,6 +1425,7 @@ export async function updateRouteOrder({ resourceId, scheduleDate, jobIds }) {
       Date: dateTime,
       StartDate: dateTime,
       EndDate: dateTime,
+      OnNewDispatchBoard: true,
     },
   }, 'DispatchBoard.aspx');
 
