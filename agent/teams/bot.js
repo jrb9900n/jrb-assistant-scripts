@@ -560,6 +560,49 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // FieldOps — list SA resources (crews) for dispatch assignment
+  if (req.method === 'GET' && url === '/sa-resources') {
+    const auth = req.headers['x-execute-secret'];
+    if (!EXECUTE_SECRET || auth !== EXECUTE_SECRET) { res.writeHead(401); res.end('Unauthorized'); return; }
+    try {
+      const { listSAResources } = await import('../tools/impl/serviceautopilot.js');
+      const resources = await listSAResources();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(resources));
+    } catch (err) {
+      logger.error('sa-resources error', { err: err.message });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // FieldOps — dispatch a waiting list job to a date + crew in SA
+  if (req.method === 'POST' && url === '/dispatch-job') {
+    const auth = req.headers['x-execute-secret'];
+    if (!EXECUTE_SECRET || auth !== EXECUTE_SECRET) { res.writeHead(401); res.end('Unauthorized'); return; }
+    let body = '';
+    req.on('data', d => body += d);
+    await new Promise(r => req.on('end', r));
+    try {
+      const { wlItemId, scheduleDate, resourceId } = JSON.parse(body);
+      if (!wlItemId || !scheduleDate || !resourceId) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'wlItemId, scheduleDate, resourceId required' }));
+        return;
+      }
+      const { dispatchWaitingListJob } = await import('../tools/impl/serviceautopilot.js');
+      const result = await dispatchWaitingListJob({ wlItemId, scheduleDate, resourceId });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      logger.error('dispatch-job error', { err: err.message });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
   // ── Expense capture endpoints ─────────────────────────────────
 
   // QBO webhook — fires when a new Purchase entity is created

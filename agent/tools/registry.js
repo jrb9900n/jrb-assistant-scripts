@@ -661,6 +661,24 @@ const SA_TOOLS = [
     },
   },
   {
+    name: 'sa_list_resources',
+    description: 'List SA dispatch board resources (crews/employees available for scheduling). Returns [{ id, name }]. Call before sa_dispatch_job to confirm the resource ID for a crew name.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'sa_dispatch_job',
+    description: 'Dispatch a waiting-list job to a specific date and crew in Service Autopilot. This moves the job off the waiting list onto the schedule. Use the job_id from sa_waiting_list table (job_id column). Requires a SA resource GUID from sa_list_resources.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        wl_item_id:    { type: 'string', description: 'SA waiting list item UUID (sa_waiting_list.job_id)' },
+        schedule_date: { type: 'string', description: 'ISO date to schedule the job, e.g. "2026-06-16"' },
+        resource_id:   { type: 'string', description: 'SA resource/crew GUID from sa_list_resources' },
+      },
+      required: ['wl_item_id', 'schedule_date', 'resource_id'],
+    },
+  },
+  {
     name: 'sa_fuzzy_match_client',
     description: 'Compare incoming contact form data against a list of SA search results to find duplicate accounts. Handles nicknames (Deborah/Debbie, Robert/Bob, etc.), address abbreviations (St/Street, Dr/Drive), spouse/same-address matches, and normalized phone/email. Returns the best match with a recommendation: USE_EXISTING, USE_EXISTING_VERIFY, or CREATE_NEW.',
     input_schema: {
@@ -798,7 +816,7 @@ const TOOL_MAP = {
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS.filter(t => ['sa_search_clients','sa_fuzzy_match_client','sa_get_client_profile','sa_get_client_notes'].includes(t.name)), ...TEAMS_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS.filter(t => ['sa_search_clients','sa_fuzzy_match_client','sa_get_client_profile','sa_get_client_notes','sa_list_resources','sa_dispatch_job'].includes(t.name)), ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],
