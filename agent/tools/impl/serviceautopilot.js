@@ -1326,3 +1326,78 @@ export async function syncWaitingList() {
   return { synced: upserted, extractedAt: today.toISOString() };
 }
 
+/**
+ * List SA dispatch board resources (crews) available for assignment.
+ * Returns [{ id, name }]
+ */
+export async function listSAResources() {
+  const res = await post('/WebServices/ListsWs.asmx/GetMoveToResourceList', {}, 'DispatchBoard.aspx');
+  const list = res.data?.d || res.data || [];
+  if (!Array.isArray(list)) throw new Error(`SA listSAResources: unexpected response — ${res.text?.slice(0, 200)}`);
+  return list.map(r => ({ id: r.ID || r.Value || '', name: r.Name || r.Text || '' })).filter(r => r.id);
+}
+
+/**
+ * Dispatch a waiting list job to a specific date and crew in SA.
+ *
+ * @param {object} opts
+ * @param {string} opts.wlItemId     SA waiting list item UUID (sa_waiting_list.job_id)
+ * @param {string} opts.scheduleDate ISO date YYYY-MM-DD
+ * @param {string} opts.resourceId   SA resource/crew GUID
+ * @returns {{ success: boolean, wlItemId: string, scheduleDate: string, removedFromWL: boolean }}
+ */
+export async function dispatchWaitingListJob({ wlItemId, scheduleDate, resourceId }) {
+  // 1. Get current assignment data for this WL item
+  const getRes = await post('/WebServices/ScheduledWorkWs.asmx/GetAssignmentData', {
+    AssignmentRequest: { ID: wlItemId, Type: 'S' },
+  }, 'DispatchBoard.aspx');
+
+  const current = getRes.data?.d;
+  if (!current) {
+    throw new Error(`SA dispatchWaitingListJob: GetAssignmentData failed — ${getRes.text?.slice(0, 200)}`);
+  }
+
+  // 2. Parse target date
+  const dt = new Date(scheduleDate + 'T12:00:00');
+  const today = new Date();
+  const svcDate  = toSaBrowserDate(dt);
+  const svcDateTime = { ...svcDate, Hour: 0, Minute: 0, Second: 0 };
+  const viewStart = toSaBrowserDate(today);
+  const viewEnd   = toSaBrowserDate(new Date(today.getTime() + 14 * 86400000));
+
+  // 3. Build save payload — change status to route, set date + crew
+  const saveData = {
+    ...current,
+    ScheduleStatus: '2',        // 2 = Route (dispatched)
+    ServiceDate: svcDate,
+    AssignedResourceIDs: [resourceId],
+    StartDate: svcDateTime,    // SA expects BrowserDateTime (includes Hour/Minute/Second)
+    EndDate:   svcDateTime,
+    ViewStartDate: viewStart,
+    ViewEndDate:   viewEnd,
+  };
+
+  // 4. Save — moves the job off the waiting list and onto the schedule
+  const saveRes = await post('/WebServices/ScheduledWorkWs.asmx/SaveAssignmentData', {
+    AssignmentData: saveData,
+  }, 'DispatchBoard.aspx');
+
+  const response = saveRes.data?.d;
+  if (!response) {
+    throw new Error(`SA dispatchWaitingListJob: empty response from SaveAssignmentData (status=${saveRes.status})`);
+  }
+  const errors = response?.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA dispatchWaitingListJob failed: ${JSON.stringify(errors)}`);
+  }
+
+  logger.info('SA: WL job dispatched', { wlItemId, scheduleDate, resourceId });
+  return {
+    success: true,
+    wlItemId,
+    scheduleDate,
+    resourceId,
+    removedFromWL: response?.RemoveFromList === true,
+  };
+}
+
