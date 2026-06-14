@@ -1391,7 +1391,7 @@ export async function dispatchWaitingListJob({ wlItemId, scheduleDate, resourceI
     throw new Error(`SA dispatchWaitingListJob failed: ${JSON.stringify(errors)}`);
   }
 
-  logger.info('SA: WL job dispatched', { wlItemId, scheduleDate, resourceId, responseKeys: Object.keys(response) });
+  logger.info('SA: WL job dispatched', { wlItemId, scheduleDate, resourceId });
   return {
     success: true,
     wlItemId,
@@ -1401,44 +1401,4 @@ export async function dispatchWaitingListJob({ wlItemId, scheduleDate, resourceI
   };
 }
 
-/**
- * Set the route stop order for a set of jobs already on the SA dispatch board.
- * Must be called after all jobs for the day+crew have been dispatched via dispatchWaitingListJob.
- *
- * @param {object} opts
- * @param {string}   opts.resourceId   SA resource/crew GUID
- * @param {string}   opts.scheduleDate ISO date YYYY-MM-DD — the date the jobs are assigned to
- * @param {string[]} opts.jobIds       Job IDs in the desired stop order (index 0 = stop 1)
- * @returns {{ success: boolean, count: number }}
- */
-export async function updateRouteOrder({ resourceId, scheduleDate, jobIds }) {
-  if (!jobIds?.length) return { success: true, count: 0 };
-
-  const dt = new Date(scheduleDate + 'T12:00:00');
-  const date = toSaBrowserDate(dt);
-  const dateTime = { ...date, Hour: 0, Minute: 0, Second: 0 }; // SA requires BrowserDateTime for date-range fields
-
-  const res = await post('/WebServices/ScheduledWorkWs.asmx/UpdateRouteOrder', {
-    RouteOrderData: {
-      IDs: jobIds.map((id, i) => ({ ID: id, Order: i + 1 })),
-      ResourceID: resourceId,
-      Date: dateTime,
-      StartDate: dateTime,
-      EndDate: dateTime,
-    },
-    OnNewDispatchBoard: true,
-  }, 'DispatchBoard.aspx');
-
-  const d = res.data?.d;
-  if (!d) {
-    throw new Error(`SA updateRouteOrder: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
-  }
-  const errors = d.Errors || [];
-  if (errors.length > 0) {
-    throw new Error(`SA updateRouteOrder failed: ${JSON.stringify(errors)}`);
-  }
-
-  logger.info('SA: route order updated', { scheduleDate, resourceId, count: jobIds.length });
-  return { success: true, count: jobIds.length };
-}
 
