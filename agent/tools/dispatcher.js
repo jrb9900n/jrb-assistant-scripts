@@ -112,6 +112,7 @@ const HANDLERS = {
   sa_set_billing_defaults: (i) => sa.setClientBillingDefaults(i),
   sa_list_resources:       ()  => sa.listSAResources(),
   sa_dispatch_job:         (i) => sa.dispatchWaitingListJob({ wlItemId: i.wl_item_id, scheduleDate: i.schedule_date, resourceId: i.resource_id }),
+  sa_update_route_order:   (i) => sa.updateRouteOrder({ resourceId: i.resource_id, scheduleDate: i.schedule_date, jobIds: i.job_ids }),
   sa_fuzzy_match_client:   (i) => fuzzyMatch.runFuzzyMatchClient(i),
   sa_get_client_profile:   (i) => sa.getClientProfile(i),
   sa_get_client_notes:     (i) => sa.getClientNotes(i),
