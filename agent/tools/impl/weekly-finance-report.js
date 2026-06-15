@@ -70,22 +70,9 @@ async function gatherAuditIssues() {
   return data ?? [];
 }
 
-async function gatherEarnedNotInvoiced() {
-  // SA completed jobs with no QB invoice — represents earned but unbilled revenue
-  const { data, error } = await supabase
-    .from('audit_issues')
-    .select('*')
-    .eq('status', 'open')
-    .eq('issue_type', 'unbilled_complete')
-    .order('sa_amount', { ascending: false });
-  if (error) return [];
-  return data ?? [];
-}
-
 // ── Formatting helpers ──────────────────────────────────────────────────────
 
 const f$ = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fK = n => { const v = Number(n || 0); return v >= 1000 ? '$' + (v / 1000).toFixed(1) + 'K' : f$(v); };
 const fD = s => s ? new Date(s.length === 10 ? s + 'T12:00:00Z' : s).toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' }) : '—';
 const dayName = s => s ? new Date(s + 'T12:00:00Z').toLocaleDateString('en-US', { timeZone: 'UTC', weekday: 'short' }) : '—';
 const ageBadge = days => {
@@ -94,8 +81,6 @@ const ageBadge = days => {
   if (days <= 60) return `<span style="font-size:11px;color:#c0392b;font-weight:bold;">${days}d past due</span>`;
   return `<span style="font-size:11px;color:#c0392b;font-weight:bold;background:#fff0f0;padding:1px 4px;border-radius:2px;">${days}d PAST DUE</span>`;
 };
-
-const severityColor = s => s === 'high' ? '#c0392b' : s === 'medium' ? '#b35900' : '#888888';
 
 function sectionHeader(title) {
   return `<p style="margin:28px 0 10px 0;font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;color:#888888;border-bottom:1px solid #e8e8e8;padding-bottom:6px;">${title}</p>`;
@@ -107,10 +92,14 @@ function alertBox(color, borderColor, title, rows) {
 
 // ── HTML email builder ──────────────────────────────────────────────────────
 
-function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, earnedNotInvoiced }) {
-  const totalCollected   = payments.reduce((s, p) => s + p.amount, 0);
-  const totalAR          = arAging.total;
-  const unappliedPayments = payments.filter(p => p.memo && /unappl/i.test(p.memo));
+function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues }) {
+  const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
+  const totalAR        = arAging.total;
+
+  // earnedNotInvoiced derived from auditIssues (avoids a second Supabase round-trip)
+  const earnedNotInvoiced = auditIssues
+    .filter(i => i.issue_type === 'unbilled_complete')
+    .sort((a, b) => (b.sa_amount ?? 0) - (a.sa_amount ?? 0));
 
   // Revenue by category (from invoices issued this week)
   const revByCat = {};
@@ -118,24 +107,24 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     revByCat[inv.category] = (revByCat[inv.category] ?? 0) + inv.totalAmt;
   }
   const totalInvoiced = invoices.reduce((s, i) => s + i.totalAmt, 0);
-  const totalUnbilled  = earnedNotInvoiced.reduce((s, i) => s + (i.sa_amount ?? 0), 0);
+  const totalUnbilled = earnedNotInvoiced.reduce((s, i) => s + (i.sa_amount ?? 0), 0);
 
   // Expense KPIs
-  const expTotal    = expenses.reduce((s, e) => s + Number(e.amount ?? 0), 0);
-  const expPending  = expenses.filter(e => e.status === 'pending_employee');
-  const expFlags    = expenses.filter(e => Number(e.amount) > 500);
-  const expByEmp    = {};
+  const expTotal       = expenses.reduce((s, e) => s + Number(e.amount ?? 0), 0);
+  const expPending     = expenses.filter(e => e.status === 'pending_employee');
+  const expMaintLogs   = expenses.filter(e => e.status === 'pending_maintenance_log');
+  const expFlags       = expenses.filter(e => Number(e.amount) > 500);
+  const expByEmp       = {};
   for (const e of expenses) {
     const n = e.employee_name || e.card_last_four || '?';
     if (!expByEmp[n]) expByEmp[n] = { total: 0, count: 0, pending: 0 };
     expByEmp[n].total   += Number(e.amount ?? 0);
     expByEmp[n].count   += 1;
-    expByEmp[n].pending += e.status === 'pending_employee' ? 1 : 0;
+    expByEmp[n].pending += (e.status === 'pending_employee' || e.status === 'pending_maintenance_log') ? 1 : 0;
   }
 
   // Audit issue counts
   const highIssues = auditIssues.filter(i => i.severity === 'high');
-  const allIssues  = auditIssues;
 
   let html = `<!DOCTYPE html>
 <html lang="en">
@@ -220,8 +209,8 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     html += `<p style="margin:0 0 6px;font-size:13px;color:#444444;"><strong>Earned but Not Yet Invoiced &mdash; ${f$(totalUnbilled)}</strong> (${earnedNotInvoiced.length} SA jobs completed, no QB invoice)</p>`;
     const topUnbilled = earnedNotInvoiced.slice(0, 6);
     html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px;">`;
-    for (const u of topUnbilled) {
-      html += `<tr style="${topUnbilled.indexOf(u) % 2 ? 'background:#f8f8f8;' : ''}">
+    for (const [i, u] of topUnbilled.entries()) {
+      html += `<tr style="${i % 2 ? 'background:#f8f8f8;' : ''}">
         <td style="padding:5px 8px;font-size:13px;color:#333333;">${u.sa_client ?? '—'}</td>
         <td style="padding:5px 8px;font-size:13px;color:#b35900;font-weight:bold;text-align:right;white-space:nowrap;">${f$(u.sa_amount ?? 0)}</td>
       </tr>`;
@@ -331,10 +320,15 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     html += `</table>`;
   }
 
-  // Top 10 open balances
-  const top10 = [...(arAging.buckets.current ?? []), ...arAging.flagged]
+  // Top 10 open balances — all buckets (d30 was previously missing)
+  const top10 = [
+    ...arAging.buckets.current,
+    ...arAging.buckets.d30,
+    ...arAging.buckets.d60,
+    ...arAging.buckets.d90,
+    ...arAging.buckets.d120plus,
+  ]
     .sort((a, b) => b.balance - a.balance)
-    .filter((r, i, arr) => arr.findIndex(x => x.id === r.id) === i)
     .slice(0, 10);
 
   if (top10.length) {
@@ -415,12 +409,20 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
       html += alertBox('#fff5f5', '#c0392b', `${expFlags.length} Large Charge${expFlags.length > 1 ? 's' : ''} (&gt;$500)`, flagRows);
     }
 
-    // Pending detail
+    // Pending detail — receipts not yet submitted
     if (expPending.length) {
       const pendRows = expPending.map(e =>
         `<p style="margin:3px 0;font-size:13px;color:#533f03;">${fD(e.transaction_date)} &mdash; ${e.employee_name || '?'} &mdash; ${e.vendor || '?'} &mdash; ${f$(e.amount)}</p>`
       ).join('');
       html += alertBox('#fff8f0', '#e6a817', `${expPending.length} Receipt${expPending.length > 1 ? 's' : ''} Not Submitted`, pendRows);
+    }
+
+    // Maintenance logs needed
+    if (expMaintLogs.length) {
+      const maintRows = expMaintLogs.map(e =>
+        `<p style="margin:3px 0;font-size:13px;color:#533f03;">${fD(e.transaction_date)} &mdash; ${e.employee_name || '?'} &mdash; ${e.vendor || '?'} &mdash; ${f$(e.amount)}</p>`
+      ).join('');
+      html += alertBox('#fff8f0', '#e6a817', `${expMaintLogs.length} Maintenance Log${expMaintLogs.length > 1 ? 's' : ''} Needed`, maintRows);
     }
   }
 
@@ -480,14 +482,13 @@ export async function generateAndSendWeeklyFinanceReport() {
   const { start, end, weekLabel, displayRange } = getPriorWeekRange();
   logger.info('weekly_finance_report: gathering data', { weekLabel, start, end });
 
-  const [payments, arAging, invoices, deposits, expenses, auditIssues, earnedNotInvoiced] = await Promise.all([
+  const [payments, arAging, invoices, deposits, expenses, auditIssues] = await Promise.all([
     getPaymentsForWeek(start, end),
     getARAgingReport(),
     getInvoicesForWeek(start, end),
     getOldNationalDeposits(start, end),
     gatherExpenseData(start, end),
     gatherAuditIssues(),
-    gatherEarnedNotInvoiced(),
   ]);
 
   logger.info('weekly_finance_report: data gathered', {
@@ -497,10 +498,9 @@ export async function generateAndSendWeeklyFinanceReport() {
     deposits: deposits.length,
     expenses: expenses.length,
     auditIssues: auditIssues.length,
-    earnedNotInvoiced: earnedNotInvoiced.length,
   });
 
-  const body = buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, earnedNotInvoiced });
+  const body = buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues });
   const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
 
   await sendEmail({

@@ -62,13 +62,13 @@ const SCHEDULED_TASKS = [
     name: 'weekly_finance_report',
     run: async () => {
       try {
-        const { generateAndSendWeeklyFinanceReport } = await import('../agent/tools/impl/weekly-finance-report.js');
+        const { generateAndSendWeeklyFinanceReport } = await import('../tools/impl/weekly-finance-report.js');
         const result = await generateAndSendWeeklyFinanceReport();
         logger.info('weekly_finance_report: done', result);
       } catch (err) {
         logger.error('weekly_finance_report: FAILED', { err: err.message });
         try {
-          const { sendProactiveMessage } = await import('../agent/teams/notify.js');
+          const { sendProactiveMessage } = await import('../teams/notify.js');
           await sendProactiveMessage(`Weekly Finance Report FAILED to send. Error: ${err.message}`);
         } catch (notifyErr) {
           logger.error('weekly_finance_report: Teams alert also failed', { err: notifyErr.message });
