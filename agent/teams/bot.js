@@ -571,6 +571,11 @@ const server = http.createServer(async (req, res) => {
       const result = await syncWaitingList();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
+      // Fire-and-forget: fill pavement_sf for any new PMM clients added this sync
+      import('../tools/impl/scheduling.js')
+        .then(({ syncPavementSizes }) => syncPavementSizes({ force: false }))
+        .then(r => logger.info('pavement SF sync complete', r))
+        .catch(e => logger.warn('pavement SF sync failed', { err: e?.message ?? String(e) }));
     } catch (err) {
       logger.error('sync-waiting-list error', { err: err.message });
       res.writeHead(500, { 'Content-Type': 'application/json' });

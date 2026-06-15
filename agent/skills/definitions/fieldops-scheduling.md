@@ -244,3 +244,5 @@ These rules were established through direct corrections and must always apply:
 4. **Revenue target: do not ask** — learn it from patterns; only flag outliers.
 5. **MOSQU = mosquito** — the SA service code is `MOSQU`, not PMM, not a separate mosquito code.
 6. **Mix MOSQU mid-May onward** — don't run mosquito-only days once regular routes are running.
+7. **Only waiting-list jobs may be scheduled.** A job is eligible ONLY if it appears in the current `get_waiting_list` response. Never schedule a job because Michael mentions it by name — if it is not in the waiting list, it is either complete, invoice-locked, or not yet added. Treat any job not returned by `get_waiting_list` as ineligible and say so explicitly. Do not guess that a job is still open.
+8. **Invoice-locked = complete.** If SA ever rejects a dispatch with a locked-invoice error, immediately record that job as complete, remove it from the draft, and do not attempt to re-dispatch it.
