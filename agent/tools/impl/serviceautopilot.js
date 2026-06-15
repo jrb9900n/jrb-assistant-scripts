@@ -1209,20 +1209,37 @@ export async function getClientProfile({ clientId }) {
   };
 }
 
-// SA custom field ID for "Pavement Size" (sq ft) — set in SA Admin → Account Settings → Custom Fields
-const PAVEMENT_SF_FIELD_ID = '33ed0049-2abe-4ac8-8db2-f878873a9f59';
-
 /**
  * Fetch the Pavement Size custom field value for a single SA client.
+ * Custom fields are stored in the account list as CustomField1-6 (not in GetClientInfo).
+ * "Pavement Size" has CustomFieldOrder:1 so it maps to CustomField1.
+ * clientName is used to narrow the search; result is verified against clientId.
  * Returns the square footage as a number, or null if not set.
  */
-export async function fetchClientPavementSf(clientId) {
-  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
-    { ClientID: clientId }, 'ClientView.aspx');
-  const d = res.data?.d;
-  if (!d) return null;
-  const field = (d.CustomFields || []).find(f => f.CustomFieldID === PAVEMENT_SF_FIELD_ID);
-  const val = parseFloat(field?.CustomFieldValue);
+export async function fetchClientPavementSf(clientId, clientName) {
+  const filterData = JSON.stringify({
+    FilterData: [
+      { FieldColumn: '1', ContainOperator: '1', FieldItems: [clientName], Order: 0, SCFilterID: EMPTY_GUID },
+      { FieldColumn: '28', ContainOperator: '7', FieldItems: [], Order: 0, SCFilterID: EMPTY_GUID },
+    ],
+    CustomFields: [],
+    QuerySelection: 3,
+  });
+
+  const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
+    QueryInput: {
+      Settings: { FilterData: filterData },
+      StartRow: 1,
+      Max: 10,
+      SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
+    },
+  }, 'Clients.aspx');
+
+  const accounts = (res.data?.d || res.data)?.Accounts || [];
+  const account = accounts.find(a => a.ClientID === clientId);
+  if (!account) return null;
+
+  const val = parseFloat(account.CustomField1);
   return isNaN(val) ? null : val;
 }
 
