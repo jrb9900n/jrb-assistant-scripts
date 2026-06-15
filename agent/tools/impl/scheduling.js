@@ -260,8 +260,8 @@ export async function syncPavementSizes({ force = false } = {}) {
     await new Promise(r => setTimeout(r, 300));
   }
 
-  logger.info('syncPavementSizes: complete', { synced, skipped, failed, total: clientIds.length });
-  return { synced, skipped, failed, total: clientIds.length };
+  logger.info('syncPavementSizes: complete', { synced, skipped, failed, total: clients.length });
+  return { synced, skipped, failed, total: clients.length };
 }
 
 export async function recordDecision({ session_id, decision }) {
