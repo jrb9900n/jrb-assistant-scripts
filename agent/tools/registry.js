@@ -821,6 +821,17 @@ const SCHEDULING_TOOLS = [
     },
   },
   {
+    name: 'sync_pavement_sizes',
+    description: 'Sync the Pavement Size (sq ft) custom field from SA into Supabase for all PMM waiting-list clients. Run this when pavement_sf values are missing from get_waiting_list results. Pass force=true to re-fetch all clients, not just those with null values. Returns { synced, skipped, failed, total }.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        force: { type: 'boolean', description: 'Re-fetch all PMM clients, even those already having a pavement_sf value (default false)' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'record_decision',
     description: 'Persist a confirmed user decision to session memory so it survives across turns. Call this IMMEDIATELY whenever Michael confirms a specific action — a job move, a hold, an inclusion, an exclusion, a date change, or any fact he states as settled. Use plain English with enough detail to reconstruct the decision: client name, job ID if known, action, and reason. Example: "Amy Braeger (job abc123): CONFIRMED move from 6/19 to 6/18 — listing photos". Once recorded, do NOT ask about that decision again.',
     input_schema: {
