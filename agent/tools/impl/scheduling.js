@@ -22,7 +22,7 @@ export async function getCrews() {
 export async function getWaitingList({ service_filter, limit = 2000 } = {}) {
   const { data, error } = await db()
     .from('sa_waiting_list')
-    .select('job_id,client_id,client_name,address,city,zip,service_code,category,date_added,amount,budgeted_hours,notes,internal_notes,target_date,sales_rep,service_timing')
+    .select('job_id,client_id,client_name,address,city,zip,service_code,category,date_added,amount,budgeted_hours,notes,internal_notes,target_date,sales_rep,service_timing,pavement_sf')
     .in('status', ['6', '7', '1'])
     .order('date_added', { ascending: true })
     .limit(limit);
@@ -204,6 +204,59 @@ export async function getScheduleDraft({ session_id, draft_id }) {
     .limit(1);
   if (error || !data?.length) return null;
   return data[0];
+}
+
+/**
+ * Sync Pavement Size custom field from SA into sa_waiting_list.pavement_sf.
+ * Fetches GetClientInfo for each unique PMM client missing the value (or all if force=true).
+ * Throttles requests at 300ms intervals to avoid SA rate limiting.
+ */
+export async function syncPavementSizes({ force = false } = {}) {
+  const { fetchClientPavementSf } = await import('./serviceautopilot.js');
+
+  let query = db()
+    .from('sa_waiting_list')
+    .select('client_id')
+    .ilike('service_code', 'PMM%')
+    .not('client_id', 'is', null);
+  if (!force) query = query.is('pavement_sf', null);
+
+  const { data: rows, error } = await query;
+  if (error) throw new Error(`syncPavementSizes query: ${error.message}`);
+
+  const clientIds = [...new Set((rows || []).map(r => r.client_id).filter(Boolean))];
+  logger.info('syncPavementSizes: starting', { total: clientIds.length, force });
+
+  let synced = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const clientId of clientIds) {
+    try {
+      const pavementSf = await fetchClientPavementSf(clientId);
+      if (pavementSf !== null) {
+        const { error: updateErr } = await db()
+          .from('sa_waiting_list')
+          .update({ pavement_sf: pavementSf })
+          .eq('client_id', clientId)
+          .ilike('service_code', 'PMM%');
+        if (updateErr) {
+          logger.warn('syncPavementSizes: update failed', { clientId, err: updateErr.message });
+          failed++;
+        } else {
+          synced++;
+        }
+      } else {
+        skipped++;
+      }
+    } catch (e) {
+      logger.warn('syncPavementSizes: failed for client', { clientId, err: e.message });
+      failed++;
+    }
+    await new Promise(r => setTimeout(r, 300));
+  }
+
+  logger.info('syncPavementSizes: complete', { synced, skipped, failed, total: clientIds.length });
+  return { synced, skipped, failed, total: clientIds.length };
 }
 
 export async function recordDecision({ session_id, decision }) {

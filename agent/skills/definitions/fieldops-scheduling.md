@@ -217,6 +217,23 @@ When Michael says "looks good," "write it to SA," "confirm," or similar:
 
 ---
 
+## Pavement Size (Square Footage) Data
+
+The `get_waiting_list` output includes a `pavement_sf` field (numeric, nullable) for each PMM job.
+This is the measured pavement area in square feet, synced from the SA "Pavement Size" custom field.
+
+**Using pavement_sf:**
+- When building sealcoating routes, sum `pavement_sf` across all stops in a day.
+- Include the daily total in your route summary (e.g., "6 stops | ~$4,226 | ~14,800 SF").
+- If `pavement_sf` is null for any stop, note it as "SF unknown" — do not block scheduling.
+- Ask Michael about his crew's daily SF capacity if you have a day that looks unusually large.
+
+**If pavement_sf values are missing (all null):**
+- Call `sync_pavement_sizes` to fetch them from SA and populate Supabase.
+- This requires the SA session to be active — if SA is unavailable, note the limitation and proceed without SF totals.
+
+---
+
 ## Standing Rules (from Michael's corrections)
 
 These rules were established through direct corrections and must always apply:

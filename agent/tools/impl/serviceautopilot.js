@@ -1209,6 +1209,23 @@ export async function getClientProfile({ clientId }) {
   };
 }
 
+// SA custom field ID for "Pavement Size" (sq ft) — set in SA Admin → Account Settings → Custom Fields
+const PAVEMENT_SF_FIELD_ID = '33ed0049-2abe-4ac8-8db2-f878873a9f59';
+
+/**
+ * Fetch the Pavement Size custom field value for a single SA client.
+ * Returns the square footage as a number, or null if not set.
+ */
+export async function fetchClientPavementSf(clientId) {
+  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) return null;
+  const field = (d.CustomFields || []).find(f => f.CustomFieldID === PAVEMENT_SF_FIELD_ID);
+  const val = parseFloat(field?.CustomFieldValue);
+  return isNaN(val) ? null : val;
+}
+
 /**
  * Fetch recent CRM notes/tickets for a client — call history, site visits, consultation notes.
  * Uses MyDay_GetTickets with CustomerJobID filter (discovered 2026-06-13).

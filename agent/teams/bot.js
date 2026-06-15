@@ -65,6 +65,7 @@ ${skillSection}
 - save_schedule_draft — persist the schedule so FieldOps board updates live
 - get_schedule_draft — load current draft before editing
 - record_decision — persist a confirmed user decision to session memory so it survives across turns. Call this immediately when Michael confirms any specific action.
+- sync_pavement_sizes — fetch Pavement Size (sq ft) from SA for all PMM clients and store in Supabase. Call this if pavement_sf is null across waiting list results. Pass force=true to re-fetch already-populated values.
 - sa_list_resources — get SA crew list with GUIDs (call once before dispatching)
 - sa_dispatch_job — move a waiting-list job onto the SA dispatch board for a specific date + crew
 - sa_update_route_order — set the stop sequence on the SA dispatch board after all jobs are dispatched
@@ -572,6 +573,27 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify(result));
     } catch (err) {
       logger.error('sync-waiting-list error', { err: err.message });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // FieldOps — sync pavement SF from SA custom fields into Supabase
+  if (req.method === 'POST' && url === '/sync-pavement-sizes') {
+    const auth = req.headers['x-execute-secret'];
+    if (!EXECUTE_SECRET || auth !== EXECUTE_SECRET) { res.writeHead(401); res.end('Unauthorized'); return; }
+    let body = '';
+    req.on('data', d => body += d);
+    await new Promise(r => req.on('end', r));
+    const force = (() => { try { return JSON.parse(body).force === true; } catch { return false; } })();
+    try {
+      const { syncPavementSizes } = await import('../tools/impl/scheduling.js');
+      const result = await syncPavementSizes({ force });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(result));
+    } catch (err) {
+      logger.error('sync-pavement-sizes error', { err: err.message });
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ error: err.message }));
     }
