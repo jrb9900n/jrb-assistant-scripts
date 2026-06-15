@@ -1343,8 +1343,17 @@ export async function syncWaitingList() {
     upserted += Math.min(BATCH, records.length - i);
   }
 
-  logger.info('SA syncWaitingList complete', { returned: items.length, upserted });
-  return { synced: upserted, extractedAt: today.toISOString() };
+  // Remove rows SA no longer reports on the waiting list (completed, invoiced, removed).
+  // Only runs when SA returned a non-empty response so a connectivity glitch doesn't wipe the table.
+  const freshIds = records.map(r => r.job_id);
+  const { error: pruneErr, count: pruned } = await db
+    .from('sa_waiting_list')
+    .delete({ count: 'exact' })
+    .not('job_id', 'in', `(${freshIds.join(',')})`);
+  if (pruneErr) logger.warn('syncWaitingList: prune failed', { err: pruneErr.message });
+  else logger.info('SA syncWaitingList complete', { returned: items.length, upserted, pruned: pruned ?? 0 });
+
+  return { synced: upserted, pruned: pruned ?? 0, extractedAt: today.toISOString() };
 }
 
 /**
