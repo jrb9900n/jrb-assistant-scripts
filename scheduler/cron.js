@@ -46,22 +46,6 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Monday 7 AM — prior week credit card expense summary to Michael
-    schedule: '0 7 * * 1',
-    name: 'weekly_expense_report',
-    run: async () => {
-      const { generateWeeklyExpenseReport } = await import('../tools/impl/expense.js');
-      const { sendEmail } = await import('../tools/impl/m365.js');
-      const report = await generateWeeklyExpenseReport();
-      await sendEmail({
-        to: ['michael@jrboehlke.com'],
-        subject: report.subject,
-        body: report.body,
-      });
-      logger.info('Weekly expense report sent', { subject: report.subject });
-    },
-  },
-  {
     // Sunday 1:30 AM — QBO ↔ SA audit matching engine (runs after 1 AM sa_nightly_sync)
     schedule: '30 1 * * 0',
     name: 'weekly_audit_run',
@@ -72,19 +56,24 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Sunday 6 AM — send QBO ↔ SA audit summary email to Michael
+    // Sunday 6 AM — consolidated weekly finance report (Revenue, AR, Expenses, Reconciliation)
+    // Replaces: weekly_crm_report, weekly_expense_report, weekly_audit_email
     schedule: '0 6 * * 0',
-    name: 'weekly_audit_email',
+    name: 'weekly_finance_report',
     run: async () => {
-      const { generateAuditEmail } = await import('../tools/impl/audit.js');
-      const { sendEmail } = await import('../tools/impl/m365.js');
-      const report = await generateAuditEmail();
-      await sendEmail({
-        to: ['michael@jrboehlke.com'],
-        subject: report.subject,
-        body: report.body,
-      });
-      logger.info('Weekly audit email sent', { subject: report.subject });
+      try {
+        const { generateAndSendWeeklyFinanceReport } = await import('../agent/tools/impl/weekly-finance-report.js');
+        const result = await generateAndSendWeeklyFinanceReport();
+        logger.info('weekly_finance_report: done', result);
+      } catch (err) {
+        logger.error('weekly_finance_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../agent/teams/notify.js');
+          await sendProactiveMessage(`Weekly Finance Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('weekly_finance_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
     },
   },
   {
@@ -94,33 +83,6 @@ const SCHEDULED_TASKS = [
     run: async () => {
       const { runWeeklySynthesis } = await import('../tools/impl/feedback.js');
       await runWeeklySynthesis();
-    },
-  },
-  {
-    // Monday 7 AM — prior week QBO AR/payment summary to Michael
-    schedule: '0 7 * * 1',
-    name: 'weekly_crm_report',
-    run: async () => {
-      const { sendEmail } = await import('../tools/impl/m365.js');
-      const d = new Date();
-      const dayNum = d.getUTCDay() || 7;
-      const thu = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 4 - dayNum));
-      const yearStart = new Date(Date.UTC(thu.getUTCFullYear(), 0, 1));
-      const weekNum = Math.ceil((((thu - yearStart) / 86400000) + 1) / 7);
-      const weekLabel = `${thu.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
-
-      const { result: reportContent } = await runAgent({
-        task: `Pull QuickBooks data for the prior week. Include: outstanding invoices (total AR, overdue breakdown), payments received, any new customers, and top open balances. Write a concise executive summary. Save to OneDrive at /Agent Reports/Weekly CRM/${weekLabel}.md. Return the full report as plain text. Do NOT send a Teams message.`,
-        taskType: 'report',
-        saveContext: true,
-      });
-
-      await sendEmail({
-        to: ['michael@jrboehlke.com'],
-        subject: `Weekly Finance Report — ${weekLabel}`,
-        body: `<p>${(reportContent ?? 'Report generated — see OneDrive for full details.').replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
-      });
-      logger.info('Weekly CRM report sent', { week: weekLabel });
     },
   },
   {
