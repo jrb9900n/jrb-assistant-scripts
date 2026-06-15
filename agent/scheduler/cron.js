@@ -237,6 +237,16 @@ const SCHEDULED_TASKS = [
   //   ...
   // },
   {
+    // 1:30 AM nightly — refresh sa_waiting_list from SA and prune completed/invoiced jobs
+    schedule: '30 1 * * *',
+    name: 'sa_waiting_list_sync',
+    run: async () => {
+      const { syncWaitingList } = await import('../tools/impl/serviceautopilot.js');
+      const result = await syncWaitingList();
+      logger.info('sa_waiting_list_sync complete', result);
+    },
+  },
+  {
     // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
     schedule: '0 1 * * *',
     name: 'sa_nightly_sync',
