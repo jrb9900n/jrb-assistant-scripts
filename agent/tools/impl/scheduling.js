@@ -208,7 +208,7 @@ export async function getScheduleDraft({ session_id, draft_id }) {
 
 /**
  * Sync Pavement Size custom field from SA into sa_waiting_list.pavement_sf.
- * Uses V2AccountList_Query (which includes CustomField1-6) per client name search.
+ * Uses GetCustomerDataAsync + GetCustomFields per client to read "Pavement Size".
  * Throttles requests at 300ms intervals to avoid SA rate limiting.
  */
 export async function syncPavementSizes({ force = false } = {}) {
@@ -216,7 +216,7 @@ export async function syncPavementSizes({ force = false } = {}) {
 
   let query = db()
     .from('sa_waiting_list')
-    .select('client_id,client_name')
+    .select('client_id')
     .ilike('service_code', 'PMM%')
     .not('client_id', 'is', null);
   if (!force) query = query.is('pavement_sf', null);
@@ -224,20 +224,15 @@ export async function syncPavementSizes({ force = false } = {}) {
   const { data: rows, error } = await query;
   if (error) throw new Error(`syncPavementSizes query: ${error.message}`);
 
-  // Deduplicate by client_id, keeping one client_name per id
-  const clientMap = new Map();
-  for (const r of (rows || [])) {
-    if (r.client_id && !clientMap.has(r.client_id)) clientMap.set(r.client_id, r.client_name || '');
-  }
-  const clients = [...clientMap.entries()];
+  const clients = [...new Set((rows || []).map(r => r.client_id).filter(Boolean))];
   logger.info('syncPavementSizes: starting', { total: clients.length, force });
 
   let synced = 0;
   let skipped = 0;
   let failed = 0;
-  for (const [clientId, clientName] of clients) {
+  for (const clientId of clients) {
     try {
-      const pavementSf = await fetchClientPavementSf(clientId, clientName);
+      const pavementSf = await fetchClientPavementSf(clientId);
       if (pavementSf !== null) {
         const { error: updateErr } = await db()
           .from('sa_waiting_list')

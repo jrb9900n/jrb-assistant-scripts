@@ -1211,35 +1211,22 @@ export async function getClientProfile({ clientId }) {
 
 /**
  * Fetch the Pavement Size custom field value for a single SA client.
- * Custom fields are stored in the account list as CustomField1-6 (not in GetClientInfo).
- * "Pavement Size" has CustomFieldOrder:1 so it maps to CustomField1.
- * clientName is used to narrow the search; result is verified against clientId.
- * Returns the square footage as a number, or null if not set.
+ * Uses GetCustomerDataAsync to get the CustomerJobID, then GetCustomFields to read
+ * the "Pavement Size" field by Description. Returns sq ft as a number, or null.
  */
-export async function fetchClientPavementSf(clientId, clientName) {
-  const filterData = JSON.stringify({
-    FilterData: [
-      { FieldColumn: '1', ContainOperator: '1', FieldItems: [clientName], Order: 0, SCFilterID: EMPTY_GUID },
-      { FieldColumn: '28', ContainOperator: '7', FieldItems: [], Order: 0, SCFilterID: EMPTY_GUID },
-    ],
-    CustomFields: [],
-    QuerySelection: 3,
-  });
+export async function fetchClientPavementSf(clientId) {
+  const dataRes = await post('/WebServices/ClientViewWs.asmx/GetCustomerDataAsync',
+    { customerId: clientId }, 'ClientView.aspx');
+  const customerJobId = dataRes.data?.d?.Result?.Client?.CustomerJobID;
+  if (!customerJobId) return null;
 
-  const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
-    QueryInput: {
-      Settings: { FilterData: filterData },
-      StartRow: 1,
-      Max: 10,
-      SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
-    },
-  }, 'Clients.aspx');
+  const cfRes = await post('/WebServices/ClientViewWs.asmx/GetCustomFields',
+    { CustomerJobID: customerJobId }, 'ClientView.aspx');
+  const fields = cfRes.data?.d;
+  if (!Array.isArray(fields)) return null;
 
-  const accounts = (res.data?.d || res.data)?.Accounts || [];
-  const account = accounts.find(a => a.ClientID === clientId);
-  if (!account) return null;
-
-  const val = parseFloat(account.CustomField1);
+  const field = fields.find(f => f.Description === 'Pavement Size');
+  const val = parseFloat(field?.Value);
   return isNaN(val) ? null : val;
 }
 
