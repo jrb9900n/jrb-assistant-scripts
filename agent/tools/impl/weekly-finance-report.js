@@ -431,7 +431,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   // ══════════════════════════════════════════════════════════════════════════
   html += sectionHeader('Section 4 — Reconciliation & Errors');
 
-  if (!allIssues.length) {
+  if (!auditIssues.length) {
     html += `<p style="margin:0 0 16px;font-size:13px;color:#1a6e1a;font-style:italic;">No open reconciliation issues. QB ↔ SA are in sync.</p>`;
   } else {
     const byType = {
@@ -441,7 +441,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
       nonzero_balance:    { label: 'SA Clients with Open Balance',    color: '#888888' },
     };
     for (const [type, meta] of Object.entries(byType)) {
-      const issues = allIssues.filter(i => i.issue_type === type);
+      const issues = auditIssues.filter(i => i.issue_type === type);
       if (!issues.length) continue;
       const total = issues.reduce((s, i) => s + Math.abs(i.qbo_amount ?? i.sa_amount ?? 0), 0);
       html += `<p style="margin:12px 0 6px;font-size:13px;font-weight:bold;color:${meta.color};">${meta.label} &mdash; ${issues.length} issue${issues.length > 1 ? 's' : ''} (${f$(total)})</p>`;
@@ -460,6 +460,13 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
       html += `</table>`;
     }
   }
+
+  // ── BTA Files ───────────────────────────────────────────────────────────────
+  html += `<hr style="border:none;border-top:1px solid #e8e8e8;margin:24px 0;">`;
+  html += `<p style="margin:0 0 6px;font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;color:#888888;">BTA Reporting Files</p>`;
+  html += `<p style="margin:0 0 16px;font-size:13px;color:#555555;">Weekly revenue package (RP tabs, budget summary) refreshed Sunday at 8 AM. ` +
+    `<a href="file:///C:/Users/Assistant/OneDrive%20-%20jrboehlke.com/JR%20Boehlke%20-%20Claude%20Folder/BTA%20Reporting/Output" ` +
+    `style="color:#1a6e8c;">Open BTA Output Folder</a></p>`;
 
   // ── Footer ─────────────────────────────────────────────────────────────────
   html += `<p style="margin:24px 0 0;font-size:13px;color:#888888;">Generated automatically by your JRB Assistant. Reply with questions.</p>

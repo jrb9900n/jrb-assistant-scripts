@@ -77,6 +77,38 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Sunday 8 AM — BTA revenue package: full-year QB invoice pull, weekly RP tabs, budget summary
+    // Runs after weekly_finance_report (6 AM) to avoid token rotation race.
+    // Outputs: BTA Reporting\Output\weekly-rp-*.csv, weekly-rp-all-tabs-YYYY.json, budget-summary-YYYY.json
+    schedule: '0 8 * * 0',
+    name: 'bta_weekly_report',
+    run: () => new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['rp-formatter.js'], {
+        cwd: 'C:\\Users\\Assistant\\BTA Reporting',
+        env: { ...process.env },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 600_000,
+      });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', d => { out += d; });
+      child.stderr.on('data', d => { err += d; });
+      child.on('close', code => {
+        logger.info('bta_weekly_report complete', { code, output: out.slice(-2000) });
+        if (err) logger.warn('bta_weekly_report stderr', { stderr: err.slice(-1000) });
+        if (code !== 0) {
+          import('../teams/notify.js')
+            .then(({ sendProactiveMessage }) => sendProactiveMessage(`BTA Weekly Report FAILED (exit ${code}). Check logs.`))
+            .catch(() => {});
+          reject(new Error(`rp-formatter.js exited ${code}`));
+        } else {
+          resolve();
+        }
+      });
+      child.on('error', reject);
+    }),
+  },
+  {
     // Sunday 11 PM — synthesize week's observations into reusable patterns
     schedule: '0 23 * * 0',
     name: 'weekly_synthesis',
