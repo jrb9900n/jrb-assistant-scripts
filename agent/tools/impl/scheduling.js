@@ -160,6 +160,25 @@ export async function saveScheduleDraft({ session_id, directive, week_start, sch
     logger.info('Schedule draft updated', { draft_id });
     return data;
   }
+  // No draft_id — check for existing draft to upsert into (preserves session_notes)
+  const { data: existing } = await db()
+    .from('schedule_drafts')
+    .select('id')
+    .eq('session_id', session_id)
+    .eq('status', 'draft')
+    .order('updated_at', { ascending: false })
+    .limit(1);
+  if (existing?.[0]?.id) {
+    const { data, error } = await db()
+      .from('schedule_drafts')
+      .update({ schedule_data, directive, week_start: week_start || null, updated_at: new Date().toISOString() })
+      .eq('id', existing[0].id)
+      .select()
+      .single();
+    if (error) throw new Error(`save_schedule_draft upsert: ${error.message}`);
+    logger.info('Schedule draft upserted', { id: existing[0].id, session_id });
+    return data;
+  }
   const { data, error } = await db()
     .from('schedule_drafts')
     .insert({ session_id, directive, week_start: week_start || null, schedule_data, status: 'draft' })
@@ -185,4 +204,35 @@ export async function getScheduleDraft({ session_id, draft_id }) {
     .limit(1);
   if (error || !data?.length) return null;
   return data[0];
+}
+
+export async function recordDecision({ session_id, decision }) {
+  // Find existing draft for this session (draft status only — avoids appending to confirmed rows)
+  const { data: existing } = await db()
+    .from('schedule_drafts')
+    .select('id, session_notes')
+    .eq('session_id', session_id)
+    .eq('status', 'draft')
+    .order('updated_at', { ascending: false })
+    .limit(1);
+
+  const row = existing?.[0];
+  const notes = Array.isArray(row?.session_notes) ? [...row.session_notes] : [];
+  notes.push(decision);
+
+  if (row?.id) {
+    const { error } = await db()
+      .from('schedule_drafts')
+      .update({ session_notes: notes, updated_at: new Date().toISOString() })
+      .eq('id', row.id);
+    if (error) throw new Error(`record_decision update: ${error.message}`);
+  } else {
+    // No draft yet — create a stub to hold session notes until a real draft is saved
+    const { error } = await db()
+      .from('schedule_drafts')
+      .insert({ session_id, session_notes: notes, status: 'draft', schedule_data: {}, directive: '(session notes)' });
+    if (error) throw new Error(`record_decision insert: ${error.message}`);
+  }
+  logger.info('Session decision recorded', { session_id, decision: String(decision).slice(0, 80) });
+  return `Recorded: "${decision}"`;
 }

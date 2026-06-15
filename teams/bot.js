@@ -43,7 +43,7 @@ const BOT_APP_ID     = process.env.TEAMS_BOT_APP_ID;
 const BOT_APP_SECRET = process.env.TEAMS_BOT_APP_SECRET;
 const EXECUTE_SECRET = process.env.CLAUDE_EXECUTE_SECRET;
 
-function buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock = '', memoryBlock = '') {
+function buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock = '', memoryBlock = '', decisionsBlock = '') {
   const skillSection = SCHEDULING_SKILL
     ? `\n\n---\n\n${SCHEDULING_SKILL}\n\n---`
     : '';
@@ -54,6 +54,7 @@ function buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBl
 Session ID: ${sessionId}
 Target week: ${weekStart || 'ask the user if not specified'}
 Current date/time: ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })}
+${decisionsBlock}
 ${skillSection}
 
 ## Available Tools
@@ -63,7 +64,7 @@ ${skillSection}
 - get_weather_forecast — 14-day SE Wisconsin forecast with safe_for_fert flag
 - save_schedule_draft — persist the schedule so FieldOps board updates live
 - get_schedule_draft — load current draft before editing
-- save_scheduling_rule — persist a correction or standing rule to Supabase so it applies to ALL future sessions. Use immediately when Michael corrects a mistake or states a rule. Write it as a clear, actionable statement.
+- record_decision — persist a confirmed user decision to session memory so it survives across turns. Call this immediately when Michael confirms any specific action.
 - sa_list_resources — get SA crew list with GUIDs (call once before dispatching)
 - sa_dispatch_job — move a waiting-list job onto the SA dispatch board for a specific date + crew
 - sa_update_route_order — set the stop sequence on the SA dispatch board after all jobs are dispatched
@@ -395,19 +396,28 @@ async function handleFieldOpsChat(req, res) {
 
   // Load existing draft to inject as context
   let draftContext = '';
+  let decisionsBlock = '';
   try {
     const { getScheduleDraft } = await import('../tools/impl/scheduling.js');
     const draft = await getScheduleDraft({ session_id: sessionId });
     if (draft) {
-      const preview = JSON.stringify(draft.schedule_data, null, 2).slice(0, 2000);
-      draftContext = `\n\n## Current Draft (ID: ${draft.id})\nDirective: ${draft.directive}\nWeek: ${draft.week_start || 'TBD'}\n\n${preview}`;
+      if (Array.isArray(draft.session_notes) && draft.session_notes.length > 0) {
+        decisionsBlock = `\n## CONFIRMED DECISIONS THIS SESSION — DO NOT RE-ASK\n` +
+          draft.session_notes.map(n => `- ${n}`).join('\n') +
+          `\n\nThese are already confirmed. Act on them directly without asking again.\n`;
+      }
+      const hasData = draft.schedule_data && Object.keys(draft.schedule_data).length > 0;
+      if (hasData) {
+        const preview = JSON.stringify(draft.schedule_data, null, 2).slice(0, 2000);
+        draftContext = `\n\n## Current Draft (ID: ${draft.id})\nDirective: ${draft.directive}\nWeek: ${draft.week_start || 'TBD'}\n\n${preview}`;
+      }
     }
   } catch (e) {
     logger.warn('Could not load draft context', { err: e.message });
   }
 
   const memoryBlock = await loadSchedulingMemory();
-  const systemPrompt = buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock, memoryBlock);
+  const systemPrompt = buildSchedulingSystemPrompt(sessionId, weekStart, draftContext, rulesBlock, memoryBlock, decisionsBlock);
 
   try {
     const { result } = await runAgent({

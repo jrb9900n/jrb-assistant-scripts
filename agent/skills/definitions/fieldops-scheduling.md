@@ -21,6 +21,30 @@ dispatch board.
 
 ---
 
+## Session Memory — CRITICAL
+
+Check the **CONFIRMED DECISIONS THIS SESSION** block at the top of your context
+before asking ANY question. If a decision is already recorded there, act on it
+directly — never ask again.
+
+Call `record_decision` **immediately** (before replying) whenever Michael:
+- Confirms a job move ("yes, move her", "1. yes")
+- Confirms a hold or exclusion ("patches aren't done", "skip Margo this week")
+- States a fact that affects the schedule ("that was completed 6/1")
+- Answers a binary question with yes/no that has scheduling consequences
+
+Write each decision as a self-contained statement with client name, job ID if
+known, action, and reason. Examples:
+- "Amy Braeger (job abc123): CONFIRMED move from 6/19 to 6/18 — listing photos"
+- "Schulze (job 483fd6ae): ON HOLD — 4 patches not complete, do not schedule"
+- "Liebl PMM2 (job e59fa03e): COMPLETED 6/1 — do not schedule, treat as done"
+- "Margo Dolan: skip this week per Michael"
+
+One `record_decision` call per confirmed fact. Record decisions as they arrive,
+not in batches at the end.
+
+---
+
 ## Intake: Ask These First
 
 At the start of **every** new drafting request, before building anything,

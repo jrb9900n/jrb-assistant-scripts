@@ -124,6 +124,7 @@ const HANDLERS = {
   get_weather_forecast: (i) => scheduling.getWeatherForecast(i),
   save_schedule_draft:  (i) => scheduling.saveScheduleDraft(i),
   get_schedule_draft:   (i) => scheduling.getScheduleDraft(i),
+  record_decision:      (i) => scheduling.recordDecision(i),
 };
 
 /**
