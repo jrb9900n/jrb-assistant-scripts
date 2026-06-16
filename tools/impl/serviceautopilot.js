@@ -41,6 +41,9 @@ const STATE_IDS = {
   WY: '90f7e575-9148-4ade-8890-57fcc9fb8d77',
 };
 
+// SA TicketStatus values — TicketList default view filters for Status:1 (Open); Status:0 tickets are hidden
+const TICKET_STATUS_OPEN = 1;
+
 // SA ticket category IDs (from TicketEdit_TicketCategoryDropdown_GetByCompany)
 const TICKET_CATEGORIES = {
   OTHER:            'e74cbced-0bf3-43ef-9fee-f7564af541da',
@@ -108,11 +111,11 @@ const JRB_TAX_REF_BY_CITY = {
   'lake geneva':         'f6f4fc4a-a05c-49f7-84c6-e5cc7d06b6f0',
 };
 
-const SESSION_TTL_MS      = 4 * 60 * 60 * 1000; // 4 hours
+const SESSION_TTL_MS       = 4 * 60 * 60 * 1000; // 4 hours
 const INCAPSULA_BACKOFF_MS = 45 * 60 * 1000;    // 45 min backoff when IP is flagged
 
 // Cookie cache: restore session on restart to avoid triggering a new login.
-// Path resolves to sa-session-cache.json at the repo root (relative to this file's location).
+// Path resolves to agent/sa-session-cache.json (relative to this file's location).
 const SESSION_CACHE_PATH  = fileURLToPath(new URL('../../sa-session-cache.json', import.meta.url));
 // Shared across all scheduler instances — whichever process hits the block first writes this,
 // and all other instances read it before attempting a login so they don't pile on.
@@ -408,7 +411,6 @@ function extractPlaceholders(text) {
   return [...new Set(matches || [])];
 }
 
-
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /** Returns the epoch ms timestamp when the Incapsula backoff clears (0 if not active). */
@@ -524,6 +526,16 @@ export async function setClientBillingDefaults({ clientId }) {
 
   function parseSaDate(v) {
     if (!v) return { Month: -1, Day: -1, Year: -1 };
+    // GetClientInfo returns dates as {Month, Day, Year} objects — validate before round-tripping
+    // (SA can store invalid dates like April 31 which the server rejects on save)
+    if (typeof v === 'object' && 'Month' in v && 'Day' in v && 'Year' in v) {
+      const { Month, Day, Year } = v;
+      if (Month > 0 && Day > 0 && Year > 0) {
+        const dt = new Date(Year, Month - 1, Day);
+        if (dt.getMonth() + 1 === Month && dt.getDate() === Day) return { Month, Day, Year };
+      }
+      return { Month: -1, Day: -1, Year: -1 };
+    }
     const ms = String(v).match(/\/Date\((-?\d+)\)\//);
     const dt = ms ? new Date(parseInt(ms[1])) : new Date(v);
     if (isNaN(dt.getTime())) return { Month: -1, Day: -1, Year: -1 };
@@ -617,10 +629,29 @@ export async function setClientBillingDefaults({ clientId }) {
   if (result?.response?.Errors?.length > 0) {
     throw new Error(`SA setClientBillingDefaults SaveClient errors: ${JSON.stringify(result.response.Errors)}`);
   }
+  // SA returns 500 for QBO-synced clients with valid data due to a server-side bug in post-save
+  // QBO sync code. SA auto-applies company billing defaults on client creation, so the defaults
+  // are already correct even when SaveClient fails. Report current defaults from GetClientInfo.
   const city = (d.City || '').toLowerCase().trim();
   const taxRefId = JRB_TAX_REF_BY_CITY[city] || JRB_TAX_REF_DEFAULT;
+  if (saveRes.status === 500) {
+    logger.warn('SA: SaveClient returned 500 (SA QBO-sync bug) — billing defaults read from GetClientInfo', {
+      clientId, city: d.City,
+      sendInvoiceBy: d.SendInvoiceBy,
+      taxCode: d.SalesTaxCodeInfo?.Text,
+      taxRef: d.SalesTaxInfo?.Text,
+    });
+    return {
+      clientId,
+      sendInvoiceBy: d.SendInvoiceBy || 'unknown',
+      taxable: !!(d.SalesTaxCodeInfo?.Value && d.SalesTaxCodeInfo.Value !== EMPTY_GUID),
+      city: d.City,
+      taxRefId: d.SalesTaxInfo?.Value || taxRefId,
+      savedViaApi: false,
+    };
+  }
   logger.info('SA: billing defaults set', { clientId, city: d.City, taxRefId });
-  return { clientId, sendInvoiceBy: 'Email', taxable: true, city: d.City, taxRefId };
+  return { clientId, sendInvoiceBy: 'Email', taxable: true, city: d.City, taxRefId, savedViaApi: true };
 }
 
 /**
@@ -832,6 +863,29 @@ export async function updateEstimateNotes({ quoteId, updates = [] }) {
 }
 
 /**
+ * Fetch the service line items for an existing estimate.
+ * Returns [{ serviceId, name, amount, note }]
+ */
+export async function getEstimateLineItems(quoteId) {
+  const res = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
+    InputData: { ID: quoteId },
+  }, 'V3Estimate.aspx');
+  const items = res.data?.d?.Result?.ServiceLineItems || [];
+  return items.map(item => {
+    const svc = item.Service || item;
+    const rate = parseFloat(svc.Rate || 0);
+    const qty  = parseFloat(svc.Qty  || svc.Quantity || 1);
+    const amount = parseFloat(svc.TotalCost ?? svc.TotalAmount ?? svc.Amount ?? (rate * qty) ?? 0);
+    return {
+      serviceId: svc.ID || '',
+      name:      svc.Name || svc.ServiceName || svc.Description || '—',
+      amount,
+      note:      svc.EstimateNote || '',
+    };
+  });
+}
+
+/**
  * Schedule a waiting-list job from an estimate.
  * serviceIds: array of line-item service IDs to schedule (or omit to schedule all)
  * Returns { jobId, clientId, quoteId }
@@ -946,8 +1000,8 @@ export async function addNote({ clientId, noteText }) {
 
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
-      CategoryID:   null,
-      TicketStatus: 0,
+      CategoryID:   TICKET_CATEGORIES.OTHER,
+      TicketStatus: TICKET_STATUS_OPEN,
       EntityID:     details.customerJobId,
       EntityType:   'Account',
       DueDate:      '',
@@ -1013,7 +1067,7 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   const res = await post('/CRMBFF/TicketEdit/TicketEdit_Ticket_PostAsync', {
     Ticket: {
       CategoryID:        categoryId,
-      TicketStatus:      0,
+      TicketStatus:      TICKET_STATUS_OPEN,
       EntityID:          details.customerJobId,
       EntityType:        'Account',
       DueDate:           effectiveDueDate.toISOString(),
@@ -1075,33 +1129,376 @@ export async function getEstimateList({ dateFrom, dateTo, stages, max = 500 } = 
   return estimates;
 }
 
-/**
- * Fetch line items for a specific estimate via QueryLineItems.
- * Returns { total, services: string[], items: [{name, rate, qty, total}] }
- * Used by the overnight report to get accurate totals and service descriptions.
- */
-export async function getEstimateLineItems(quoteId) {
-  const res = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
-    InputData: { ID: quoteId },
-  }, 'V3Estimate.aspx');
-  const result = res.data?.d?.Result;
-  if (!result) return null;
+function mapSAAccount(a) {
+  return {
+    clientId: a.ClientID || '',
+    name:     a.ClientName || '',
+    address:  a.Address1 || '',
+    city:     a.City || '',
+    state:    a.State || a.StateAbbr || '',
+    zip:      a.Zip || a.ZipCode || a.PostalCode || '',
+    phone:    a.HomePhone || a.CellPhone || a.WorkPhone || a.OtherPhone || a.Phone1 || a.PhoneNumber || '',
+    qboId:    a.QboID || a.QboId || '',
+    isLead:   a.Type === 'Lead',
+    type:     a.Type || '',
+  };
+}
 
-  const rawItems = result.ServiceLineItems || [];
-  const items = rawItems.map(item => {
-    const svc   = item.Service || item;
-    const rate  = parseFloat(svc.Rate ?? 0);
-    const qty   = parseFloat(svc.Qty ?? 1);
-    // SA may expose service name under different field names — check them all
-    const name  = svc.ServiceTypeName || svc.ServiceName || svc.Name
-               || (svc.EstimateNote ? svc.EstimateNote.split('\n')[0].slice(0, 100).trim() : '')
-               || '';
-    const total = parseFloat(svc.Total != null ? svc.Total : rate * qty);
-    return { name: name.trim(), rate, qty, total: isNaN(total) ? 0 : total };
+async function paginateAccountList(referer, max = 10000) {
+  const results = [];
+  let startRow = 1;
+  const pageSize = 500;
+
+  // QuerySelection:3 returns Clients + Leads + Closed Leads (vs 0 = Clients only).
+  // FilterData mirrors the exact browser request captured from SA's Leads view —
+  // FieldColumn 28/ContainOperator 7 enables all statuses; FieldColumn 1/ContainOperator 8
+  // targets the SA-side "All Accounts" saved list GUID.
+  const filterData = JSON.stringify({
+    FilterData: [
+      { FieldColumn: '28', ContainOperator: '7', FieldItems: [], Order: 0, SCFilterID: EMPTY_GUID },
+      { FieldColumn: '1', ContainOperator: '8', FieldItems: ['408bb07e-0d58-4a26-8b32-8f4190443a22'], Order: 1, SCFilterID: EMPTY_GUID },
+    ],
+    CustomFields: [],
+    QuerySelection: 3,
   });
 
-  const grandTotal = items.reduce((sum, i) => sum + i.total, 0);
-  const services   = [...new Set(items.map(i => i.name).filter(Boolean))];
-  logger.info('SA: estimate line items fetched', { quoteId, count: items.length, grandTotal });
-  return { total: grandTotal, services, items };
+  while (results.length < max) {
+    const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
+      QueryInput: {
+        Settings: { FilterData: filterData },
+        StartRow: startRow,
+        Max: pageSize,
+        SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
+      },
+    }, referer);
+
+    const accounts = (res.data?.d || res.data)?.Accounts || [];
+    if (accounts.length === 0) break;
+    results.push(...accounts);
+    if (accounts.length < pageSize) break;
+    startRow += pageSize;
+  }
+
+  return results;
+}
+
+/**
+ * Bulk-fetch all SA accounts (clients + leads) in a single paginated call.
+ * Returns [{ clientId, name, address, city, state, zip, phone, qboId, isLead }]
+ */
+export async function getAllSAAccounts({ max = 10000 } = {}) {
+  const accounts = await paginateAccountList('Clients.aspx', max);
+  logger.info('SA: bulk account fetch complete', { count: accounts.length });
+  return accounts.map(mapSAAccount);
+}
+
+// Kept for backward compatibility — returns only non-lead accounts
+export async function getAllClients({ max = 10000 } = {}) {
+  const all = await getAllSAAccounts({ max });
+  return all.filter(a => !a.isLead);
+}
+
+/**
+ * Fetch the phone number for a single SA account via GetClientInfo.
+ * The bulk account list has no phone fields; this per-account call is required.
+ * Returns the first non-empty phone found (HomePhone → CellPhone → WorkPhone → OtherPhone).
+ */
+export async function getSAClientPhone(clientId) {
+  const res = await post('/WebServices/ClientEditOverlayWs.asmx/GetClientInfo', { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) return '';
+  return d.HomePhone || d.CellPhone || d.WorkPhone || d.OtherPhone || '';
+}
+
+/**
+ * Fetch scheduling-relevant client profile: OfficeNotes (gate codes, property access,
+ * special instructions), BillingNotes, contact info, and custom fields (CustomField1-6)
+ * if configured in SA Admin → Account Settings → Custom Fields.
+ */
+export async function getClientProfile({ clientId }) {
+  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getClientProfile: no data returned for clientId ${clientId}`);
+
+  logger.info('SA: getClientProfile complete', { clientId });
+  return {
+    clientId,
+    name:         d.PropertyName || `${d.FirstName || ''} ${d.LastName || ''}`.trim(),
+    address:      [d.Address, d.City, d.PostalCode].filter(Boolean).join(', '),
+    phone:        d.HomePhone || d.CellPhone || d.WorkPhone || d.OtherPhone || '',
+    officeNotes:  d.OfficeNotes  || '',
+    billingNotes: d.BillingNotes || '',
+  };
+}
+
+/**
+ * Fetch the Pavement Size custom field value for a single SA client.
+ * Uses GetCustomerDataAsync to get the CustomerJobID, then GetCustomFields to read
+ * the "Pavement Size" field by Description. Returns sq ft as a number, or null.
+ */
+export async function fetchClientPavementSf(clientId) {
+  const dataRes = await post('/WebServices/ClientViewWs.asmx/GetCustomerDataAsync',
+    { customerId: clientId }, 'ClientView.aspx');
+  const customerJobId = dataRes.data?.d?.Result?.Client?.CustomerJobID;
+  if (!customerJobId) return null;
+
+  const cfRes = await post('/WebServices/ClientViewWs.asmx/GetCustomFields',
+    { CustomerJobID: customerJobId }, 'ClientView.aspx');
+  const fields = cfRes.data?.d;
+  if (!Array.isArray(fields)) return null;
+
+  const field = fields.find(f => f.Description === 'Pavement Size');
+  const val = parseFloat(field?.Value);
+  return isNaN(val) ? null : val;
+}
+
+/**
+ * Fetch recent CRM notes/tickets for a client — call history, site visits, consultation notes.
+ * Uses MyDay_GetTickets with CustomerJobID filter (discovered 2026-06-13).
+ * Returns newest first, limited to `limit` entries.
+ */
+export async function getClientNotes({ clientId, limit = 10 }) {
+  const details = await getClientDetails(clientId);
+  const { customerJobId } = details;
+
+  const res = await post('/CRMBFF/TicketList/MyDay_GetTickets', {
+    QueryInput: { MaxRows: limit, AllTickets: true, StartingRow: 0, CustomerJobID: customerJobId },
+  }, 'ClientView.aspx');
+
+  const tickets = res.data?.Tickets || [];
+  logger.info('SA: getClientNotes complete', { clientId, count: tickets.length });
+
+  return tickets.map(t => {
+    const d = t.RequestDate || t.StartDate || {};
+    const date = (d.Year > 0)
+      ? `${d.Year}-${String(d.Month).padStart(2, '0')}-${String(d.Day).padStart(2, '0')}`
+      : '';
+    return {
+      ticketId:   t.ID,
+      date,
+      type:       t.TicketTypeDescription || '',
+      subject:    t.Notes    || '',
+      comment:    t.Comment  || '',
+      assignedTo: t.AssignedResourceName || '',
+      status:     t.TicketStatus === 1 ? 'open' : 'closed',
+    };
+  });
+}
+
+/**
+ * Sync the SA waiting list to Supabase (sa_waiting_list table).
+ * Uses the puppeteer session to bypass Incapsula — raw HTTP calls fail.
+ * Called by the /sync-waiting-list endpoint (FieldOps Refresh button).
+ * Returns { synced: number, extractedAt: string }.
+ */
+export async function syncWaitingList() {
+  const today = new Date();
+  const body = {
+    OnNewDispatchBoard: true,
+    QueryData: {
+      IsWaitingList: true,
+      StartDate: { Month: 1, Day: 1, Year: today.getFullYear() + 1 },
+      EndDate:   { Month: today.getMonth() + 1, Day: today.getDate(), Year: today.getFullYear() },
+      ServiceIDs: [], CrewIDs: [], CustomFields: [], Divisions: [],
+      Tags: [], TicketTypes: [], DOW: -1,
+      DispatchID: EMPTY_GUID, DispatchedOnly: false, FilterProximity: false,
+      IncludeUnassignedWork: false, IsCloseOutDay: false, IsSnow: false,
+      LoadAppointmentTimes: false, MapCode: '', MapCodeOperator: '0', MultiDay: false,
+      Priority: '0', ProximityAddress: '', ProximityMiles: '5.00',
+      ResourceID: 1, ResourceTags: '', ScheduleStatus: '0',
+      ScreenViewID: EMPTY_GUID, ShowProductTotals: true, UseMinDays: true,
+      Address: '', City: '', Client: '', Zip: '',
+    },
+  };
+
+  const res = await post('/WebServices/ScheduledWorkWs.asmx/Query', body, 'DispatchBoard.aspx');
+  const items = res.data?.d?.ScheduledItems || res.data?.ScheduledItems || [];
+  logger.info('SA syncWaitingList: fetched from SA', { count: items.length });
+
+  if (items.length === 0) return { synced: 0, extractedAt: today.toISOString() };
+
+  function parseWLDate(str) {
+    if (!str) return null;
+    const clean = str.replace(/<[^>]+>/g, '').trim().split('\n')[0].trim();
+    const parts = clean.split('/');
+    if (parts.length < 3) return null;
+    const [m, d, y] = parts;
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  function parseWLStartDate(str) {
+    if (!str) return { targetDate: null, addedDate: null };
+    const stripped = str.replace(/<br\/>/gi, '|').replace(/<[^>]+>/g, '');
+    const parts = stripped.split('|').map(s => s.replace(/[()]/g, '').trim());
+    return { targetDate: parseWLDate(parts[0]), addedDate: parseWLDate(parts[1]) };
+  }
+
+  const records = items.map(item => {
+    const { targetDate, addedDate } = parseWLStartDate(item.StartDate);
+    const dateAddedStr = parseWLDate(item.DateAdded) || addedDate;
+    const daysWaiting  = dateAddedStr ? Math.floor((today - new Date(dateAddedStr)) / 86400000) : null;
+    return {
+      job_id: item.ID, sa_job_id: item.ID, client_id: item.CustomerID,
+      client_name: item.Client, address: item.Address, city: item.City,
+      state: item.State, zip: item.Zip, service_code: item.Service,
+      amount: item.Amount, date_added: dateAddedStr, target_date: targetDate,
+      sales_rep: item.SalesRep,
+      internal_notes: item.InternalSchedulingNotes || null,
+      notes:          item.InternalSchedulingNotes || null,
+      status: String(item.Status), service_timing: item.ServiceTiming,
+      latitude: item.Latitude || null, longitude: item.Longitude || null,
+      budgeted_hours: item.BudgetedHours || null, days_waiting: daysWaiting,
+      extracted_at: today.toISOString(),
+    };
+  });
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const db = createClient(
+    'https://mzywmgesulyalevtzudw.supabase.co',
+    process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+  );
+
+  const BATCH = 500;
+  let upserted = 0;
+  for (let i = 0; i < records.length; i += BATCH) {
+    const { error } = await db.from('sa_waiting_list').upsert(records.slice(i, i + BATCH), { onConflict: 'job_id' });
+    if (error) throw new Error(`syncWaitingList upsert batch ${i}: ${error.message}`);
+    upserted += Math.min(BATCH, records.length - i);
+  }
+
+  // Remove rows SA no longer reports on the waiting list (completed, invoiced, removed).
+  // Only runs when SA returned a non-empty response so a connectivity glitch doesn't wipe the table.
+  const freshIds = records.map(r => r.job_id);
+  const { error: pruneErr, count: pruned } = await db
+    .from('sa_waiting_list')
+    .delete({ count: 'exact' })
+    .not('job_id', 'in', `(${freshIds.join(',')})`);
+  if (pruneErr) logger.warn('syncWaitingList: prune failed', { err: pruneErr.message });
+  else logger.info('SA syncWaitingList complete', { returned: items.length, upserted, pruned: pruned ?? 0 });
+
+  return { synced: upserted, pruned: pruned ?? 0, extractedAt: today.toISOString() };
+}
+
+/**
+ * List SA dispatch board resources (crews) available for assignment.
+ * Returns [{ id, name }]
+ */
+export async function listSAResources() {
+  const res = await post('/WebServices/ListsWs.asmx/GetMoveToResourceList', {}, 'DispatchBoard.aspx');
+  const list = res.data?.d || res.data || [];
+  if (!Array.isArray(list)) throw new Error(`SA listSAResources: unexpected response — ${res.text?.slice(0, 200)}`);
+  return list.map(r => ({ id: r.ID || r.Value || '', name: r.Name || r.Text || '' })).filter(r => r.id);
+}
+
+/**
+ * Dispatch a waiting list job to a specific date and crew in SA.
+ *
+ * @param {object} opts
+ * @param {string} opts.wlItemId     SA waiting list item UUID (sa_waiting_list.job_id)
+ * @param {string} opts.scheduleDate ISO date YYYY-MM-DD
+ * @param {string} opts.resourceId   SA resource/crew GUID
+ * @returns {{ success: boolean, wlItemId: string, scheduleDate: string, removedFromWL: boolean }}
+ */
+export async function dispatchWaitingListJob({ wlItemId, scheduleDate, resourceId }) {
+  // 1. Get current assignment data for this WL item
+  const getRes = await post('/WebServices/ScheduledWorkWs.asmx/GetAssignmentData', {
+    AssignmentRequest: { ID: wlItemId, Type: 'S' },
+  }, 'DispatchBoard.aspx');
+
+  const current = getRes.data?.d;
+  if (!current) {
+    throw new Error(`SA dispatchWaitingListJob: GetAssignmentData failed — ${getRes.text?.slice(0, 200)}`);
+  }
+
+  // 2. Parse target date
+  const dt = new Date(scheduleDate + 'T12:00:00');
+  const today = new Date();
+  const svcDate  = toSaBrowserDate(dt);
+  const svcDateTime = { ...svcDate, Hour: 0, Minute: 0, Second: 0 };
+  const viewStart = toSaBrowserDate(today);
+  const viewEnd   = toSaBrowserDate(new Date(today.getTime() + 14 * 86400000));
+
+  // 3. Build save payload — change status to route, set date + crew
+  const saveData = {
+    ...current,
+    ScheduleStatus: '2',        // 2 = Route (dispatched)
+    ServiceDate: svcDate,
+    AssignedResourceIDs: [resourceId],
+    StartDate: svcDateTime,    // SA expects BrowserDateTime (includes Hour/Minute/Second)
+    EndDate:   svcDateTime,
+    ViewStartDate: viewStart,
+    ViewEndDate:   viewEnd,
+  };
+
+  // 4. Save — moves the job off the waiting list and onto the schedule
+  const saveRes = await post('/WebServices/ScheduledWorkWs.asmx/SaveAssignmentData', {
+    AssignmentData: saveData,
+  }, 'DispatchBoard.aspx');
+
+  const response = saveRes.data?.d;
+  if (!response) {
+    throw new Error(`SA dispatchWaitingListJob: empty response from SaveAssignmentData (status=${saveRes.status})`);
+  }
+  const errors = response?.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA dispatchWaitingListJob failed: ${JSON.stringify(errors)}`);
+  }
+
+  logger.info('SA: WL job dispatched', { wlItemId, scheduleDate, resourceId });
+  return {
+    success: true,
+    wlItemId,
+    scheduleDate,
+    resourceId,
+    removedFromWL: response?.RemoveFromList === true,
+  };
+}
+
+/**
+ * Set the route stop order for a set of jobs already on the SA dispatch board.
+ * Must be called after all jobs for the day+crew have been dispatched.
+ *
+ * Payload structure confirmed via browser DevTools (2026-06-14):
+ *   RouteOrderData.Items = [{id, order, Type:"S", Mileage:"0.00", ScheduledServiceAssignmentID: EMPTY_GUID}]
+ *   RouteOrderData.Mode = "1"
+ *   RouteOrderData.StartDate = BrowserDate {Month, Day, Year}  (NOT BrowserDateTime)
+ *   OnNewDispatchBoard = true
+ *   No ResourceID — SA infers resource from the item GUIDs.
+ *
+ * @param {object} opts
+ * @param {string}   opts.scheduleDate  ISO date YYYY-MM-DD
+ * @param {string[]} opts.jobIds        Job IDs in desired stop order (index 0 = stop 1)
+ */
+export async function updateRouteOrder({ scheduleDate, jobIds }) {
+  if (!jobIds?.length) return { success: true, count: 0 };
+
+  const dt = new Date(scheduleDate + 'T12:00:00');
+  const startDate = toSaBrowserDate(dt);
+
+  const res = await post('/WebServices/ScheduledWorkWs.asmx/UpdateRouteOrder', {
+    RouteOrderData: {
+      Items: jobIds.map((id, i) => ({
+        id,
+        order: i + 1,
+        Type: 'S',
+        Mileage: '0.00',
+        ScheduledServiceAssignmentID: EMPTY_GUID,
+      })),
+      Mode: '1',
+      StartDate: startDate,
+    },
+    OnNewDispatchBoard: true,
+  }, 'DispatchBoard.aspx');
+
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA updateRouteOrder: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const errors = d.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA updateRouteOrder failed: ${JSON.stringify(errors)}`);
+  }
+
+  logger.info('SA: route order updated', { scheduleDate, count: jobIds.length });
+  return { success: true, count: jobIds.length };
 }

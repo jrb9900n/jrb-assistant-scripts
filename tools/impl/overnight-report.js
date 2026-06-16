@@ -1,18 +1,33 @@
 // tools/impl/overnight-report.js — Daily morning SA activity report
 // Sends at 6 AM to michael@jrboehlke.com via the scheduler/cron.js task.
 //
-// Section order (top → bottom):
-//   1. Today's dispatch       — grouped by crew, sorted by start_time
-//   2. Jobs accepted yesterday — Won estimates first seen since last report (seeded=false)
-//   3. Awaiting waiting list  — accepted but not yet scheduled, grouped by job type
-//   4. Estimates sent recently — stage changed to Sent in last 2 days, grouped by estimator
-//   5. Aging estimates        — Sent 7+ days ago, no acceptance, grouped by estimator
+// Sections:
+//   1. Jobs accepted yesterday   — Won estimates first seen since last report, with line items
+//   2. Awaiting waiting list     — Live comparison: Won estimates not found on WL or dispatch board
+//   3. Estimates sent yesterday  — Tracked via sa_sent_estimates; first seen in Sent stage yesterday
+//   4. Aging estimates           — Sent 7+ days ago, no acceptance  [skipped per 2026-06-16 review]
+//   5. Today's dispatch          — sa_jobs for today, grouped by crew with subtotals
+//
+// Required Supabase table (run once in fleetops project):
+//   CREATE TABLE IF NOT EXISTS sa_sent_estimates (
+//     estimate_id TEXT PRIMARY KEY,
+//     estimate_number TEXT,
+//     client_name TEXT,
+//     client_id TEXT,
+//     address TEXT,
+//     sales_rep TEXT,
+//     service_type TEXT,
+//     amount NUMERIC,
+//     quote_date DATE,
+//     first_seen_sent_at TIMESTAMPTZ DEFAULT NOW(),
+//     created_at TIMESTAMPTZ DEFAULT NOW()
+//   );
 
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getEstimateList, getEstimateLineItems } from './serviceautopilot.js';
 
-// ── Supabase ──────────────────────────────────────────────────────────────────
+// ── Supabase clients ──────────────────────────────────────────────────────────
 
 function fleetops() {
   return createClient(
@@ -35,7 +50,7 @@ function daysAgo(n) {
   return startOfDay(d);
 }
 
-function today()     { return startOfDay(new Date()); }
+function today() { return startOfDay(new Date()); }
 function yesterday() { return daysAgo(1); }
 
 function formatDate(d) {
@@ -51,7 +66,7 @@ function daysBetween(a, b) {
 // ── Formatting ────────────────────────────────────────────────────────────────
 
 function fmt$(amount) {
-  if (amount == null || isNaN(amount) || amount === 0) return '$0';
+  if (amount == null || isNaN(amount) || amount === 0) return '—';
   return '$' + Number(amount).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
 }
 
@@ -59,250 +74,189 @@ function totalOf(rows) {
   return rows.reduce((sum, r) => sum + (parseFloat(r.amount) || 0), 0);
 }
 
-// ── Job type categorization ───────────────────────────────────────────────────
-
-const JOB_TYPE_RULES = [
-  [/sealcoat|seal coat/i,           'Sealcoating'],
-  [/crack.?fill/i,                  'Crack Filling'],
-  [/asphalt|paving|\bpave\b|\br&r\b/i, 'Asphalt'],
-  [/concrete|curb|flatwork|sidewalk/i, 'Concrete'],
-  [/mulch|\bbed\b/i,                'Mulching'],
-  [/mosquito/i,                     'Mosquito Control'],
-  [/fertiliz|fert|lawn|application\s*\d|app\s*\d|\bfert\b/i, 'Lawn Care'],
-  [/landscape|grading|\bgrade\b/i,  'Landscaping'],
-  [/snow|ice.?melt|salting/i,       'Snow Removal'],
-];
-
-function categorizeJobType(text) {
-  const t = (text || '').toLowerCase();
-  for (const [re, cat] of JOB_TYPE_RULES) {
-    if (re.test(t)) return cat;
-  }
-  return 'Other';
-}
-
 // ── SA field extraction ───────────────────────────────────────────────────────
-// V2EstimateList_Query uses PascalCase; fall back across common variants.
+// V2EstimateList_Query BFF uses PascalCase fields; fall back across common variants.
 
 function extractEstimate(e) {
   const amount = parseFloat(
-    e.TotalAmount ?? e.TotalPrice ?? e.Total ?? e.Amount ?? 0
+    e.TotalAmount ?? e.Total ?? e.Amount ?? e.TotalPrice ??
+    e.QuoteTotal  ?? e.EstimateTotal ?? e.TotalCost ?? e.GrandTotal ?? 0
   );
   const quoteDate = e.QuoteDate
     ? new Date(e.QuoteDate.Year, e.QuoteDate.Month - 1, e.QuoteDate.Day)
     : null;
 
-  // Description is the estimate title; Service/ServiceType holds the category label
-  const serviceType = e.ServiceType || e.ServiceTypeName || e.ServiceName
-                   || e.Service || e.ServiceDescription || '';
-
   return {
     estimateId:   e.ID || e.QuoteID || e.EstimateID || '',
-    estimateNum:  e.EstimateNumber || e.QuoteNumber || '',
-    clientName:   e.CustomerName || e.ClientName || e.Client || '—',
-    clientId:     e.CustomerID   || e.ClientID   || '',
+    estimateNum:  e.EstimateNumber || e.QuoteNumber || e.Number || '',
+    clientName:   e.CustomerName  || e.ClientName  || e.Client || '—',
+    clientId:     e.CustomerID    || e.ClientID    || '',
     address:      [e.Address, e.City, e.State].filter(Boolean).join(', ') || '—',
-    salesRep:     e.SalesRepName || e.SalesRep || e.AssignedTo || '—',
-    serviceType,
-    amount:       isNaN(amount) ? 0 : amount,
+    salesRep:     e.SalesRepName  || e.SalesRep    || e.AssignedTo || '—',
+    serviceType:  e.Service || e.ServiceDescription || e.Description || e.ServiceType || '—',
+    amount,
     stage:        e.QuoteStageType || e.Stage || '',
     quoteDate,
     quoteDateStr: quoteDate ? isoDate(quoteDate) : null,
-    // Preserve the raw object for diagnosing unknown field names
-    _raw: e,
   };
 }
 
-// ── Section 1: Today's dispatch ───────────────────────────────────────────────
-
-async function getTodayJobs() {
-  const db = fleetops();
-  const todayStr = isoDate(today());
-  const { data, error } = await db
-    .from('sa_jobs')
-    .select('client, address, city, service, assigned, sales_rep, amount, status, start_time, start_date')
-    .eq('start_date', todayStr)
-    .order('start_time', { ascending: true, nullsFirst: false });
-
-  if (error) {
-    logger.warn('overnight-report: sa_jobs query error', { error: error.message });
-    return [];
-  }
-  return data || [];
-}
-
-// ── Section 2 & 3: Won estimate tracking ─────────────────────────────────────
-// Queries Won estimates from last 730 days. New estimates with QuoteDate
-// within 30 days are treated as genuinely recent (seeded=false). Older first-
-// time records are marked seeded=true so they don't flood the "accepted
-// yesterday" section on first-ever run.
+// ── Section 1 & 2: Won estimate tracking ─────────────────────────────────────
+// Fetches ALL Won estimates from SA (no date limit — fixes estimates won yesterday
+// but created months ago).  Upserts to sa_accepted_estimates; first_seen_at is
+// preserved on conflict so we can detect "newly won yesterday".
+// Returns { acceptedYesterday (with lineItems), outstanding (Won but not on WL/dispatch) }
 
 async function syncWonEstimates() {
+  const db = fleetops();
+  const now = new Date();
+
+  // Fetch ALL Won estimates — no date filter so we catch old quotes won recently
+  const raw = await getEstimateList({ stages: ['Won'], max: 2000 });
+  const estimates = raw.map(extractEstimate).filter(e => e.estimateId);
+  logger.info('overnight-report: Won estimates from SA', { count: estimates.length });
+
+  if (estimates.length > 0) {
+    const rows = estimates.map(e => ({
+      estimate_id:     e.estimateId,
+      estimate_number: e.estimateNum,
+      client_name:     e.clientName,
+      client_id:       e.clientId,
+      address:         e.address,
+      sales_rep:       e.salesRep,
+      service_type:    e.serviceType,
+      amount:          e.amount || null,
+      quote_date:      e.quoteDateStr,
+    }));
+
+    // Upsert — ignoreDuplicates preserves first_seen_at for existing rows
+    const { error: upsertErr } = await db
+      .from('sa_accepted_estimates')
+      .upsert(rows, { onConflict: 'estimate_id', ignoreDuplicates: true });
+    if (upsertErr) logger.warn('overnight-report: sa_accepted_estimates upsert error', { error: upsertErr.message });
+
+    // Cleanup: remove rows no longer in SA's Won list (lost/cancelled estimates)
+    // This also purges any stale non-Won entries left from before this fix.
+    const currentWonIds = estimates.map(e => e.estimateId);
+    const { data: allTracked } = await db.from('sa_accepted_estimates').select('estimate_id');
+    const toDelete = (allTracked || [])
+      .map(r => r.estimate_id)
+      .filter(id => !currentWonIds.includes(id));
+    if (toDelete.length > 0) {
+      await db.from('sa_accepted_estimates').delete().in('estimate_id', toDelete);
+      logger.info('overnight-report: cleaned stale sa_accepted_estimates', { removed: toDelete.length });
+    }
+  }
+
+  // Section 1: estimates first seen in Won stage yesterday — these are newly won
+  const { data: newYesterday } = await db
+    .from('sa_accepted_estimates')
+    .select('*')
+    .gte('first_seen_at', yesterday().toISOString())
+    .lt('first_seen_at', today().toISOString())
+    .order('client_name');
+
+  // Fetch line items for each newly-won estimate (calls SA once per estimate)
+  const acceptedYesterday = [];
+  for (const est of (newYesterday || [])) {
+    let lineItems = [];
+    try {
+      lineItems = await getEstimateLineItems(est.estimate_id);
+    } catch (err) {
+      logger.warn('overnight-report: line item fetch failed', { id: est.estimate_id, err: err.message });
+    }
+    acceptedYesterday.push({ ...est, lineItems });
+  }
+
+  // Section 2: live comparison — Won estimates whose client is NOT on WL or upcoming dispatch
+  const { data: wlRows }  = await db.from('sa_waiting_list').select('client_id').not('client_id', 'is', null);
+  const { data: dispRows } = await db.from('sa_jobs').select('customer_id').gte('start_date', isoDate(today())).not('customer_id', 'is', null);
+
+  const coveredClientIds = new Set([
+    ...(wlRows  || []).map(r => r.client_id),
+    ...(dispRows || []).map(r => r.customer_id),
+  ]);
+
+  // Also join first_seen_at from sa_accepted_estimates for "days since won"
+  const { data: trackedRows } = await db.from('sa_accepted_estimates').select('estimate_id, first_seen_at');
+  const trackedMap = new Map((trackedRows || []).map(r => [r.estimate_id, r.first_seen_at]));
+
+  const outstanding = estimates
+    .filter(e => e.clientId && !coveredClientIds.has(e.clientId))
+    .map(e => ({ ...e, first_seen_at: trackedMap.get(e.estimateId) || null }))
+    .sort((a, b) => (a.clientName || '').localeCompare(b.clientName || ''));
+
+  return { acceptedYesterday, outstanding };
+}
+
+// ── Section 3: Estimates sent yesterday ──────────────────────────────────────
+// Uses sa_sent_estimates table to track first_seen_at in Sent stage (fixes the
+// QuoteDate vs. send-date mismatch in the old approach).
+// Falls back gracefully if the table doesn't exist yet.
+
+async function syncSentEstimates() {
   const db  = fleetops();
   const now = new Date();
 
-  const raw = await getEstimateList({
-    dateFrom: daysAgo(730),
-    dateTo:   now,
-    stages:   ['Won'],
-    max:      2000,
-  });
-
+  // Fetch all current Sent estimates from SA (no date filter)
+  const raw = await getEstimateList({ stages: ['Sent'], max: 2000 });
   const estimates = raw.map(extractEstimate).filter(e => e.estimateId);
-  logger.info('overnight-report: fetched Won estimates', { count: estimates.length });
+  logger.info('overnight-report: Sent estimates from SA', { count: estimates.length });
 
-  if (estimates.length > 0) {
-    // Find which estimate IDs are already in the DB
-    const { data: existing } = await db
-      .from('sa_accepted_estimates')
-      .select('estimate_id');
-    const existingIds = new Set((existing || []).map(r => r.estimate_id));
+  if (estimates.length === 0) return [];
 
-    const newEstimates = estimates.filter(e => !existingIds.has(e.estimateId));
-    logger.info('overnight-report: new Won estimates to insert', { count: newEstimates.length });
+  const rows = estimates.map(e => ({
+    estimate_id:     e.estimateId,
+    estimate_number: e.estimateNum,
+    client_name:     e.clientName,
+    client_id:       e.clientId,
+    address:         e.address,
+    sales_rep:       e.salesRep,
+    service_type:    e.serviceType,
+    amount:          e.amount || null,
+    quote_date:      e.quoteDateStr,
+  }));
 
-    if (newEstimates.length > 0) {
-      // Estimates whose QuoteDate is within 30 days are likely recently accepted.
-      // Older ones were Won before we started tracking → mark seeded so they don't
-      // show as "accepted yesterday."
-      const thirtyDaysAgo = daysAgo(30);
-
-      const rows = newEstimates.map(e => {
-        const isRecent = e.quoteDate && e.quoteDate >= thirtyDaysAgo;
-        return {
-          estimate_id:     e.estimateId,
-          estimate_number: e.estimateNum,
-          client_name:     e.clientName,
-          client_id:       e.clientId,
-          address:         e.address,
-          sales_rep:       e.salesRep,
-          service_type:    e.serviceType || '—',
-          amount:          e.amount || null,
-          quote_date:      e.quoteDateStr,
-          seeded:          !isRecent,
-          // Old estimates get a historical first_seen_at so they never surface in
-          // the date-windowed "accepted yesterday" query.
-          first_seen_at:   isRecent ? now.toISOString() : '2020-01-01T00:00:00.000Z',
-        };
-      });
-
-      const { error } = await db
-        .from('sa_accepted_estimates')
-        .upsert(rows, { onConflict: 'estimate_id', ignoreDuplicates: true });
-      if (error) logger.warn('overnight-report: upsert error', { error: error.message });
-
-      // For recently-Won estimates, fetch QueryLineItems for accurate amount + service names.
-      // Cap at 20 to limit Puppeteer API calls per run.
-      const recentNew = newEstimates
-        .filter(e => e.quoteDate && e.quoteDate >= thirtyDaysAgo)
-        .slice(0, 20);
-
-      for (const est of recentNew) {
-        try {
-          const detail = await getEstimateLineItems(est.estimateId);
-          if (detail) {
-            await db.from('sa_accepted_estimates')
-              .update({
-                amount:       detail.total > 0 ? detail.total : (est.amount || null),
-                service_type: detail.services.length > 0 ? detail.services.join(', ') : (est.serviceType || '—'),
-              })
-              .eq('estimate_id', est.estimateId);
-          }
-        } catch (err) {
-          logger.warn('overnight-report: line items fetch failed', {
-            estimateId: est.estimateId,
-            err: err.message,
-          });
-        }
-      }
+  try {
+    // Upsert — ignoreDuplicates preserves first_seen_sent_at for existing rows
+    const { error } = await db
+      .from('sa_sent_estimates')
+      .upsert(rows, { onConflict: 'estimate_id', ignoreDuplicates: true });
+    if (error) {
+      logger.warn('overnight-report: sa_sent_estimates upsert error', { error: error.message });
+      return [];
     }
-  }
 
-  // Auto-resolve outstanding items that now appear in sa_waiting_list
-  const { data: outstanding } = await db
-    .from('sa_accepted_estimates')
-    .select('estimate_id, client_id')
-    .is('resolved_at', null)
-    .eq('seeded', false);
-
-  if (outstanding?.length > 0) {
-    const clientIds = [...new Set(outstanding.map(r => r.client_id).filter(Boolean))];
-    if (clientIds.length > 0) {
-      const { data: onWL } = await db
-        .from('sa_waiting_list')
-        .select('client_id')
-        .in('client_id', clientIds);
-      const onWLSet = new Set((onWL || []).map(r => r.client_id));
-      for (const row of outstanding) {
-        if (onWLSet.has(row.client_id)) {
-          await db.from('sa_accepted_estimates')
-            .update({ resolved_at: now.toISOString(), resolved_reason: 'found_on_waiting_list' })
-            .eq('estimate_id', row.estimate_id);
-        }
-      }
+    // Cleanup: remove estimates no longer in Sent stage
+    const currentSentIds = estimates.map(e => e.estimateId);
+    const { data: allTracked } = await db.from('sa_sent_estimates').select('estimate_id');
+    const toDelete = (allTracked || []).map(r => r.estimate_id).filter(id => !currentSentIds.includes(id));
+    if (toDelete.length > 0) {
+      await db.from('sa_sent_estimates').delete().in('estimate_id', toDelete);
     }
+
+    // Return estimates first seen in Sent stage yesterday
+    const { data: sentYesterday } = await db
+      .from('sa_sent_estimates')
+      .select('*')
+      .gte('first_seen_sent_at', yesterday().toISOString())
+      .lt('first_seen_sent_at', today().toISOString())
+      .order('sales_rep')
+      .order('client_name');
+
+    return sentYesterday || [];
+  } catch (err) {
+    // Table doesn't exist yet — return empty and log instructions
+    logger.warn('overnight-report: sa_sent_estimates table missing — create it per PR notes', { err: err.message });
+    return [];
   }
-
-  // "Accepted yesterday" = seeded=false, first_seen_at in [yesterday midnight, today midnight)
-  const { data: acceptedYesterday } = await db
-    .from('sa_accepted_estimates')
-    .select('*')
-    .eq('seeded', false)
-    .gte('first_seen_at', yesterday().toISOString())
-    .lt('first_seen_at', today().toISOString())
-    .order('amount', { ascending: false });
-
-  // "Outstanding" = seeded=false, resolved_at IS NULL
-  const { data: stillOutstanding } = await db
-    .from('sa_accepted_estimates')
-    .select('*')
-    .eq('seeded', false)
-    .is('resolved_at', null)
-    .order('first_seen_at', { ascending: false });
-
-  return {
-    acceptedYesterday: acceptedYesterday || [],
-    outstanding:       stillOutstanding  || [],
-  };
 }
 
-// ── Section 4: Estimates sent recently ───────────────────────────────────────
-// SA's V2EstimateList_Query date filter operates on QuoteDate (creation date),
-// not on the date the estimate was emailed. Broadening to 2 days captures
-// same-day create-and-send workflows. SentDate is checked if present.
-
-async function getEstimatesSentYesterday() {
-  const raw = await getEstimateList({
-    dateFrom: daysAgo(2),
-    dateTo:   new Date(),
-    stages:   ['Sent'],
-    max:      200,
-  });
-  const estimates = raw.map(extractEstimate).filter(e => e.estimateId);
-
-  // If the response includes a SentDate field, filter to yesterday only.
-  // Otherwise fall through and show all returned (last 2 days).
-  const firstRaw = raw[0] || {};
-  const hasSentDate = 'SentDate' in firstRaw || 'EmailedDate' in firstRaw || 'StatusDate' in firstRaw;
-  if (hasSentDate) {
-    const yd = yesterday();
-    const td = today();
-    return estimates.filter(e => {
-      const sd = e._raw.SentDate || e._raw.EmailedDate || e._raw.StatusDate;
-      if (!sd) return false;
-      const d = new Date(sd);
-      return d >= yd && d < td;
-    }).sort((a, b) => b.amount - a.amount);
-  }
-
-  return estimates.sort((a, b) => b.amount - a.amount);
-}
-
-// ── Section 5: Aging estimates ────────────────────────────────────────────────
+// ── Section 4: Aging estimates ────────────────────────────────────────────────
 
 async function getAgingEstimates() {
   const raw = await getEstimateList({
-    dateFrom: daysAgo(90),
+    dateFrom: daysAgo(60),
     dateTo:   daysAgo(7),
     stages:   ['Sent'],
     max:      200,
@@ -314,10 +268,36 @@ async function getAgingEstimates() {
       ...e,
       daysOut: e.quoteDate ? daysBetween(e.quoteDate, new Date()) : null,
     }))
-    .sort((a, b) => (b.daysOut || 0) - (a.daysOut || 0));
+    .sort((a, b) => b.amount - a.amount);
 }
 
-// ── HTML helpers ──────────────────────────────────────────────────────────────
+// ── Section 5: Today's dispatch ───────────────────────────────────────────────
+
+async function getTodayJobs() {
+  const db = fleetops();
+  const todayStr = isoDate(today());
+  const { data, error } = await db
+    .from('sa_jobs')
+    .select('id, client, address, service, assigned, amount, status')
+    .eq('start_date', todayStr)
+    .order('assigned', { nullsFirst: false })
+    .order('client');
+
+  if (error) {
+    logger.warn('overnight-report: sa_jobs query error', { error: error.message });
+    return [];
+  }
+
+  // Deduplicate by job id (same job may appear twice from sync overlap)
+  const seen = new Set();
+  return (data || []).filter(r => {
+    if (!r.id || seen.has(r.id)) return false;
+    seen.add(r.id);
+    return true;
+  });
+}
+
+// ── HTML builders ─────────────────────────────────────────────────────────────
 
 const CSS = `
   body { font-family: Segoe UI, Arial, sans-serif; font-size: 14px; color: #1a1a1a; margin: 0; padding: 0; background: #f4f4f4; }
@@ -328,9 +308,6 @@ const CSS = `
   .section { padding: 16px 24px; border-bottom: 1px solid #eee; }
   .section:last-child { border-bottom: none; }
   .section-title { font-size: 13px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: #555; margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
-  .group-header { font-size: 12px; font-weight: 700; color: #1a3a5c; text-transform: uppercase; letter-spacing: .4px; padding: 8px 0 4px; border-top: 1px solid #dde3ea; margin-top: 8px; }
-  .group-header:first-child { border-top: none; margin-top: 0; }
-  .crew-header { font-size: 13px; font-weight: 700; color: #fff; background: #1a3a5c; padding: 5px 8px; margin-bottom: 0; }
   .badge { background: #1a3a5c; color: #fff; border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600; }
   .badge.orange { background: #e07b00; }
   .badge.green  { background: #1a7a3c; }
@@ -341,123 +318,222 @@ const CSS = `
   tr:last-child td { border-bottom: none; }
   .amount { text-align: right; font-weight: 600; white-space: nowrap; }
   .days  { color: #888; font-size: 12px; }
-  .sub  { font-size: 12px; color: #555; }
   .total-row td { font-weight: 700; background: #f8f9fa; border-top: 2px solid #dde3ea; }
   .empty { color: #888; font-size: 13px; padding: 6px 0; }
   .summary-box { background: #f0f4f8; border-radius: 4px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px; }
   .summary-box strong { font-size: 15px; }
+  .group-header td { background: #e8eef5; font-weight: 700; font-size: 13px; border-top: 2px solid #c4d0de; color: #1a3a5c; }
+  .group-subtotal td { background: #f4f7fb; font-weight: 600; font-size: 12px; color: #444; border-top: 1px solid #dde3ea; }
+  .est-header td { background: #f0f7f0; font-weight: 700; font-size: 13px; border-top: 2px solid #b8d8b8; }
+  .line-item td { font-size: 12px; color: #333; }
+  .line-item td:first-child { padding-left: 24px; }
   .footer { background: #f8f9fa; padding: 10px 24px; font-size: 11px; color: #888; text-align: center; }
 `;
 
-// ── Dispatch table: grouped by crew, sorted by start_time ────────────────────
+// Section 1: Won estimates with line items, grouped per estimate
+function wonEstimatesHtml(estimates) {
+  if (!estimates.length) return '<p class="empty">None.</p>';
 
-function dispatchSection(jobs) {
-  if (!jobs.length) return '<p class="empty">Nothing scheduled for today.</p>';
+  let html = `<table>
+    <thead><tr>
+      <th>Client / Service</th>
+      <th>Estimator</th>
+      <th>Est #</th>
+      <th style="text-align:right">Amount</th>
+    </tr></thead><tbody>`;
 
-  // Group by crew
-  const crewMap = new Map();
-  for (const j of jobs) {
-    const crew = j.assigned || 'Unassigned';
-    if (!crewMap.has(crew)) crewMap.set(crew, []);
-    crewMap.get(crew).push(j);
-  }
-  const crews = [...crewMap.entries()].sort(([a], [b]) => {
-    if (a === 'Unassigned') return 1;
-    if (b === 'Unassigned') return -1;
-    return a.localeCompare(b);
-  });
+  let grandTotal = 0;
+  for (const est of estimates) {
+    const estTotal = est.lineItems && est.lineItems.length > 0
+      ? est.lineItems.reduce((s, li) => s + (li.amount || 0), 0)
+      : (parseFloat(est.amount) || 0);
+    grandTotal += estTotal;
 
-  let html = '';
-  for (const [crew, crewJobs] of crews) {
-    const crewTotal = crewJobs.reduce((s, j) => s + (parseFloat(j.amount) || 0), 0);
-    html += `<div class="crew-header">${crew} &mdash; ${crewJobs.length} job${crewJobs.length !== 1 ? 's' : ''} &mdash; ${fmt$(crewTotal)}</div>`;
-    html += `<table>
-      <thead><tr>
-        <th>Client</th><th>Address</th><th>Service</th>
-        <th>Time</th><th style="text-align:right">Amount</th>
-      </tr></thead><tbody>`;
-    for (const j of crewJobs) {
-      const addr = [j.address, j.city].filter(Boolean).join(', ') || '—';
-      const time = j.start_time ? j.start_time.slice(0, 5) : '—';
-      html += `<tr>
-        <td>${j.client || '—'}</td>
-        <td class="sub">${addr}</td>
-        <td>${j.service || '—'}</td>
-        <td class="days">${time}</td>
-        <td class="amount">${fmt$(j.amount)}</td>
+    html += `<tr class="est-header">
+      <td>${est.client_name || '—'}</td>
+      <td>${est.sales_rep || '—'}</td>
+      <td>${est.estimate_number || '—'}</td>
+      <td class="amount">${fmt$(estTotal)}</td>
+    </tr>`;
+
+    if (est.lineItems && est.lineItems.length > 0) {
+      for (const li of est.lineItems) {
+        html += `<tr class="line-item">
+          <td>${li.name}</td>
+          <td></td><td></td>
+          <td class="amount">${fmt$(li.amount)}</td>
+        </tr>`;
+      }
+    } else {
+      // Fall back to the estimate's primary service when line items unavailable
+      html += `<tr class="line-item">
+        <td>${est.service_type || '—'}</td>
+        <td></td><td></td>
+        <td class="amount">${fmt$(est.amount)}</td>
       </tr>`;
     }
-    html += '</tbody></table>';
   }
+
+  html += `<tr class="total-row">
+    <td colspan="3" style="text-align:right;padding-right:8px">Total</td>
+    <td class="amount">${fmt$(grandTotal)}</td>
+  </tr></tbody></table>`;
+
   return html;
 }
 
-// ── Estimate table: grouped by a key (job type or estimator) ─────────────────
+// Section 2: Outstanding Won estimates not yet on WL or dispatch
+function outstandingEstimatesHtml(estimates) {
+  if (!estimates.length) return '<p class="empty">All Won estimates are accounted for on the waiting list or dispatch board.</p>';
 
-function groupedEstimateTable(rows, groupFn, extraColLabel, extraColValue) {
-  if (!rows.length) return '<p class="empty">None.</p>';
-
-  const groups = new Map();
-  for (const r of rows) {
-    const key = groupFn(r) || 'Other';
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(r);
-  }
-
-  let html = '';
-  for (const [group, items] of [...groups.entries()].sort()) {
-    const groupTotal = totalOf(items);
-    html += `<div class="group-header">${group} &mdash; ${items.length} estimate${items.length !== 1 ? 's' : ''} &mdash; ${fmt$(groupTotal)}</div>`;
-    html += `<table><thead><tr>
-      <th>Client</th><th>Address</th><th>Estimator</th><th>Job Type</th>
-      ${extraColLabel ? `<th>${extraColLabel}</th>` : ''}
+  let html = `<table>
+    <thead><tr>
+      <th>Client</th>
+      <th>Estimator</th>
+      <th>Primary Service</th>
+      <th>Days Since Won</th>
       <th style="text-align:right">Amount</th>
     </tr></thead><tbody>`;
-    for (const r of items) {
+
+  for (const e of estimates) {
+    const daysSince = e.first_seen_at ? daysBetween(new Date(e.first_seen_at), new Date()) : null;
+    html += `<tr>
+      <td>${e.clientName || e.client_name || '—'}</td>
+      <td>${e.salesRep || e.sales_rep || '—'}</td>
+      <td style="font-size:12px;color:#555">${e.serviceType || e.service_type || '—'}</td>
+      <td class="days">${daysSince != null ? `${daysSince}d` : '—'}</td>
+      <td class="amount">${fmt$(e.amount)}</td>
+    </tr>`;
+  }
+
+  const total = estimates.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+  html += `<tr class="total-row">
+    <td colspan="4" style="text-align:right;padding-right:8px">Total</td>
+    <td class="amount">${fmt$(total)}</td>
+  </tr></tbody></table>`;
+
+  return html;
+}
+
+// Section 3: Sent estimates grouped by estimator
+function sentEstimatesHtml(estimates) {
+  if (!estimates.length) return '<p class="empty">None.</p>';
+
+  // Group by sales_rep
+  const byRep = new Map();
+  for (const e of estimates) {
+    const rep = e.sales_rep || '(Unassigned)';
+    if (!byRep.has(rep)) byRep.set(rep, []);
+    byRep.get(rep).push(e);
+  }
+
+  let html = `<table>
+    <thead><tr>
+      <th>Client</th>
+      <th>Job Type</th>
+      <th style="text-align:right">Amount</th>
+    </tr></thead><tbody>`;
+
+  for (const [rep, rows] of byRep) {
+    const repTotal = totalOf(rows);
+    html += `<tr class="group-header">
+      <td colspan="2">${rep} &mdash; ${rows.length} estimate${rows.length !== 1 ? 's' : ''}</td>
+      <td class="amount">${fmt$(repTotal)}</td>
+    </tr>`;
+    for (const r of rows) {
       html += `<tr>
-        <td>${r.client_name || r.clientName || '—'}</td>
-        <td class="sub">${r.address || '—'}</td>
-        <td>${r.sales_rep || r.salesRep || '—'}</td>
-        <td>${r.service_type || r.serviceType || '—'}</td>
-        ${extraColLabel ? `<td class="days">${extraColValue(r)}</td>` : ''}
+        <td>${r.client_name || '—'}</td>
+        <td style="font-size:12px;color:#555">${r.service_type || '—'}</td>
         <td class="amount">${fmt$(r.amount)}</td>
       </tr>`;
     }
-    const colspan = extraColLabel ? 5 : 4;
-    html += `<tr class="total-row">
-      <td colspan="${colspan}" style="text-align:right;padding-right:8px">Subtotal</td>
-      <td class="amount">${fmt$(groupTotal)}</td>
-    </tr>`;
-    html += '</tbody></table>';
   }
+
+  const grand = totalOf(estimates);
+  html += `<tr class="total-row">
+    <td colspan="2" style="text-align:right;padding-right:8px">Total</td>
+    <td class="amount">${fmt$(grand)}</td>
+  </tr></tbody></table>`;
+
   return html;
 }
 
-// Simple flat estimate table (for accepted yesterday — no grouping needed)
-function estimateTable(rows, extraColLabel, extraColValue) {
+// Section 5: Dispatch grouped by crew with subtotals
+function dispatchByCrewHtml(jobs) {
+  if (!jobs.length) return '<p class="empty">Nothing scheduled for today.</p>';
+
+  // Group by assigned crew (null → "Unassigned")
+  const byCrew = new Map();
+  for (const j of jobs) {
+    const crew = j.assigned || 'Unassigned';
+    if (!byCrew.has(crew)) byCrew.set(crew, []);
+    byCrew.get(crew).push(j);
+  }
+
+  const grandTotal = jobs.reduce((s, j) => s + (parseFloat(j.amount) || 0), 0);
+
+  let html = `<table>
+    <thead><tr>
+      <th>Client</th>
+      <th>Address</th>
+      <th>Service</th>
+      <th style="text-align:right">Amount</th>
+    </tr></thead><tbody>`;
+
+  for (const [crew, rows] of byCrew) {
+    const crewTotal = rows.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+    html += `<tr class="group-header">
+      <td colspan="3">${crew} &mdash; ${rows.length} job${rows.length !== 1 ? 's' : ''}</td>
+      <td class="amount">${fmt$(crewTotal)}</td>
+    </tr>`;
+    for (const r of rows) {
+      html += `<tr>
+        <td>${r.client || '—'}</td>
+        <td style="font-size:12px;color:#555">${r.address || '—'}</td>
+        <td>${r.service || '—'}</td>
+        <td class="amount">${fmt$(r.amount)}</td>
+      </tr>`;
+    }
+    html += `<tr class="group-subtotal">
+      <td colspan="3" style="text-align:right;padding-right:8px">${crew} subtotal</td>
+      <td class="amount">${fmt$(crewTotal)}</td>
+    </tr>`;
+  }
+
+  html += `<tr class="total-row">
+    <td colspan="3" style="text-align:right;padding-right:8px">Total</td>
+    <td class="amount">${fmt$(grandTotal)}</td>
+  </tr></tbody></table>`;
+
+  return html;
+}
+
+// Section 4: Aging estimates table (unchanged layout)
+function agingEstimatesHtml(rows) {
   if (!rows.length) return '<p class="empty">None.</p>';
-  let html = `<table><thead><tr>
-    <th>Client</th><th>Address</th><th>Estimator</th><th>Job Type</th>
-    ${extraColLabel ? `<th>${extraColLabel}</th>` : ''}
-    <th style="text-align:right">Amount</th>
-  </tr></thead><tbody>`;
+  let html = `<table>
+    <thead><tr>
+      <th>Client</th>
+      <th>Address</th>
+      <th>Estimator</th>
+      <th>Job Type</th>
+      <th>Days Out</th>
+      <th style="text-align:right">Amount</th>
+    </tr></thead><tbody>`;
   for (const r of rows) {
     html += `<tr>
-      <td>${r.client_name || r.clientName || '—'}</td>
-      <td class="sub">${r.address || '—'}</td>
-      <td>${r.sales_rep || r.salesRep || '—'}</td>
-      <td>${r.service_type || r.serviceType || '—'}</td>
-      ${extraColLabel ? `<td class="days">${extraColValue(r)}</td>` : ''}
+      <td>${r.clientName || '—'}</td>
+      <td style="font-size:12px;color:#555">${r.address || '—'}</td>
+      <td>${r.salesRep || '—'}</td>
+      <td>${r.serviceType || '—'}</td>
+      <td class="days">${r.daysOut != null ? `${r.daysOut}d` : '—'}</td>
       <td class="amount">${fmt$(r.amount)}</td>
     </tr>`;
   }
-  const total   = totalOf(rows);
-  const colspan = extraColLabel ? 5 : 4;
   html += `<tr class="total-row">
-    <td colspan="${colspan}" style="text-align:right;padding-right:8px">Total</td>
-    <td class="amount">${fmt$(total)}</td>
-  </tr>`;
-  html += '</tbody></table>';
+    <td colspan="5" style="text-align:right;padding-right:8px">Total</td>
+    <td class="amount">${fmt$(totalOf(rows))}</td>
+  </tr></tbody></table>`;
   return html;
 }
 
@@ -466,30 +542,33 @@ function estimateTable(rows, extraColLabel, extraColValue) {
 export async function generateOvernightReport() {
   logger.info('overnight-report: starting');
 
-  const [wonResult, sentResult, agingResult, dispatchResult] = await Promise.allSettled([
+  const [wonResult, sentResult, agingResult, jobsResult] = await Promise.allSettled([
     syncWonEstimates(),
-    getEstimatesSentYesterday(),
+    syncSentEstimates(),
     getAgingEstimates(),
     getTodayJobs(),
   ]);
 
   const { acceptedYesterday = [], outstanding = [] } =
     wonResult.status === 'fulfilled' ? wonResult.value : {};
-  const sent    = sentResult.status === 'fulfilled'    ? sentResult.value    : [];
-  const aging   = agingResult.status === 'fulfilled'   ? agingResult.value   : [];
-  const todayQ  = dispatchResult.status === 'fulfilled' ? dispatchResult.value : [];
+  const sentYesterday = sentResult.status === 'fulfilled'  ? sentResult.value : [];
+  const aging         = agingResult.status === 'fulfilled' ? agingResult.value : [];
+  const todayJobs     = jobsResult.status === 'fulfilled'  ? jobsResult.value : [];
 
   if (wonResult.status === 'rejected')
-    logger.error('overnight-report: won sync failed',     { err: wonResult.reason?.message });
+    logger.error('overnight-report: won sync failed',  { err: wonResult.reason?.message });
   if (sentResult.status === 'rejected')
-    logger.error('overnight-report: sent query failed',   { err: sentResult.reason?.message });
+    logger.error('overnight-report: sent sync failed', { err: sentResult.reason?.message });
   if (agingResult.status === 'rejected')
-    logger.error('overnight-report: aging query failed',  { err: agingResult.reason?.message });
-  if (dispatchResult.status === 'rejected')
-    logger.error('overnight-report: dispatch failed',     { err: dispatchResult.reason?.message });
+    logger.error('overnight-report: aging failed',     { err: agingResult.reason?.message });
+  if (jobsResult.status === 'rejected')
+    logger.error('overnight-report: jobs failed',      { err: jobsResult.reason?.message });
 
-  const dateLabel        = formatDate(yesterday());
-  const outstandingTotal = totalOf(outstanding);
+  const dateLabel      = formatDate(yesterday());
+  const outstandingTotal = outstanding.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
+
+  // Count unique crews for dispatch badge
+  const crewSet = new Set(todayJobs.map(j => j.assigned || 'Unassigned'));
 
   const html = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${CSS}</style></head><body>
 <div class="wrap">
@@ -499,25 +578,16 @@ export async function generateOvernightReport() {
     <p>${formatDate(new Date())} &mdash; Activity for ${dateLabel}</p>
   </div>
 
-  <!-- Section 1: Today's Dispatch -->
-  <div class="section">
-    <div class="section-title">
-      📅 Today's Dispatch
-      <span class="badge">${todayQ.length} job${todayQ.length !== 1 ? 's' : ''}</span>
-    </div>
-    ${dispatchSection(todayQ)}
-  </div>
-
-  <!-- Section 2: Jobs Accepted Yesterday -->
+  <!-- Section 1: Jobs Accepted Yesterday -->
   <div class="section">
     <div class="section-title">
       ✅ Jobs Accepted Yesterday
       <span class="badge green">${acceptedYesterday.length}</span>
     </div>
-    ${estimateTable(acceptedYesterday)}
+    ${wonEstimatesHtml(acceptedYesterday)}
   </div>
 
-  <!-- Section 3: Awaiting Waiting List — grouped by job type -->
+  <!-- Section 2: Won estimates not yet on WL or dispatch board -->
   <div class="section">
     <div class="section-title">
       ⏳ Accepted — Awaiting Waiting List
@@ -525,60 +595,51 @@ export async function generateOvernightReport() {
     </div>
     ${outstanding.length > 0
       ? `<div class="summary-box">
-           Total pipeline: <strong>${fmt$(outstandingTotal)}</strong> across ${outstanding.length} job${outstanding.length !== 1 ? 's' : ''}
+           <strong>${outstanding.length}</strong> won estimate${outstanding.length !== 1 ? 's' : ''} with no waiting-list or scheduled job &mdash; pipeline value: <strong>${fmt$(outstandingTotal)}</strong>
          </div>`
       : ''}
-    ${groupedEstimateTable(
-      outstanding,
-      r => categorizeJobType(r.service_type || r.serviceType || ''),
-      'Days Since Won',
-      r => {
-        const d = r.first_seen_at ? daysBetween(new Date(r.first_seen_at), new Date()) : null;
-        return d != null ? `${d}d` : '—';
-      },
-    )}
+    ${outstandingEstimatesHtml(outstanding)}
   </div>
 
-  <!-- Section 4: Estimates Sent Recently — grouped by estimator -->
+  <!-- Section 3: Estimates Sent Yesterday -->
   <div class="section">
     <div class="section-title">
       📝 Estimates Sent Yesterday
-      <span class="badge">${sent.length}</span>
+      <span class="badge">${sentYesterday.length}</span>
     </div>
-    ${groupedEstimateTable(
-      sent,
-      r => r.salesRep || '—',
-      null,
-      null,
-    )}
+    ${sentEstimatesHtml(sentYesterday)}
   </div>
 
-  <!-- Section 5: Aging Estimates — grouped by estimator -->
+  <!-- Section 4: Aging Estimates -->
   <div class="section">
     <div class="section-title">
       ⚠️ Aging Estimates — No Response (7+ days)
       <span class="badge red">${aging.length}</span>
     </div>
-    ${groupedEstimateTable(
-      aging,
-      r => r.salesRep || '—',
-      'Days Out',
-      r => r.daysOut != null ? `${r.daysOut}d` : '—',
-    )}
+    ${agingEstimatesHtml(aging)}
+  </div>
+
+  <!-- Section 5: Today's Dispatch -->
+  <div class="section">
+    <div class="section-title">
+      📅 Today's Dispatch
+      <span class="badge">${todayJobs.length} job${todayJobs.length !== 1 ? 's' : ''} &bull; ${crewSet.size} crew${crewSet.size !== 1 ? 's' : ''}</span>
+    </div>
+    ${dispatchByCrewHtml(todayJobs)}
   </div>
 
   <div class="footer">Sent by JRB Executive Assistant &mdash; ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })} CT</div>
 </div>
 </body></html>`;
 
-  const subject = `JRB Morning Report — ${dateLabel} | ${acceptedYesterday.length} accepted, ${outstanding.length} awaiting WL, ${todayQ.length} on dispatch`;
+  const subject = `JRB Morning Report — ${dateLabel} | ${acceptedYesterday.length} accepted, ${outstanding.length} awaiting WL, ${todayJobs.length} dispatched`;
 
   logger.info('overnight-report: complete', {
     accepted:    acceptedYesterday.length,
     outstanding: outstanding.length,
-    sent:        sent.length,
+    sent:        sentYesterday.length,
     aging:       aging.length,
-    todayJobs:   todayQ.length,
+    todayJobs:   todayJobs.length,
   });
 
   return { subject, body: html };
