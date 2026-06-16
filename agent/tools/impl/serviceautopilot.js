@@ -863,6 +863,29 @@ export async function updateEstimateNotes({ quoteId, updates = [] }) {
 }
 
 /**
+ * Fetch the service line items for an existing estimate.
+ * Returns [{ serviceId, name, amount, note }]
+ */
+export async function getEstimateLineItems(quoteId) {
+  const res = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
+    InputData: { ID: quoteId },
+  }, 'V3Estimate.aspx');
+  const items = res.data?.d?.Result?.ServiceLineItems || [];
+  return items.map(item => {
+    const svc = item.Service || item;
+    const rate = parseFloat(svc.Rate || 0);
+    const qty  = parseFloat(svc.Qty  || svc.Quantity || 1);
+    const amount = parseFloat(svc.TotalCost ?? svc.TotalAmount ?? svc.Amount ?? (rate * qty) ?? 0);
+    return {
+      serviceId: svc.ID || '',
+      name:      svc.Name || svc.ServiceName || svc.Description || '—',
+      amount,
+      note:      svc.EstimateNote || '',
+    };
+  });
+}
+
+/**
  * Schedule a waiting-list job from an estimate.
  * serviceIds: array of line-item service IDs to schedule (or omit to schedule all)
  * Returns { jobId, clientId, quoteId }
