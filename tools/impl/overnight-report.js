@@ -297,6 +297,25 @@ async function getTodayJobs() {
   });
 }
 
+async function getAssignedWaitingListJobs() {
+  const db = fleetops();
+  const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
+  const { data, error } = await db
+    .from('sa_waiting_list')
+    .select('job_id, client_name, address, service_code, assigned, amount, target_date')
+    .not('assigned', 'is', null)
+    .neq('assigned', '')
+    .neq('assigned', EMPTY_GUID)
+    .order('assigned')
+    .order('target_date', { nullsFirst: false })
+    .order('client_name');
+  if (error) {
+    logger.warn('overnight-report: sa_waiting_list query error', { error: error.message });
+    return [];
+  }
+  return data || [];
+}
+
 // ── HTML builders ─────────────────────────────────────────────────────────────
 
 const CSS = `
@@ -508,6 +527,49 @@ function dispatchByCrewHtml(jobs) {
   return html;
 }
 
+// Section 6: Waiting list grouped by assigned crew
+function waitingListByCrewHtml(jobs) {
+  if (!jobs.length) return '<p class="empty">No crew-assigned waiting list jobs. (Crew assignments sync nightly — will populate after next run.)</p>';
+
+  const byCrew = new Map();
+  for (const j of jobs) {
+    if (!byCrew.has(j.assigned)) byCrew.set(j.assigned, []);
+    byCrew.get(j.assigned).push(j);
+  }
+
+  const grandTotal = jobs.reduce((s, j) => s + (parseFloat(j.amount) || 0), 0);
+
+  let html = `<table>
+    <thead><tr>
+      <th>Client</th>
+      <th>Service</th>
+      <th>Target Date</th>
+      <th style="text-align:right">Amount</th>
+    </tr></thead><tbody>`;
+
+  for (const [crew, rows] of byCrew) {
+    const crewTotal = rows.reduce((s, r) => s + (parseFloat(r.amount) || 0), 0);
+    html += `<tr class="group-header">
+      <td colspan="3">${crew} &mdash; ${rows.length} job${rows.length !== 1 ? 's' : ''}</td>
+      <td class="amount">${fmt$(crewTotal)}</td>
+    </tr>`;
+    for (const r of rows) {
+      html += `<tr>
+        <td>${r.client_name || '—'}</td>
+        <td>${r.service_code || '—'}</td>
+        <td class="days">${r.target_date || '—'}</td>
+        <td class="amount">${fmt$(r.amount)}</td>
+      </tr>`;
+    }
+  }
+
+  html += `<tr class="total-row">
+    <td colspan="3" style="text-align:right;padding-right:8px">Total</td>
+    <td class="amount">${fmt$(grandTotal)}</td>
+  </tr></tbody></table>`;
+  return html;
+}
+
 // Section 4: Aging estimates table (unchanged layout)
 function agingEstimatesHtml(rows) {
   if (!rows.length) return '<p class="empty">None.</p>';
@@ -542,11 +604,12 @@ function agingEstimatesHtml(rows) {
 export async function generateOvernightReport() {
   logger.info('overnight-report: starting');
 
-  const [wonResult, sentResult, agingResult, jobsResult] = await Promise.allSettled([
+  const [wonResult, sentResult, agingResult, jobsResult, wlResult] = await Promise.allSettled([
     syncWonEstimates(),
     syncSentEstimates(),
     getAgingEstimates(),
     getTodayJobs(),
+    getAssignedWaitingListJobs(),
   ]);
 
   const { acceptedYesterday = [], outstanding = [] } =
@@ -554,6 +617,7 @@ export async function generateOvernightReport() {
   const sentYesterday = sentResult.status === 'fulfilled'  ? sentResult.value : [];
   const aging         = agingResult.status === 'fulfilled' ? agingResult.value : [];
   const todayJobs     = jobsResult.status === 'fulfilled'  ? jobsResult.value : [];
+  const wlJobs        = wlResult.status === 'fulfilled'    ? wlResult.value   : [];
 
   if (wonResult.status === 'rejected')
     logger.error('overnight-report: won sync failed',  { err: wonResult.reason?.message });
@@ -563,6 +627,8 @@ export async function generateOvernightReport() {
     logger.error('overnight-report: aging failed',     { err: agingResult.reason?.message });
   if (jobsResult.status === 'rejected')
     logger.error('overnight-report: jobs failed',      { err: jobsResult.reason?.message });
+  if (wlResult.status === 'rejected')
+    logger.error('overnight-report: wl jobs failed',   { err: wlResult.reason?.message });
 
   const dateLabel      = formatDate(yesterday());
   const outstandingTotal = outstanding.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
@@ -626,6 +692,15 @@ export async function generateOvernightReport() {
       <span class="badge">${todayJobs.length} job${todayJobs.length !== 1 ? 's' : ''} &bull; ${crewSet.size} crew${crewSet.size !== 1 ? 's' : ''}</span>
     </div>
     ${dispatchByCrewHtml(todayJobs)}
+  </div>
+
+  <!-- Section 6: Waiting List by Crew -->
+  <div class="section">
+    <div class="section-title">
+      📋 Waiting List by Crew
+      <span class="badge">${wlJobs.length} job${wlJobs.length !== 1 ? 's' : ''}</span>
+    </div>
+    ${waitingListByCrewHtml(wlJobs)}
   </div>
 
   <div class="footer">Sent by JRB Executive Assistant &mdash; ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })} CT</div>
