@@ -60,12 +60,16 @@ const SCHEDULED_TASKS = [
     // Sections 4 (AME mismatches) and 5 (unrecorded payments) in weekly-finance-report.js read
     // from audit_matches, qb_payments, sa_payments in Supabase — all populated by AME.
     // ame-run.ps1 injects its own credentials from Credential Manager; no env injection needed.
+    // Writes a lock file so weekly_finance_report can wait for AME to finish before running.
     schedule: '0 22 * * 6',
     name: 'ame_weekly_sync',
     run: () => new Promise((resolve, reject) => {
       const notify = (msg) => import('../teams/notify.js')
         .then(({ sendProactiveMessage }) => sendProactiveMessage(msg))
         .catch(() => {});
+
+      const ameLockFile = join(tmpdir(), 'ame-weekly-sync.lock');
+      writeFileSync(ameLockFile, String(Date.now()), 'utf8');
 
       const child = spawn('powershell.exe', [
         '-ExecutionPolicy', 'Bypass',
@@ -79,6 +83,7 @@ const SCHEDULED_TASKS = [
       child.stdout.on('data', d => { out += d; });
       child.stderr.on('data', d => { err += d; });
       child.on('close', code => {
+        try { unlinkSync(ameLockFile); } catch {}
         logger.info('ame_weekly_sync: complete', { code, output: out.slice(-2000) });
         if (err) logger.warn('ame_weekly_sync: stderr', { stderr: err.slice(-1000) });
         if (code !== 0) {
@@ -88,18 +93,59 @@ const SCHEDULED_TASKS = [
           resolve();
         }
       });
-      child.on('error', reject);
+      child.on('error', err => {
+        try { unlinkSync(ameLockFile); } catch {}
+        reject(err);
+      });
     }),
   },
   {
     // Sunday 6 AM — consolidated weekly finance report (Revenue, AR, Expenses, Reconciliation)
     // Replaces: weekly_crm_report, weekly_expense_report, weekly_audit_email
+    // Waits for AME to finish if still running at 6 AM — sends delay notification and polls.
     schedule: '0 6 * * 0',
     name: 'weekly_finance_report',
     run: async () => {
+      const ameLockFile = join(tmpdir(), 'ame-weekly-sync.lock');
+      let delayed = false;
+      let delayMinutes = 0;
+
+      if (existsSync(ameLockFile)) {
+        delayed = true;
+        const ameStartMs = Number(readFileSync(ameLockFile, 'utf8') || 0);
+        const runningMin = ameStartMs ? Math.round((Date.now() - ameStartMs) / 60000) : '?';
+        logger.info('weekly_finance_report: AME still running, sending delay notification', { runningMin });
+
+        try {
+          const { sendEmail } = await import('../tools/impl/m365.js');
+          await sendEmail({
+            to: ['michael@jrboehlke.com'],
+            subject: `Weekly Finance Report Delayed — AME sync still running`,
+            body: `<p style="font-family:Arial,sans-serif;">The weekly finance report is ready to run, but the AuditMatchingEngine sync started at 10 PM Saturday is still in progress (${runningMin} min elapsed).</p><p style="font-family:Arial,sans-serif;">The report will be sent automatically as soon as AME finishes. No action needed.</p>`,
+          });
+        } catch (e) {
+          logger.warn('weekly_finance_report: delay notification failed', { err: e.message });
+        }
+
+        // Poll every 2 min until lock gone, stale (>5h old), or 4h timeout
+        const pollStart = Date.now();
+        await new Promise(resolve => {
+          const iv = setInterval(() => {
+            if (!existsSync(ameLockFile)) { clearInterval(iv); resolve(); return; }
+            const lockAge = Date.now() - Number(readFileSync(ameLockFile, 'utf8') || 0);
+            if (lockAge > 5 * 60 * 60 * 1000 || Date.now() - pollStart > 4 * 60 * 60 * 1000) {
+              clearInterval(iv); resolve();
+            }
+          }, 2 * 60 * 1000);
+        });
+
+        delayMinutes = Math.round((Date.now() - pollStart) / 60000);
+        logger.info('weekly_finance_report: AME done (or timed out), proceeding', { delayMinutes });
+      }
+
       try {
         const { generateAndSendWeeklyFinanceReport } = await import('../tools/impl/weekly-finance-report.js');
-        const result = await generateAndSendWeeklyFinanceReport();
+        const result = await generateAndSendWeeklyFinanceReport({ delayed, delayMinutes });
         logger.info('weekly_finance_report: done', result);
       } catch (err) {
         logger.error('weekly_finance_report: FAILED', { err: err.message });
