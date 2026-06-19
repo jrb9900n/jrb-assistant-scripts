@@ -64,7 +64,7 @@ async function gatherAuditIssues() {
     .eq('status', 'open')
     .order('severity', { ascending: true })
     .order('last_seen_at', { ascending: false });
-  if (error) throw new Error(`Supabase audit query: ${error.message}`);
+  if (error) { logger.warn('audit issues query failed', { err: error.message }); return []; }
   return data ?? [];
 }
 
@@ -139,7 +139,7 @@ function alertBox(color, borderColor, title, rows) {
 
 // ── HTML email builder ──────────────────────────────────────────────────────
 
-function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, saPaymentTotals, unrecordedPayments }) {
+function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, saPaymentTotals, unrecordedPayments, delayed = false, delayMinutes = 0 }) {
   const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
   const totalAR        = arAging.total;
 
@@ -185,6 +185,11 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
 
 <!-- BODY -->
 <tr><td style="padding:28px 32px;">`;
+
+  if (delayed) {
+    html += alertBox('#e8f4e8', '#1a6e1a', `Report Delayed ${delayMinutes} Minutes`,
+      `<p style="margin:0;font-size:13px;color:#1a6e1a;">This report was delayed because the AuditMatchingEngine sync was still running at 6 AM. Sections 4 and 5 reflect the completed AME sync.</p>`);
+  }
 
   // ── Snapshot KPIs ──────────────────────────────────────────────────────────
   html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f4ff;border-radius:4px;margin-bottom:20px;">
@@ -602,7 +607,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
 
 // ── Main entry point ────────────────────────────────────────────────────────
 
-export async function generateAndSendWeeklyFinanceReport() {
+export async function generateAndSendWeeklyFinanceReport({ delayed = false, delayMinutes = 0 } = {}) {
   const { start, end, weekLabel, displayRange } = getPriorWeekRange();
   logger.info('weekly_finance_report: gathering data', { weekLabel, start, end });
 
@@ -630,12 +635,13 @@ export async function generateAndSendWeeklyFinanceReport() {
     unrecordedPayments: unrecordedPayments.length,
   });
 
-  const body = buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, saPaymentTotals, unrecordedPayments });
+  const body = buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, saPaymentTotals, unrecordedPayments, delayed, delayMinutes });
   const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
+  const delayNote = delayed ? ` (delayed ${delayMinutes}m — awaited AME)` : '';
 
   await sendEmail({
     to: ['michael@jrboehlke.com'],
-    subject: `Weekly Finance Report — ${weekLabel} | ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(totalCollected)} collected`,
+    subject: `Weekly Finance Report — ${weekLabel} | ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(totalCollected)} collected${delayNote}`,
     body,
   });
 

@@ -93,9 +93,9 @@ const SCHEDULED_TASKS = [
           resolve();
         }
       });
-      child.on('error', err => {
+      child.on('error', spawnErr => {
         try { unlinkSync(ameLockFile); } catch {}
-        reject(err);
+        reject(spawnErr);
       });
     }),
   },
@@ -132,10 +132,13 @@ const SCHEDULED_TASKS = [
         await new Promise(resolve => {
           const iv = setInterval(() => {
             if (!existsSync(ameLockFile)) { clearInterval(iv); resolve(); return; }
-            const lockAge = Date.now() - Number(readFileSync(ameLockFile, 'utf8') || 0);
-            if (lockAge > 5 * 60 * 60 * 1000 || Date.now() - pollStart > 4 * 60 * 60 * 1000) {
-              clearInterval(iv); resolve();
-            }
+            try {
+              const lockTs = Number(readFileSync(ameLockFile, 'utf8') || 0);
+              const lockAge = lockTs ? Date.now() - lockTs : 0;
+              if (lockAge > 5 * 60 * 60 * 1000 || Date.now() - pollStart > 4 * 60 * 60 * 1000) {
+                clearInterval(iv); resolve();
+              }
+            } catch { clearInterval(iv); resolve(); } // lock deleted between existsSync and readFileSync
           }, 2 * 60 * 1000);
         });
 
