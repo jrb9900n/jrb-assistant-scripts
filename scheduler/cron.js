@@ -77,36 +77,55 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Sunday 8 AM — BTA revenue package: full-year QB invoice pull, weekly RP tabs, budget summary
-    // Runs after weekly_finance_report (6 AM) to avoid token rotation race.
-    // Outputs: BTA Reporting\Output\weekly-rp-*.csv, weekly-rp-all-tabs-YYYY.json, budget-summary-YYYY.json
+    // Sunday 8 AM — full BTA weekly run: QB revenue package + SA pipeline + SP CSV output
+    // Runs after weekly_finance_report (6 AM) to avoid QB token rotation race.
+    // Scripts (sequential): rp-formatter.js → weekly-sync.js → sheets-formatter.js
+    // Outputs: weekly-rp-*.csv, weekly-sp-*.csv, sa-estimates/tickets/waiting-list JSON
     schedule: '0 8 * * 0',
     name: 'bta_weekly_report',
-    run: () => new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['rp-formatter.js'], {
-        cwd: 'C:\\Users\\Assistant\\BTA Reporting',
-        env: { ...process.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 600_000,
+    run: async () => {
+      const BTA = 'C:\\Users\\Assistant\\BTA Reporting';
+      const notify = (msg) => import('../teams/notify.js')
+        .then(({ sendProactiveMessage }) => sendProactiveMessage(msg))
+        .catch(() => {});
+
+      const runScript = (script, timeoutMs) => new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [script], {
+          cwd: BTA,
+          env: { ...process.env },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: timeoutMs,
+        });
+        let out = '', err = '';
+        child.stdout.on('data', d => { out += d; });
+        child.stderr.on('data', d => { err += d; });
+        child.on('close', code => {
+          logger.info(`bta_weekly_report:${script}`, { code, output: out.slice(-2000) });
+          if (err) logger.warn(`bta_weekly_report:${script} stderr`, { stderr: err.slice(-1000) });
+          if (code !== 0) reject(new Error(`${script} exited ${code}`));
+          else resolve();
+        });
+        child.on('error', reject);
       });
-      let out = '';
-      let err = '';
-      child.stdout.on('data', d => { out += d; });
-      child.stderr.on('data', d => { err += d; });
-      child.on('close', code => {
-        logger.info('bta_weekly_report complete', { code, output: out.slice(-2000) });
-        if (err) logger.warn('bta_weekly_report stderr', { stderr: err.slice(-1000) });
-        if (code !== 0) {
-          import('../teams/notify.js')
-            .then(({ sendProactiveMessage }) => sendProactiveMessage(`BTA Weekly Report FAILED (exit ${code}). Check logs.`))
-            .catch(() => {});
-          reject(new Error(`rp-formatter.js exited ${code}`));
-        } else {
-          resolve();
-        }
+
+      // Step 1: QB revenue package — failure is fatal
+      await runScript('rp-formatter.js', 600_000).catch(async (e) => {
+        await notify(`BTA Weekly Report FAILED — rp-formatter.js: ${e.message}`);
+        throw e;
       });
-      child.on('error', reject);
-    }),
+
+      // Step 2: SA pipeline — failure is non-fatal (logs + warns, but still run sheets-formatter)
+      await runScript('weekly-sync.js', 3_600_000).catch((e) => {
+        logger.warn('bta_weekly_report: weekly-sync.js failed (non-fatal)', { err: e.message });
+        notify(`BTA Weekly Report WARNING — weekly-sync.js: ${e.message}`);
+      });
+
+      // Step 3: SP CSV output from SA data — failure is non-fatal
+      await runScript('sheets-formatter.js', 120_000).catch((e) => {
+        logger.warn('bta_weekly_report: sheets-formatter.js failed (non-fatal)', { err: e.message });
+        notify(`BTA Weekly Report WARNING — sheets-formatter.js: ${e.message}`);
+      });
+    },
   },
   {
     // Sunday 11 PM — synthesize week's observations into reusable patterns
