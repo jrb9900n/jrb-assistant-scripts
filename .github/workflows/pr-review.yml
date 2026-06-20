@@ -108,8 +108,8 @@ jobs:
           with open('/tmp/safety-review.txt', 'w') as f:
               f.write(safety)
 
-          s = safety.lower()[:300]
-          q = quality.lower()[:300]
+          s = safety.strip().lower()[:300]
+          q = quality.strip().lower()[:300]
           has_safety_issues = not any(s.startswith(p) for p in [
               "no safety issues found", "no safety issues", "no issues found", "nothing significant"
           ])
@@ -126,7 +126,7 @@ jobs:
           echo "has_safety_issues=$(cat /tmp/has_safety_issues.txt)" >> $GITHUB_OUTPUT
 
       - name: Post review comment
-        if: steps.skip.outputs.skip == 'false'
+        if: steps.skip.outputs.skip == 'false' && steps.review.outputs.has_issues == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
@@ -144,7 +144,7 @@ jobs:
 
       - name: Auto-fix issues
         if: steps.skip.outputs.skip == 'false' && steps.review.outputs.has_safety_issues == 'true'
-        continue-on-error: true
+        id: autofix
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -253,12 +253,16 @@ jobs:
               print("No code fixes generated")
               sys.exit(0)
 
-          any_written = False
+          written_files = []
           for fix in tool_use["input"]["fixes"]:
               if not fix.get("path", "").strip():
                   continue
               if fix["path"] in truncated:
                   print(f"Skipping truncated file: {fix['path']}")
+                  continue
+              # Only allow fixes to files that were actually in the diff (prompt injection mitigation)
+              if fix["path"] not in changed:
+                  print(f"Skipping path not in diff: {fix['path']}")
                   continue
               dest = os.path.realpath(os.path.join(workspace, fix["path"]))
               try:
@@ -272,10 +276,11 @@ jobs:
               with open(dest, 'w', encoding='utf8') as f:
                   f.write(fix["content"])
               print(f"Fixed: {fix['path']}")
-              any_written = True
+              written_files.append(fix["path"])
 
-          if any_written:
+          if written_files:
               open('/tmp/fixes_applied.txt', 'w').write("yes")
+              open('/tmp/fixed_files.txt', 'w').write('\n'.join(written_files))
           PYEOF
           python3 /tmp/fixer.py
 
@@ -283,9 +288,9 @@ jobs:
             git config user.email "github-actions[bot]@users.noreply.github.com"
             git config user.name "github-actions[bot]"
             git remote set-url origin "https://x-access-token:$GITHUB_TOKEN@github.com/$REPO"
-            git add -A
+            xargs git add -- < /tmp/fixed_files.txt
             git diff --cached --quiet || git commit -m "[auto-fix] Applied suggested code fixes"
-            git push origin HEAD:$HEAD_REF
+            git push origin "HEAD:$HEAD_REF"
           fi
 
       - name: Create error issue on failure
