@@ -56,50 +56,6 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Saturday 10 PM — AME full sync+match so data is fresh for Sunday 6 AM finance report
-    // Sections 4 (AME mismatches) and 5 (unrecorded payments) in weekly-finance-report.js read
-    // from audit_matches, qb_payments, sa_payments in Supabase — all populated by AME.
-    // ame-run.ps1 injects its own credentials from Credential Manager; no env injection needed.
-    // Writes a lock file so weekly_finance_report can wait for AME to finish before running.
-    schedule: '0 22 * * 6',
-    name: 'ame_weekly_sync',
-    run: () => new Promise((resolve, reject) => {
-      const notify = (msg) => import('../teams/notify.js')
-        .then(({ sendProactiveMessage }) => sendProactiveMessage(msg))
-        .catch(() => {});
-
-      const ameLockFile = join(tmpdir(), 'ame-weekly-sync.lock');
-      writeFileSync(ameLockFile, String(Date.now()), 'utf8');
-
-      const child = spawn('powershell.exe', [
-        '-ExecutionPolicy', 'Bypass',
-        '-File', 'C:\\Users\\Assistant\\AuditMatchingEngine\\ame-run.ps1',
-        'run:full',
-      ], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 4 * 60 * 60 * 1000,
-      });
-      let out = '', err = '';
-      child.stdout.on('data', d => { out += d; });
-      child.stderr.on('data', d => { err += d; });
-      child.on('close', code => {
-        try { unlinkSync(ameLockFile); } catch {}
-        logger.info('ame_weekly_sync: complete', { code, output: out.slice(-2000) });
-        if (err) logger.warn('ame_weekly_sync: stderr', { stderr: err.slice(-1000) });
-        if (code !== 0) {
-          notify(`AME weekly sync FAILED (exit ${code}) — finance report Sections 4 & 5 will use stale data.`);
-          reject(new Error(`ame-run.ps1 exited ${code}`));
-        } else {
-          resolve();
-        }
-      });
-      child.on('error', spawnErr => {
-        try { unlinkSync(ameLockFile); } catch {}
-        reject(spawnErr);
-      });
-    }),
-  },
-  {
     // Sunday 6 AM — consolidated weekly finance report (Revenue, AR, Expenses, Reconciliation)
     // Replaces: weekly_crm_report, weekly_expense_report, weekly_audit_email
     // Waits for AME to finish if still running at 6 AM — sends delay notification and polls.
