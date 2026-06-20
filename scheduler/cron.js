@@ -578,6 +578,167 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
       }
     },
   },
+  {
+    // Saturday 10 PM — AME full sync+match so data is fresh for Sunday finance reports.
+    // ame-run.ps1 injects credentials from Credential Manager; no env injection needed here.
+    // Writes a lock file so any downstream finance report cron can wait for AME to finish.
+    // Self-healing: each of the 5 steps runs individually. On failure the error is classified
+    // and the step is retried once after a typed delay. QB_TOKEN_EXPIRED skips QB entirely and
+    // sends reauth instructions. Any SA-step retry failure marks SA unreachable and skips
+    // remaining SA steps. The match step always runs on whatever data synced cleanly.
+    // Hard ceiling: aborts remaining steps after 7 h to protect the 6 AM finance report.
+    schedule: '0 22 * * 6',
+    name: 'ame_weekly_sync',
+    run: async () => {
+      const notify = (msg) => import('../teams/notify.js')
+        .then(({ sendProactiveMessage }) => sendProactiveMessage(msg))
+        .catch(() => {});
+
+      const ameLockFile = join(tmpdir(), 'ame-weekly-sync.lock');
+      writeFileSync(ameLockFile, String(Date.now()), 'utf8');
+
+      const AME_PS1 = 'C:\\Users\\Assistant\\AuditMatchingEngine\\ame-run.ps1';
+      const MAX_RUN_MS = 7 * 60 * 60 * 1000; // abort by 5 AM so the 6 AM finance report can run
+      const runStart = Date.now();
+
+      function runStep(script) {
+        return new Promise(resolve => {
+          const child = spawn('powershell.exe', [
+            '-ExecutionPolicy', 'Bypass', '-File', AME_PS1, script,
+          ], { stdio: ['ignore', 'pipe', 'pipe'], timeout: 90 * 60 * 1000 });
+          let out = '', err = '';
+          child.stdout.on('data', d => { out += d; });
+          child.stderr.on('data', d => { err += d; });
+          // code is null when Node kills the child via spawn timeout (Windows sends SIGTERM, no 'error' event)
+          child.on('close', (code, signal) => resolve({ code: code ?? -1, out, err, timedOut: code === null }));
+          // Append e.message to accumulated stderr so prior output isn't lost
+          child.on('error', e => resolve({ code: -1, out, err: err + (err ? '\n' : '') + e.message }));
+        });
+      }
+
+      function classifyError(out, err, step = {}) {
+        const combined = (out + err).toLowerCase();
+        if (combined.includes('token refresh failed') &&
+            (combined.includes('invalid_grant') || combined.includes('401') || combined.includes('unauthorized'))) {
+          return 'QB_TOKEN_EXPIRED';
+        }
+        if (combined.includes('token refresh failed') || (combined.includes('[qb-sync]') && combined.includes('error'))) {
+          return 'QB_NETWORK';
+        }
+        // Only classify as SA login failure for SA steps — QB/match steps never log 'logged in',
+        // so a TimeoutError in those steps would otherwise be misclassified here
+        if (step.isSA && !combined.includes('logged in') && (combined.includes('timeouterror') || combined.includes('waitfornavigation'))) {
+          return 'SA_LOGIN_FAILED';
+        }
+        if (combined.includes('target page') || combined.includes('page crashed') ||
+            combined.includes('browser has been closed') || combined.includes('browser closed')) {
+          return 'PLAYWRIGHT_CRASH';
+        }
+        if (/econnrefused|etimedout|enotfound|econnreset/.test(combined)) return 'NETWORK_ERROR';
+        if (combined.includes('[supabase error]')) return 'SUPABASE_ERROR';
+        return 'UNKNOWN';
+      }
+
+      const RETRY_DELAY_MIN = { QB_NETWORK: 5, SA_LOGIN_FAILED: 2, PLAYWRIGHT_CRASH: 2, NETWORK_ERROR: 5, SUPABASE_ERROR: 2, TIMEOUT: 3, UNKNOWN: 3 };
+
+      const steps = [
+        { script: 'sync:invoices',     label: 'SA Invoices',     isSA: true },
+        { script: 'sync:payments',     label: 'SA Payments',     isSA: true },
+        { script: 'sync:applications', label: 'SA Applications', isSA: true },
+        { script: 'sync:qb',           label: 'QB Sync',         isQB: true },
+        { script: 'match',             label: 'Matching Engine'              },
+      ];
+
+      const passed = [], failed = [], skipped = [];
+      let saUnreachable = false;
+      let qbTokenExpired = false;
+
+      try {
+        for (let i = 0; i < steps.length; i++) {
+          const step = steps[i];
+
+          // Hard ceiling: abort remaining steps if we've been running > 7 h
+          if (Date.now() - runStart > MAX_RUN_MS) {
+            const remaining = steps.slice(i).map(s => s.label);
+            skipped.push(...remaining);
+            await notify(
+              `AME weekly sync aborted after 7h -- remaining steps skipped to protect 6 AM finance report.\n` +
+              `Skipped: ${remaining.join(', ')}`
+            );
+            break;
+          }
+
+          if (step.isSA && saUnreachable)  { skipped.push(step.label); continue; }
+          if (step.isQB && qbTokenExpired) { skipped.push(step.label); continue; }
+
+          logger.info(`ame_weekly_sync: starting ${step.script}`);
+          let { code, out, err, timedOut } = await runStep(step.script);
+
+          if (code === 0) {
+            logger.info(`ame_weekly_sync: ${step.script} OK`);
+            passed.push(step.label);
+            continue;
+          }
+
+          const errType = timedOut ? 'TIMEOUT' : classifyError(out, err, step);
+          logger.warn(`ame_weekly_sync: ${step.script} failed (${errType})`, { code, tail: (out + err).slice(-600) });
+
+          if (errType === 'QB_TOKEN_EXPIRED') {
+            qbTokenExpired = true;
+            failed.push(`${step.label} -- QB token expired`);
+            await notify(
+              `**AME QB Sync Failed -- Token Expired**\n\n` +
+              `The QuickBooks refresh token has expired and needs manual reauthorization.\n\n` +
+              `**To fix:**\n` +
+              `1. Go to https://developer.intuit.com/app/developer/playground\n` +
+              `2. Get a new authorization code (scope: com.intuit.quickbooks.accounting)\n` +
+              `3. Run: \`ame-run.ps1 get:qb-tokens <code> 9130357265584656\`\n` +
+              `4. Store the new refresh token: \`Set-JRBSecret QB_REFRESH_TOKEN <token>\`\n\n` +
+              `QB sync skipped for tonight -- finance report sections using QB data will be stale.`
+            );
+            continue;
+          }
+
+          const delayMin = RETRY_DELAY_MIN[errType] || 3;
+          await notify(`AME **${step.label}** failed (${errType}) -- retrying in ${delayMin} min...`);
+          await new Promise(r => setTimeout(r, delayMin * 60 * 1000));
+
+          logger.info(`ame_weekly_sync: retrying ${step.script}`);
+          ({ code, out, err, timedOut } = await runStep(step.script));
+
+          if (code === 0) {
+            logger.info(`ame_weekly_sync: ${step.script} recovered on retry`);
+            passed.push(`${step.label} (retried)`);
+          } else {
+            const errType2 = timedOut ? 'TIMEOUT' : classifyError(out, err, step);
+            logger.error(`ame_weekly_sync: ${step.script} failed after retry`, { errType2, tail: (out + err).slice(-800) });
+            failed.push(`${step.label} (${errType2})`);
+            if (step.isSA) saUnreachable = true; // any SA-step retry failure = skip remaining SA steps
+            await notify(
+              `AME **${step.label}** failed after retry (${errType2}).\n\n` +
+              `\`\`\`\n${(out + err).slice(-500)}\n\`\`\``
+            );
+          }
+        }
+      } finally {
+        // Summary notify fires in finally so it runs even on unexpected loop errors.
+        // Lock released after notify so the finance report doesn't start reading Supabase
+        // before this message is sent (~200 ms round-trip to Teams).
+        const ok = failed.length === 0;
+        const summary = [
+          ok ? 'AME weekly sync complete.' : 'AME weekly sync finished with errors.',
+          passed.length  ? `Passed (${passed.length}): ${passed.join(', ')}`    : null,
+          failed.length  ? `Failed (${failed.length}): ${failed.join(', ')}`    : null,
+          skipped.length ? `Skipped (${skipped.length}): ${skipped.join(', ')}` : null,
+        ].filter(Boolean).join('\n');
+        logger.info('ame_weekly_sync: summary', { ok, passed, failed, skipped });
+        await notify(summary);
+        try { unlinkSync(ameLockFile); } catch {}
+      }
+
+      if (failed.length > 0) throw new Error(`AME steps failed: ${failed.join(', ')}`);
+    },
+  },
 ];
 
 // â”€â”€ Dev task detection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
