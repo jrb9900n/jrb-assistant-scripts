@@ -1,16 +1,14 @@
 // tools/impl/weekly-finance-report.js
-// Consolidated Sunday 6 AM weekly finance report.
+// Consolidated weekly finance report (Mon 6 AM).
 // Sections: Revenue | Accounts Receivable | Credit Card Expenses | Reconciliation & Errors | Unrecorded Payments
+//
+// Data sources: SA Supabase tables (sa_invoices, sa_payments) for AR/payments;
+// qb_invoices table for revenue categories. QB live API used only for deposits.
 
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
-import {
-  getPaymentsForWeek,
-  getARAgingReport,
-  getInvoicesForWeek,
-  getOldNationalDeposits,
-} from './quickbooks.js';
+import { getOldNationalDeposits } from './quickbooks.js';
 
 const supabase = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
@@ -42,16 +40,66 @@ export function getPriorWeekRange() {
   };
 }
 
+// ── Item-based revenue categorization ──────────────────────────────────────
+// Prefers QB ItemRef.name over description keywords — more reliable for JRB service types.
+
+function categorizeByItemName(lines) {
+  if (!Array.isArray(lines)) return 'Other';
+
+  for (const line of lines) {
+    const itemName = line?.SalesItemLineDetail?.ItemRef?.name ?? '';
+    if (!itemName) continue;
+    const n = itemName.toLowerCase();
+    if (n.includes('snow')) return 'Snow';
+    if (n.includes('asphalt') || n.includes('paving') || n.includes('sealcoat') || n.includes('crack fill') || n.includes('striping')) return 'Asphalt';
+    if (n.includes('concrete') || n.includes('flatwork') || n.includes('sidewalk') || n.includes('curb')) return 'Concrete Construction';
+    if (n.includes('landscape maint') || n.includes('lawn') || n.includes('mowing') || n.includes('fertiliz') || n.includes('spring clean') || n.includes('fall clean') || n.includes('aeration') || n.includes('mulch')) return 'Landscape Maintenance';
+    if (n.includes('landscape') || n.includes('install') || n.includes('planting') || n.includes('retaining') || n.includes('hardscape') || n.includes('patio') || n.includes('topsoil') || n.includes('irrigation') || n.includes('drainage')) return 'Landscape Construction';
+  }
+
+  // Fallback: description keyword matching
+  const rules = [
+    { cat: 'Snow',                   terms: ['snow removal','snow plow','snow service','ice melt','deicing','shoveling','rock salt'] },
+    { cat: 'Landscape Maintenance',  terms: ['fertiliz','weed control','lawn care','lawn service','spring clean','fall clean','leaf removal','aeration','mulch','mowing','overseeding','monthly maintenance','seasonal contract','monthly landscape'] },
+    { cat: 'Landscape Construction', terms: ['landscape install','landscaping','planting','retaining wall','sod install','irrigation','drainage','hardscape','patio','topsoil','grading and seeding','boulder'] },
+    { cat: 'Concrete Construction',  terms: ['concrete','flatwork','sidewalk','curb','curbing','stamped'] },
+    { cat: 'Asphalt',                terms: ['asphalt','paving','sealcoat','crack fill','milling','striping','parking lot'] },
+  ];
+  for (const line of lines) {
+    const desc = (line?.Description ?? '').toLowerCase();
+    if (!desc) continue;
+    for (const rule of rules) {
+      if (rule.terms.some(t => desc.includes(t))) return rule.cat;
+    }
+  }
+  return 'Other';
+}
+
+// ── Customer name similarity (reduces false "unrecorded" payment flags) ─────
+
+function nameSimilarity(nameA, nameB) {
+  if (!nameA || !nameB) return 0;
+  const norm = s => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+  const a = norm(nameA), b = norm(nameB);
+  if (a === b) return 1;
+  // Require the shorter token to be ≥5 chars before substring matching to avoid
+  // false matches between unrelated names sharing a short common word (e.g., "Lake" ⊂ "Lake Shore").
+  const shorter = a.length <= b.length ? a : b;
+  if (shorter.length >= 5 && (a.includes(b) || b.includes(a))) return 0.7;
+  const aWords = a.split(/\s+/).filter(w => w.length > 2);
+  const bWords = b.split(/\s+/).filter(w => w.length > 2);
+  const overlap = aWords.filter(w => bWords.some(bw => bw === w || bw.startsWith(w) || w.startsWith(bw)));
+  return overlap.length > 0 ? 0.5 : 0;
+}
+
 // ── Data gathering ──────────────────────────────────────────────────────────
 
 async function gatherExpenseData(start, end) {
-  const from = new Date(start + 'T00:00:00Z').toISOString();
-  const to   = new Date(end   + 'T23:59:59Z').toISOString();
   const { data, error } = await supabase
     .from('expense_reports')
     .select('*')
-    .gte('created_at', from)
-    .lte('created_at', to)
+    .gte('transaction_date', start)
+    .lte('transaction_date', end)
     .order('amount', { ascending: false });
   if (error) throw new Error(`Supabase expense query: ${error.message}`);
   return data ?? [];
@@ -86,14 +134,13 @@ async function gatherAMEMatches() {
   if (error) { logger.warn('AME matches query failed', { err: error.message }); return []; }
   const rows = matches ?? [];
 
-  // Filter out $0 unmatched invoices per user request — only care about $ discrepancies
+  // Filter out $0 unmatched invoices — only care about $ discrepancies
   const meaningful = rows.filter(m => {
     if (m.match_status === 'unmatched_qb' && !m.qb_amount) return false;
     if (m.match_status === 'unmatched_sa' && !m.sa_amount) return false;
     return true;
   });
 
-  // Collect unique IDs to enrich with invoice numbers
   const saIds = [...new Set(meaningful.filter(m => m.sa_invoice_sa_id).map(m => m.sa_invoice_sa_id))];
   const qbIds = [...new Set(meaningful.filter(m => m.qb_invoice_id).map(m => m.qb_invoice_id))];
 
@@ -115,18 +162,109 @@ async function gatherAMEMatches() {
   }));
 }
 
-async function gatherSAPaymentTotals(start, end) {
+// SA AR aging — queries sa_invoices (invoice_balance > 0).
+// Replaces live QB getARAgingReport() — uses pre-computed days_past_due from last AME sync.
+async function gatherSAARaging() {
+  const { data, error } = await supabase
+    .from('sa_invoices')
+    .select('sa_id, invoice_number, client, invoice_balance, days_past_due, due_date, date')
+    .gt('invoice_balance', 0)
+    .eq('deleted', false)
+    .order('days_past_due', { ascending: false });
+  if (error) {
+    logger.warn('SA AR aging query failed', { err: error.message });
+    return { buckets: { current: [], d30: [], d60: [], d90: [], d120plus: [] }, flagged: [], total: 0 };
+  }
+
+  const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [] };
+  let total = 0;
+
+  for (const inv of (data ?? [])) {
+    const balance = Number(inv.invoice_balance);
+    const ageDays = Number(inv.days_past_due ?? 0);
+    total += balance;
+    const record = {
+      invoiceNum: inv.invoice_number,
+      customer:   inv.client,
+      balance,
+      ageDays,
+      dueDate:    inv.due_date ?? inv.date,
+    };
+    if (ageDays <= 0)        buckets.current.push(record);
+    else if (ageDays <= 30)  buckets.d30.push(record);
+    else if (ageDays <= 60)  buckets.d60.push(record);
+    else if (ageDays <= 90)  buckets.d90.push(record);
+    else                     buckets.d120plus.push(record);
+  }
+  for (const b of Object.values(buckets)) b.sort((a, c) => c.balance - a.balance);
+
+  const flagged = [...buckets.d60, ...buckets.d90, ...buckets.d120plus]
+    .filter(r => r.balance >= 500)
+    .sort((a, b) => b.balance - a.balance);
+
+  return { buckets, flagged, total };
+}
+
+// SA payments for week — replaces live QB getPaymentsForWeek() call.
+// Returns payments with type breakdown (Check/ACH/CC/Cash) from sa_payments.payment_type.
+async function gatherSAPaymentsForWeek(start, end) {
   const { data, error } = await supabase
     .from('sa_payments')
-    .select('payment_amount, synced_at')
+    .select('sa_id, client, payment_amount, payment_date, payment_type, reference, notes')
     .gte('payment_date', start)
     .lte('payment_date', end)
-    .eq('deleted', false);
-  if (error) { logger.warn('SA payment totals query failed', { err: error.message }); return null; }
-  const rows = data ?? [];
-  const total = rows.reduce((s, r) => s + Number(r.payment_amount || 0), 0);
-  const lastSync = rows.length ? rows.reduce((max, r) => r.synced_at > max ? r.synced_at : max, '') : null;
-  return { count: rows.length, total, lastSync };
+    .eq('deleted', false)
+    .order('payment_amount', { ascending: false });
+  if (error) { logger.warn('SA payments for week query failed', { err: error.message }); return []; }
+
+  return (data ?? []).map(p => ({
+    id:           p.sa_id,
+    date:         p.payment_date,
+    customerName: p.client,
+    amount:       Number(p.payment_amount),
+    paymentType:  p.payment_type,
+    memo:         p.notes ?? p.reference ?? '',
+    linkedInvoices: [],
+  }));
+}
+
+// QB invoices from synced table — replaces live QB getInvoicesForWeek() call.
+// Reads qb_invoices.raw_data for ItemRef.name categorization.
+async function gatherQBInvoicesForWeek(start, end) {
+  const { data, error } = await supabase
+    .from('qb_invoices')
+    .select('qb_id, invoice_number, customer_name, amount, date, raw_data')
+    .gte('date', start)
+    .lte('date', end)
+    .order('amount', { ascending: false });
+  if (error) { logger.warn('QB invoices for week query failed', { err: error.message }); return []; }
+
+  return (data ?? []).map(inv => ({
+    id:         inv.qb_id,
+    invoiceNum: inv.invoice_number,
+    customer:   inv.customer_name,
+    txnDate:    inv.date,
+    totalAmt:   Number(inv.amount),
+    category:   categorizeByItemName(inv.raw_data?.Line ?? []),
+  }));
+}
+
+// SA data freshness check — warns if last sync was more than 8 hours ago.
+async function gatherFreshnessStatus() {
+  const [{ data: saPmt }, { data: saInv }] = await Promise.all([
+    supabase.from('sa_payments').select('synced_at').order('synced_at', { ascending: false }).limit(1),
+    supabase.from('sa_invoices').select('synced_at').order('synced_at', { ascending: false }).limit(1),
+  ]);
+  const pmtTs  = saPmt?.[0]?.synced_at  ? new Date(saPmt[0].synced_at).getTime()  : 0;
+  const invTs  = saInv?.[0]?.synced_at  ? new Date(saInv[0].synced_at).getTime()  : 0;
+  const oldest = Math.min(pmtTs || Infinity, invTs || Infinity);
+  if (oldest === Infinity) return { stale: true, ageHours: 999, lastSyncedAt: null };
+  const ageMs = Date.now() - oldest;
+  return {
+    stale: ageMs > 8 * 3600000,
+    ageHours: Math.round(ageMs / 3600000),
+    lastSyncedAt: new Date(oldest).toISOString(),
+  };
 }
 
 async function gatherUnrecordedPayments() {
@@ -147,7 +285,8 @@ async function gatherUnrecordedPayments() {
     const match = (saPmts ?? []).find(sa => {
       if (Math.abs(Number(sa.payment_amount) - qbAmt) > 1) return false;
       const saDate = new Date(sa.payment_date + 'T12:00:00Z');
-      return Math.abs(saDate - qbDate) <= 14 * 86400000;
+      if (Math.abs(saDate - qbDate) > 14 * 86400000) return false;
+      return nameSimilarity(qb.customer_name, sa.client) >= 0.5;
     });
     if (!match) unrecorded.push(qb);
   }
@@ -185,7 +324,7 @@ function alertBox(color, borderColor, title, rows) {
 
 // ── HTML email builder ──────────────────────────────────────────────────────
 
-function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, saPaymentTotals, unrecordedPayments, activeCards, delayed = false, delayMinutes = 0 }) {
+function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, freshness, unrecordedPayments, activeCards, delayed = false, delayMinutes = 0 }) {
   const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
   const totalAR        = arAging.total;
 
@@ -199,6 +338,22 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   }
   const totalInvoiced = invoices.reduce((s, i) => s + i.totalAmt, 0);
   const totalUnbilled = earnedNotInvoiced.reduce((s, i) => s + (i.sa_amount ?? 0), 0);
+
+  // Top 5 clients by invoiced amount this week
+  const clientInvoiceTotals = {};
+  for (const inv of invoices) {
+    const name = inv.customer ?? '—';
+    clientInvoiceTotals[name] = (clientInvoiceTotals[name] ?? 0) + inv.totalAmt;
+  }
+  const top5Invoiced = Object.entries(clientInvoiceTotals).sort((a, b) => b[1] - a[1]).slice(0, 5);
+
+  // Payment type breakdown from SA payment_type field
+  const pmtByType = {};
+  for (const p of payments) {
+    const t = p.paymentType || 'Other';
+    pmtByType[t] = (pmtByType[t] ?? 0) + p.amount;
+  }
+  const sortedPaymentTypes = Object.entries(pmtByType).sort((a, b) => b[1] - a[1]);
 
   const expTotal     = expenses.reduce((s, e) => s + Number(e.amount ?? 0), 0);
   const expPending   = expenses.filter(e => e.status === 'pending_employee');
@@ -214,7 +369,6 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     expByEmp[n].count   += 1;
     expByEmp[n].pending += (e.status === 'pending_employee' || e.status === 'pending_maintenance_log') ? 1 : 0;
   }
-  // Add active cardholders who had no charges this week (show as $0)
   for (const card of activeCards) {
     const n = card.employee_name || card.card_last_four || '?';
     if (!expByEmp[n]) expByEmp[n] = { total: 0, count: 0, pending: 0 };
@@ -242,6 +396,11 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   if (delayed) {
     html += alertBox('#e8f4e8', '#1a6e1a', `Report Delayed ${delayMinutes} Minutes`,
       `<p style="margin:0;font-size:13px;color:#1a6e1a;">This report was delayed because the AuditMatchingEngine sync was still running at 6 AM. Sections 4 and 5 reflect the completed AME sync.</p>`);
+  }
+
+  if (freshness?.stale) {
+    html += alertBox('#fff8f0', '#e6a817', `SA Data May Be Stale (${freshness.ageHours}h Since Last Sync)`,
+      `<p style="margin:0;font-size:13px;color:#533f03;">SA invoices and payments were last synced ${freshness.ageHours} hours ago. Sections 1 and 2 may not reflect recent transactions. Run <code>ame-run.ps1 sync:sa</code> to refresh.</p>`);
   }
 
   // ── Snapshot KPIs ──────────────────────────────────────────────────────────
@@ -304,6 +463,19 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     html += `<p style="margin:0 0 10px;font-size:13px;color:#888888;font-style:italic;">No invoices issued this week.</p>`;
   }
 
+  if (top5Invoiced.length > 1) {
+    html += `<p style="margin:0 0 4px;font-size:13px;color:#444444;font-weight:bold;">Top ${top5Invoiced.length} Clients</p>`;
+    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px;">`;
+    for (let i = 0; i < top5Invoiced.length; i++) {
+      const [name, amt] = top5Invoiced[i];
+      html += `<tr style="background-color:${i % 2 ? '#f8f8f8' : '#ffffff'};">
+        <td style="padding:5px 8px;font-size:13px;color:#333333;">${name}</td>
+        <td style="padding:5px 8px;font-size:13px;color:#1a1a2e;font-weight:bold;text-align:right;white-space:nowrap;">${f$(amt)}</td>
+      </tr>`;
+    }
+    html += `</table>`;
+  }
+
   if (earnedNotInvoiced.length) {
     html += `<p style="margin:0 0 6px;font-size:13px;color:#444444;"><strong>Earned but Not Yet Invoiced &mdash; ${f$(totalUnbilled)}</strong> (${earnedNotInvoiced.length} SA jobs completed, no QB invoice)</p>`;
     const topUnbilled = earnedNotInvoiced.slice(0, 6);
@@ -321,8 +493,6 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   }
 
   // ── Payments received — grouped by client ────────────────────────────────
-  // Group individual QB payments by customer so one client's multiple payments
-  // appear as a single row with a combined total.
   const pmtByClient = {};
   for (const p of payments) {
     if (!pmtByClient[p.customerName]) {
@@ -340,20 +510,6 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
 
   html += `<p style="margin:16px 0 8px;font-size:13px;font-weight:bold;color:#444444;">Payments Received (${clientCount} client${clientCount !== 1 ? 's' : ''}, ${payments.length} payment${payments.length !== 1 ? 's' : ''} &mdash; ${f$(totalCollected)})</p>`;
 
-  if (saPaymentTotals) {
-    const countDiff = saPaymentTotals.count - payments.length;
-    const amtDiff   = saPaymentTotals.total - totalCollected;
-    if (Math.abs(countDiff) > 0 || Math.abs(amtDiff) > 1) {
-      const syncNote = saPaymentTotals.lastSync
-        ? `SA data as of ${fD(saPaymentTotals.lastSync.slice(0,10))}`
-        : 'SA data from last AME sync';
-      html += alertBox('#fff8f0', '#e6a817', 'QB vs SA Payment Discrepancy',
-        `<p style="margin:3px 0;font-size:13px;color:#533f03;">QB: ${payments.length} payments &mdash; ${f$(totalCollected)}</p>
-         <p style="margin:3px 0;font-size:13px;color:#533f03;">SA: ${saPaymentTotals.count} payments &mdash; ${f$(saPaymentTotals.total)}</p>
-         <p style="margin:6px 0 0;font-size:12px;color:#888888;">Difference: ${Math.abs(countDiff)} payment${Math.abs(countDiff) !== 1 ? 's' : ''}, ${f$(Math.abs(amtDiff))} &mdash; ${syncNote}. May include payments not yet synced to QB.</p>`);
-    }
-  }
-
   if (groupedPmts.length) {
     html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
     <tr style="background-color:#f8f8f8;">
@@ -363,10 +519,8 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     for (let i = 0; i < groupedPmts.length; i++) {
       const [name, g] = groupedPmts[i];
       const bgColor = i % 2 === 0 ? '#ffffff' : '#f8f8f8';
-      // Show date range or single date
       const dates = [...new Set(g.dates)].sort();
       const dateNote = dates.length === 1 ? dayName(dates[0]) : `${dayName(dates[0])}–${dayName(dates[dates.length - 1])}`;
-      // Sub-note: multiple payments or invoices
       let subNote = '';
       if (g.paymentCount > 1) subNote += `${g.paymentCount} payments`;
       if (g.invoiceCount > 1) subNote += (subNote ? ', ' : '') + `applied to ${g.invoiceCount} invoices`;
@@ -380,11 +534,17 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     }
     html += `</table>`;
 
-    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#1a1a2e;border-radius:4px;margin-bottom:14px;">
+    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#1a1a2e;border-radius:4px;margin-bottom:8px;">
     <tr>
       <td style="padding:10px 16px;font-size:13px;color:#aaaacc;font-weight:bold;">Week Total</td>
       <td style="padding:10px 16px;font-size:15px;color:#ffffff;font-weight:bold;text-align:right;">${f$(totalCollected)}</td>
     </tr></table>`;
+
+    if (sortedPaymentTypes.length > 0) {
+      html += `<p style="margin:4px 0 14px;font-size:12px;color:#888888;">By method: ${sortedPaymentTypes.map(([t, a]) => `${t}: ${f$(a)}`).join(' &nbsp;|&nbsp; ')}</p>`;
+    }
+  } else {
+    html += `<p style="margin:0 0 14px;font-size:13px;color:#888888;font-style:italic;">No SA payments recorded this week.</p>`;
   }
 
   const unidentified = deposits.filter(d => d.hasUnidentifiedCash);
@@ -400,7 +560,6 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   // ══════════════════════════════════════════════════════════════════════════
   html += sectionHeader('Section 2 — Accounts Receivable');
 
-  // Color scheme: current=green, 1-30=orange, 31-60=orange, 61-90=red, 90+=red
   const bucketDefs = [
     { key: 'current',  label: 'Current',   color: '#1a6e1a' },
     { key: 'd30',      label: '1–30 days',  color: '#b35900' },
@@ -430,7 +589,6 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   // ── Significantly aged accounts (60+ days) grouped by master account ──────
   const agedInvoices = [...(arAging.buckets.d60 ?? []), ...(arAging.buckets.d90 ?? []), ...(arAging.buckets.d120plus ?? [])];
   if (agedInvoices.length) {
-    // Group invoices by master customer name
     const byMaster = {};
     for (const r of agedInvoices) {
       const master = masterCustomer(r.customer);
@@ -440,10 +598,11 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     }
     const sortedMasters = Object.entries(byMaster).sort((a, b) => b[1].total - a[1].total);
 
-    html += `<p style="margin:0 0 8px;font-size:13px;font-weight:bold;color:#b35900;">Overdue 31+ Days</p>`;
-    for (const [master, { invoices, total }] of sortedMasters) {
+    const displayedMasters = sortedMasters.slice(0, 30);
+    const hiddenMasterCount = sortedMasters.length - displayedMasters.length;
+    html += `<p style="margin:0 0 8px;font-size:13px;font-weight:bold;color:#b35900;">Overdue 31+ Days${hiddenMasterCount > 0 ? ` (showing top 30 of ${sortedMasters.length})` : ''}</p>`;
+    for (const [master, { invoices, total }] of displayedMasters) {
       invoices.sort((a, b) => b.ageDays - a.ageDays);
-      // Determine header color: if any invoice is 90+ days, use red; else orange
       const maxAge = Math.max(...invoices.map(r => r.ageDays));
       const masterColor = maxAge > 90 ? '#c0392b' : '#b35900';
       const masterBg    = maxAge > 90 ? '#fff0f0' : '#fff8f0';
@@ -455,7 +614,6 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
         <td style="padding:6px 8px;font-size:13px;font-weight:bold;color:${masterColor};text-align:right;white-space:nowrap;width:25%;">${f$(total)}</td>
       </tr>`;
       for (const r of invoices) {
-        // Show sub-customer name only if different from master
         const subLabel = r.displayName !== master ? r.displayName.replace(master + ':', '').trim() : null;
         html += `<tr style="background-color:#fafafa;">
           <td style="padding:4px 8px 4px 20px;font-size:12px;color:#666666;">${subLabel ? `${subLabel} &mdash; ` : ''}INV #${r.invoiceNum}</td>
@@ -467,8 +625,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     }
   }
 
-  // ── Top 10 Open Balances by client (aggregate across all invoices) ─────────
-  // Aggregate ALL open invoices by master customer, then rank by total
+  // ── Top 10 Open Balances by client ─────────────────────────────────────────
   const allOpenInvoices = [
     ...(arAging.buckets.current ?? []),
     ...(arAging.buckets.d30 ?? []),
@@ -588,6 +745,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   const issueTypes = {
     unbilled_complete: { label: 'SA Completed — No QB Invoice',   color: '#c0392b' },
     overdue_invoice:   { label: 'QB Invoices Overdue (30d+)',      color: '#b35900' },
+    amount_mismatch:   { label: 'Invoice Amount Mismatches',       color: '#b35900' },
     nonzero_balance:   { label: 'SA Clients with Open Balance',    color: '#888888' },
   };
   let hasAnyIssue = false;
@@ -610,7 +768,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     html += `</table>`;
   }
 
-  // AME invoice-level mismatches — $0 unmatched already filtered in gatherAMEMatches()
+  // AME invoice-level mismatches
   const ameByStatus = {
     discrepancy:    { label: 'Invoice Amount Mismatches (QB ≠ SA)',  color: '#b35900' },
     unmatched_qb:   { label: 'QB Invoices — No SA Match',            color: '#b35900' },
@@ -625,7 +783,6 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
       : matches.reduce((s, m) => s + Math.abs(m.sa_amount ?? m.qb_amount ?? 0), 0);
     html += `<p style="margin:12px 0 6px;font-size:13px;font-weight:bold;color:${meta.color};">${meta.label} &mdash; ${matches.length} (${f$(totalDiff)})</p>`;
 
-    // Column headers vary by status
     const hasSAInv = status !== 'unmatched_qb';
     const hasQBInv = status !== 'unmatched_sa';
     html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">
@@ -665,7 +822,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     html += `<p style="margin:0 0 16px;font-size:13px;color:#1a6e1a;font-style:italic;">No unrecorded payments found in the last 90 days.</p>`;
   } else {
     const unrecordedTotal = unrecordedPayments.reduce((s, p) => s + Number(p.amount), 0);
-    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">The following ${unrecordedPayments.length} QB payment${unrecordedPayments.length > 1 ? 's' : ''} (${f$(unrecordedTotal)} total) have no matching SA payment within 14 days at the same amount. These may need to be applied in SA.</p>`;
+    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">The following ${unrecordedPayments.length} QB payment${unrecordedPayments.length > 1 ? 's' : ''} (${f$(unrecordedTotal)} total) have no matching SA payment within 14 days at a similar amount and customer name. These may need to be applied in SA.</p>`;
     html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
     <tr style="background-color:#f8f8f8;">
       <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Date</td>
@@ -687,7 +844,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   // ── BTA Files ───────────────────────────────────────────────────────────────
   html += `<hr style="border:none;border-top:1px solid #e8e8e8;margin:24px 0;">`;
   html += `<p style="margin:0 0 6px;font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;color:#888888;">BTA Reporting Files</p>`;
-  html += `<p style="margin:0 0 16px;font-size:13px;color:#555555;">Weekly revenue package (RP tabs, budget summary) refreshed Sunday at 8 AM. ` +
+  html += `<p style="margin:0 0 16px;font-size:13px;color:#555555;">Weekly revenue package (RP tabs, budget summary) refreshed Monday overnight. ` +
     `<a href="file:///C:/Users/Assistant/OneDrive%20-%20jrboehlke.com/JR%20Boehlke%20-%20Claude%20Folder/BTA%20Reporting/Output" ` +
     `style="color:#1a6e8c;">Open BTA Output Folder</a></p>`;
 
@@ -696,7 +853,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
 
 <!-- FOOTER -->
 <tr><td style="background-color:#f8f8f8;padding:14px 32px;border-top:1px solid #e8e8e8;">
-  <p style="margin:0;font-size:12px;color:#888888;line-height:1.6;">J.R. Boehlke, LLC &nbsp;|&nbsp; Milwaukee, WI &nbsp;|&nbsp; Source: QuickBooks Online &amp; Service Autopilot</p>
+  <p style="margin:0;font-size:12px;color:#888888;line-height:1.6;">J.R. Boehlke, LLC &nbsp;|&nbsp; Milwaukee, WI &nbsp;|&nbsp; Source: Service Autopilot &amp; QuickBooks Online</p>
 </td></tr>
 
 </table></td></tr></table>
@@ -711,17 +868,17 @@ export async function generateAndSendWeeklyFinanceReport({ delayed = false, dela
   const { start, end, weekLabel, displayRange } = getPriorWeekRange();
   logger.info('weekly_finance_report: gathering data', { weekLabel, start, end });
 
-  const [payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, saPaymentTotals, unrecordedPayments, activeCards] = await Promise.all([
-    getPaymentsForWeek(start, end),
-    getARAgingReport(),
-    getInvoicesForWeek(start, end),
+  const [payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, unrecordedPayments, activeCards, freshness] = await Promise.all([
+    gatherSAPaymentsForWeek(start, end),
+    gatherSAARaging(),
+    gatherQBInvoicesForWeek(start, end),
     getOldNationalDeposits(start, end),
     gatherExpenseData(start, end),
     gatherAuditIssues(),
     gatherAMEMatches(),
-    gatherSAPaymentTotals(start, end),
     gatherUnrecordedPayments(),
     gatherActiveCards(),
+    gatherFreshnessStatus(),
   ]);
 
   logger.info('weekly_finance_report: data gathered', {
@@ -732,12 +889,13 @@ export async function generateAndSendWeeklyFinanceReport({ delayed = false, dela
     expenses: expenses.length,
     auditIssues: auditIssues.length,
     ameMatches: ameMatches.length,
-    saPayments: saPaymentTotals?.count ?? 'n/a',
+    saDataStale: freshness.stale,
+    saDataAgeHours: freshness.ageHours,
     unrecordedPayments: unrecordedPayments.length,
     activeCards: activeCards.length,
   });
 
-  const body = buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, saPaymentTotals, unrecordedPayments, activeCards, delayed, delayMinutes });
+  const body = buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, freshness, unrecordedPayments, activeCards, delayed, delayMinutes });
   const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
   const delayNote = delayed ? ` (delayed ${delayMinutes}m — awaited AME)` : '';
 
