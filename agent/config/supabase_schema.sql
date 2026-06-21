@@ -68,6 +68,25 @@ CREATE INDEX IF NOT EXISTS idx_skill_tags ON skill_library USING GIN(tags);
 -- task-poller can replay scheduling tasks with the correct prompt context.
 -- ALTER TABLE agent_tasks ADD COLUMN IF NOT EXISTS system_prompt_override TEXT;
 
+-- ── Overnight report tracking (fleetops project) ─────────────
+-- sa_accepted_estimates tracks when each Won estimate was first seen (added 2026-05-21)
+-- sa_sent_estimates tracks when each Sent estimate was first seen (added 2026-06-20)
+-- Both: upsert on estimate_id with ignoreDuplicates=true to preserve first_seen timestamps.
+CREATE TABLE IF NOT EXISTS sa_sent_estimates (
+  estimate_id        TEXT PRIMARY KEY,
+  estimate_number    TEXT,
+  client_name        TEXT,
+  client_id          TEXT,
+  address            TEXT,
+  sales_rep          TEXT,
+  service_type       TEXT,
+  amount             NUMERIC,
+  quote_date         DATE,
+  first_seen_sent_at TIMESTAMPTZ DEFAULT NOW(),
+  created_at         TIMESTAMPTZ DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_sa_sent_first_seen ON sa_sent_estimates(first_seen_sent_at DESC);
+
 -- ── Views ─────────────────────────────────────────────────────
 CREATE OR REPLACE VIEW agent_daily_token_spend AS
 SELECT

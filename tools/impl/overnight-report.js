@@ -2,14 +2,18 @@
 // Sends at 6 AM to michael@jrboehlke.com via the scheduler/cron.js task.
 //
 // Sections:
-//   1. Jobs accepted yesterday   — Won estimates where QuoteDate = yesterday
-//   2. Awaiting waiting list     — Won estimates whose client is not on WL or dispatch board
-//   3. Estimates sent yesterday  — Sent estimates where QuoteDate = yesterday
-//   4. Aging estimates           — Sent 7+ days ago, no acceptance
-//   5. Today's dispatch          — sa_jobs for today, grouped by crew with subtotals
-//   6. Waiting list by crew      — sa_waiting_list with crew assignments
+//   1. Jobs accepted since last report  — Won estimates first seen as Won in this run
+//   2. Accepted — awaiting waiting list — Won estimates created ≤45 days ago, not on WL/dispatch
+//   3. Estimates sent since last report — Sent estimates first seen as Sent in this run
+//   4. Estimates created — not yet sent — Current Draft estimates, oldest first
+//   5. Aging estimates                  — Sent 7+ days ago, no acceptance
+//   6. Today's dispatch                 — sa_jobs for today, grouped by crew
+//   7. Waiting list by crew             — sa_waiting_list with crew assignments
 //
-// No DB tracking tables required — all sections use live SA data filtered by QuoteDate.
+// Stage-change detection (sections 1 & 3):
+//   Loads estimate IDs from sa_accepted_estimates / sa_sent_estimates BEFORE upserting.
+//   Estimates not yet in the table = first time seen in that stage = transition happened
+//   since the last report run. No QuoteDate dependency; no timestamp windows.
 
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
@@ -89,9 +93,12 @@ function extractEstimate(e) {
 }
 
 // ── Section 1 & 2: Won estimates ─────────────────────────────────────────────
-// Fetches Won estimates from SA. No DB tracking — uses QuoteDate directly.
-// Section 1: estimates with QuoteDate = yesterday (accepted yesterday).
-// Section 2: Won estimates whose client is not yet on WL or dispatch board.
+// Section 1 "Newly Accepted": estimates first detected as Won in THIS run.
+//   Detection: load existing IDs from sa_accepted_estimates before upserting.
+//   Estimates not previously tracked = transitioned to Won since last report.
+// Section 2 "Awaiting WL": Won estimates created ≤45 days ago whose client
+//   isn't on the waiting list or upcoming dispatch. The 45-day window prevents
+//   old completed estimates from flooding the list.
 
 async function syncWonEstimates() {
   const db = fleetops();
@@ -101,13 +108,36 @@ async function syncWonEstimates() {
   const estimates = raw.filter(e => e.QuoteStageType === 'Won').map(extractEstimate).filter(e => e.estimateId);
   logger.info('overnight-report: Won estimates from SA', { count: estimates.length });
 
-  // Section 1: Won estimates where QuoteDate = yesterday (the acceptance date)
-  const yStr = isoDate(yesterday());
+  // Load IDs already in the tracker BEFORE upserting
+  const { data: existing, error: readErr } = await db.from('sa_accepted_estimates').select('estimate_id');
+  if (readErr) throw new Error(`sa_accepted_estimates read failed: ${readErr.message}`);
+  const existingIds = new Set((existing || []).map(r => r.estimate_id));
+
+  // Upsert all Won estimates — ignoreDuplicates preserves first_seen_at for known rows
+  if (estimates.length > 0) {
+    const rows = estimates.map(e => ({
+      estimate_id:     e.estimateId,
+      estimate_number: e.estimateNum,
+      client_name:     e.clientName,
+      client_id:       e.clientId,
+      address:         e.address,
+      sales_rep:       e.salesRep,
+      service_type:    e.serviceType,
+      amount:          e.amount,
+      quote_date:      e.quoteDateStr,
+    }));
+    const { error } = await db
+      .from('sa_accepted_estimates')
+      .upsert(rows, { onConflict: 'estimate_id', ignoreDuplicates: true });
+    if (error) logger.warn('overnight-report: sa_accepted_estimates upsert error', { error: error.message });
+  }
+
+  // Section 1: estimates not in DB before this run = first time seen as Won
   const acceptedYesterday = estimates
-    .filter(e => e.quoteDateStr === yStr)
+    .filter(e => !existingIds.has(e.estimateId))
     .sort((a, b) => (a.clientName || '').localeCompare(b.clientName || ''));
 
-  // Section 2: live comparison — Won estimates whose client is NOT on WL or upcoming dispatch
+  // Section 2: Won estimates created ≤45 days ago, client not on WL or upcoming dispatch
   const { data: wlRows }   = await db.from('sa_waiting_list').select('client_id').not('client_id', 'is', null);
   const { data: dispRows } = await db.from('sa_jobs').select('customer_id').gte('start_date', isoDate(today())).not('customer_id', 'is', null);
 
@@ -116,26 +146,71 @@ async function syncWonEstimates() {
     ...(dispRows || []).map(r => r.customer_id),
   ]);
 
+  const cutoff45 = daysAgo(45);
   const outstanding = estimates
-    .filter(e => e.clientId && !coveredClientIds.has(e.clientId))
+    .filter(e => e.clientId && !coveredClientIds.has(e.clientId) && e.quoteDate && e.quoteDate >= cutoff45)
     .sort((a, b) => (a.clientName || '').localeCompare(b.clientName || ''));
 
   return { acceptedYesterday, outstanding };
 }
 
-// ── Section 3: Estimates sent yesterday ──────────────────────────────────────
-// No DB tracking — uses QuoteDate directly. Sent estimates with QuoteDate = yesterday.
+// ── Section 3: Estimates sent since last report ───────────────────────────────
+// Uses sa_sent_estimates table. Estimates not previously tracked = first time
+// seen as Sent = sent since the last report run.
 
 async function syncSentEstimates() {
+  const db = fleetops();
+
   const raw = await getEstimateList({ dateFrom: daysAgo(365), dateTo: today(), stages: ['Sent'], max: 2000 });
   // Stage filter is ignored server-side — must filter client-side on QuoteStageType
   const estimates = raw.filter(e => e.QuoteStageType === 'Sent').map(extractEstimate).filter(e => e.estimateId);
   logger.info('overnight-report: Sent estimates from SA', { count: estimates.length });
 
-  const yStr = isoDate(yesterday());
+  // Load IDs already tracked BEFORE upserting
+  const { data: existing, error: readErr } = await db.from('sa_sent_estimates').select('estimate_id');
+  if (readErr) throw new Error(`sa_sent_estimates read failed: ${readErr.message}`);
+  const existingIds = new Set((existing || []).map(r => r.estimate_id));
+
+  if (estimates.length > 0) {
+    const rows = estimates.map(e => ({
+      estimate_id:     e.estimateId,
+      estimate_number: e.estimateNum,
+      client_name:     e.clientName,
+      client_id:       e.clientId,
+      address:         e.address,
+      sales_rep:       e.salesRep,
+      service_type:    e.serviceType,
+      amount:          e.amount,
+      quote_date:      e.quoteDateStr,
+    }));
+    const { error } = await db
+      .from('sa_sent_estimates')
+      .upsert(rows, { onConflict: 'estimate_id', ignoreDuplicates: true });
+    if (error) logger.warn('overnight-report: sa_sent_estimates upsert error', { error: error.message });
+  }
+
+  // Return estimates not previously tracked = first time seen as Sent
   return estimates
-    .filter(e => e.quoteDateStr === yStr)
+    .filter(e => !existingIds.has(e.estimateId))
     .sort((a, b) => (a.salesRep || '').localeCompare(b.salesRep || '') || (a.clientName || '').localeCompare(b.clientName || ''));
+}
+
+// ── Draft estimates — created but not yet sent ────────────────────────────────
+
+async function getDraftEstimates() {
+  const raw = await getEstimateList({ dateFrom: daysAgo(90), dateTo: today(), stages: ['Draft'], max: 500 });
+  // Stage filter is ignored server-side — must filter client-side on QuoteStageType
+  const drafts = raw
+    .filter(e => e.QuoteStageType === 'Draft')
+    .map(extractEstimate)
+    .filter(e => e.estimateId)
+    .map(e => ({
+      ...e,
+      daysOld: e.quoteDate ? daysBetween(e.quoteDate, new Date()) : null,
+    }));
+  logger.info('overnight-report: Draft estimates from SA', { count: drafts.length });
+  // Sort oldest first; null-date estimates go to bottom (treated as Infinity age)
+  return drafts.sort((a, b) => (b.daysOld ?? Infinity) - (a.daysOld ?? Infinity));
 }
 
 // ── Section 4: Aging estimates ────────────────────────────────────────────────
@@ -264,9 +339,9 @@ function wonEstimatesHtml(estimates) {
   return dataTable(['Client', 'Estimator', 'Est #', 'Amount'], body);
 }
 
-// Section 2 — receives live extractEstimate() objects; uses quoteDate for days-since-won
+// Section 2 — receives live extractEstimate() objects; uses quoteDate (creation date) for age
 function outstandingEstimatesHtml(estimates) {
-  if (!estimates.length) return emptyMsg('All Won estimates are accounted for on the waiting list or dispatch board.');
+  if (!estimates.length) return emptyMsg('All recent Won estimates are accounted for on the waiting list or dispatch board.');
   let body = '';
   for (const [i, e] of estimates.entries()) {
     const daysSince = e.quoteDate ? daysBetween(e.quoteDate, new Date()) : null;
@@ -280,7 +355,28 @@ function outstandingEstimatesHtml(estimates) {
   }
   const total = estimates.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
   body += totalRow(3, total);
-  return dataTable(['Client', 'Estimator', 'Days Since Won', 'Amount'], body);
+  return dataTable(['Client', 'Estimator', 'Days Since Created', 'Amount'], body);
+}
+
+// Draft estimates — new section
+function draftEstimatesHtml(estimates) {
+  if (!estimates.length) return emptyMsg('No draft estimates in the last 90 days.');
+  let body = '';
+  for (const [i, e] of estimates.entries()) {
+    const bg = i % 2 ? 'background-color:#f8f8f8;' : '';
+    const ageStyle = e.daysOld >= 7
+      ? `${_TD}color:#b94a00;font-weight:bold;`
+      : _TD;
+    body += `<tr style="${bg}">
+      <td style="${_TD}">${e.clientName || '—'}</td>
+      <td style="${_TD}">${e.salesRep || '—'}</td>
+      <td style="${_TD}font-size:12px;color:#888888;">${e.estimateNum || '—'}</td>
+      <td style="${ageStyle}">${e.daysOld != null ? `${e.daysOld}d` : '—'}</td>
+      <td style="${_AMT}">${fmt$(e.amount)}</td>
+    </tr>`;
+  }
+  body += totalRow(4, totalOf(estimates));
+  return dataTable(['Client', 'Estimator', 'Est #', 'Days Since Created', 'Amount'], body);
 }
 
 // Section 3 — receives live extractEstimate() objects (camelCase fields)
@@ -385,9 +481,10 @@ function waitingListByCrewHtml(jobs) {
 export async function generateOvernightReport() {
   logger.info('overnight-report: starting');
 
-  const [wonResult, sentResult, agingResult, jobsResult, wlResult] = await Promise.allSettled([
+  const [wonResult, sentResult, draftResult, agingResult, jobsResult, wlResult] = await Promise.allSettled([
     syncWonEstimates(),
     syncSentEstimates(),
+    getDraftEstimates(),
     getAgingEstimates(),
     getTodayJobs(),
     getAssignedWaitingListJobs(),
@@ -396,20 +493,23 @@ export async function generateOvernightReport() {
   const { acceptedYesterday = [], outstanding = [] } =
     wonResult.status === 'fulfilled' ? wonResult.value : {};
   const sentYesterday = sentResult.status === 'fulfilled'  ? sentResult.value : [];
+  const draftEstimates = draftResult.status === 'fulfilled' ? draftResult.value : [];
   const aging         = agingResult.status === 'fulfilled' ? agingResult.value : [];
   const todayJobs     = jobsResult.status === 'fulfilled'  ? jobsResult.value : [];
   const wlJobs        = wlResult.status === 'fulfilled'    ? wlResult.value   : [];
 
   if (wonResult.status === 'rejected')
-    logger.error('overnight-report: won sync failed',  { err: wonResult.reason?.message });
+    logger.error('overnight-report: won sync failed',   { err: wonResult.reason?.message });
   if (sentResult.status === 'rejected')
-    logger.error('overnight-report: sent sync failed', { err: sentResult.reason?.message });
+    logger.error('overnight-report: sent sync failed',  { err: sentResult.reason?.message });
+  if (draftResult.status === 'rejected')
+    logger.error('overnight-report: draft fetch failed', { err: draftResult.reason?.message });
   if (agingResult.status === 'rejected')
-    logger.error('overnight-report: aging failed',     { err: agingResult.reason?.message });
+    logger.error('overnight-report: aging failed',      { err: agingResult.reason?.message });
   if (jobsResult.status === 'rejected')
-    logger.error('overnight-report: jobs failed',      { err: jobsResult.reason?.message });
+    logger.error('overnight-report: jobs failed',       { err: jobsResult.reason?.message });
   if (wlResult.status === 'rejected')
-    logger.error('overnight-report: wl jobs failed',   { err: wlResult.reason?.message });
+    logger.error('overnight-report: wl jobs failed',    { err: wlResult.reason?.message });
 
   const dateLabel        = formatDate(yesterday());
   const outstandingTotal = outstanding.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
@@ -436,15 +536,18 @@ export async function generateOvernightReport() {
 
   <tr><td style="padding:4px 32px 32px;">
 
-    ${sectionTitle('Jobs Accepted Yesterday', acceptedYesterday.length)}
+    ${sectionTitle('Jobs Accepted Since Yesterday\'s Report', acceptedYesterday.length)}
     ${wonEstimatesHtml(acceptedYesterday)}
 
-    ${sectionTitle('Accepted — Awaiting Waiting List', outstanding.length)}
+    ${sectionTitle('Accepted — Awaiting Waiting List (Last 45 Days)', outstanding.length)}
     ${outstandingAlert}
     ${outstandingEstimatesHtml(outstanding)}
 
-    ${sectionTitle('Estimates Sent Yesterday', sentYesterday.length)}
+    ${sectionTitle('Estimates Sent Since Yesterday\'s Report', sentYesterday.length)}
     ${sentEstimatesHtml(sentYesterday)}
+
+    ${sectionTitle('Estimates Created — Not Yet Sent', draftEstimates.length)}
+    ${draftEstimatesHtml(draftEstimates)}
 
     ${sectionTitle('Aging Estimates — No Response (7+ Days)', aging.length)}
     ${agingEstimatesHtml(aging)}
@@ -466,12 +569,13 @@ export async function generateOvernightReport() {
 </table>
 </body></html>`;
 
-  const subject = `JRB Morning Report — ${dateLabel} | ${acceptedYesterday.length} accepted, ${outstanding.length} awaiting WL, ${todayJobs.length} dispatched`;
+  const subject = `JRB Morning Report — ${dateLabel} | ${acceptedYesterday.length} accepted, ${sentYesterday.length} sent, ${outstanding.length} awaiting WL, ${todayJobs.length} dispatched`;
 
   logger.info('overnight-report: complete', {
     accepted:    acceptedYesterday.length,
     outstanding: outstanding.length,
     sent:        sentYesterday.length,
+    drafts:      draftEstimates.length,
     aging:       aging.length,
     todayJobs:   todayJobs.length,
   });
