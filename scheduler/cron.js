@@ -46,16 +46,6 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Sunday 1:30 AM — QBO ↔ SA audit matching engine (runs after 1 AM sa_nightly_sync)
-    schedule: '30 1 * * 0',
-    name: 'weekly_audit_run',
-    run: async () => {
-      const { runAudit } = await import('../tools/impl/audit.js');
-      const result = await runAudit();
-      logger.info('Weekly audit run complete', result);
-    },
-  },
-  {
     // Sunday 6 AM — consolidated weekly finance report (Revenue, AR, Expenses, Reconciliation)
     // Replaces: weekly_crm_report, weekly_expense_report, weekly_audit_email
     // Waits for AME to finish if still running at 6 AM — sends delay notification and polls.
@@ -103,7 +93,9 @@ const SCHEDULED_TASKS = [
       }
 
       try {
+        const { runAudit } = await import('../tools/impl/audit.js');
         const { generateAndSendWeeklyFinanceReport } = await import('../tools/impl/weekly-finance-report.js');
+        await runAudit();
         const result = await generateAndSendWeeklyFinanceReport({ delayed, delayMinutes });
         logger.info('weekly_finance_report: done', result);
       } catch (err) {
