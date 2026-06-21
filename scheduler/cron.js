@@ -46,10 +46,10 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Sunday 6 AM — consolidated weekly finance report (Revenue, AR, Expenses, Reconciliation)
+    // Monday 6 AM — consolidated weekly finance report (Revenue, AR, Expenses, Reconciliation)
     // Replaces: weekly_crm_report, weekly_expense_report, weekly_audit_email
     // Waits for AME to finish if still running at 6 AM — sends delay notification and polls.
-    schedule: '0 6 * * 0',
+    schedule: '0 6 * * 1',
     name: 'weekly_finance_report',
     run: async () => {
       const ameLockFile = join(tmpdir(), 'ame-weekly-sync.lock');
@@ -110,11 +110,11 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Sunday 8 AM — full BTA weekly run: QB revenue package + SA pipeline + SP CSV output
-    // Runs after weekly_finance_report (6 AM) to avoid QB token rotation race.
+    // Monday 12:15 AM — full BTA weekly run: QB revenue package + SA pipeline + SP CSV output
+    // Runs 14 min after AME (Mon 12:01 AM) to avoid QB API token pressure.
     // Scripts (sequential): rp-formatter.js → weekly-sync.js → sheets-formatter.js
     // Outputs: weekly-rp-*.csv, weekly-sp-*.csv, sa-estimates/tickets/waiting-list JSON
-    schedule: '0 8 * * 0',
+    schedule: '15 0 * * 1',
     name: 'bta_weekly_report',
     run: async () => {
       const BTA = 'C:\\Users\\Assistant\\BTA Reporting';
@@ -527,15 +527,15 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
     },
   },
   {
-    // Saturday 10 PM — AME full sync+match so data is fresh for Sunday finance reports.
+    // Monday 12:01 AM — AME full sync+match so data is fresh for Monday 6 AM finance report.
     // ame-run.ps1 injects credentials from Credential Manager; no env injection needed here.
     // Writes a lock file so any downstream finance report cron can wait for AME to finish.
     // Self-healing: each of the 5 steps runs individually. On failure the error is classified
     // and the step is retried once after a typed delay. QB_TOKEN_EXPIRED skips QB entirely and
     // sends reauth instructions. Any SA-step retry failure marks SA unreachable and skips
     // remaining SA steps. The match step always runs on whatever data synced cleanly.
-    // Hard ceiling: aborts remaining steps after 7 h to protect the 6 AM finance report.
-    schedule: '0 22 * * 6',
+    // Hard ceiling: aborts remaining steps after 5 h to protect the 6 AM finance report.
+    schedule: '1 0 * * 1',
     name: 'ame_weekly_sync',
     run: async () => {
       const notify = (msg) => import('../teams/notify.js')
@@ -546,7 +546,7 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
       writeFileSync(ameLockFile, String(Date.now()), 'utf8');
 
       const AME_PS1 = 'C:\\Users\\Assistant\\AuditMatchingEngine\\ame-run.ps1';
-      const MAX_RUN_MS = 7 * 60 * 60 * 1000; // abort by 5 AM so the 6 AM finance report can run
+      const MAX_RUN_MS = 5 * 60 * 60 * 1000; // abort by 5 AM so the 6 AM finance report can run
       const runStart = Date.now();
 
       function runStep(script) {
@@ -605,12 +605,12 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
         for (let i = 0; i < steps.length; i++) {
           const step = steps[i];
 
-          // Hard ceiling: abort remaining steps if we've been running > 7 h
+          // Hard ceiling: abort remaining steps if we've been running > 5 h
           if (Date.now() - runStart > MAX_RUN_MS) {
             const remaining = steps.slice(i).map(s => s.label);
             skipped.push(...remaining);
             await notify(
-              `AME weekly sync aborted after 7h -- remaining steps skipped to protect 6 AM finance report.\n` +
+              `AME weekly sync aborted after 5h -- remaining steps skipped to protect 6 AM finance report.\n` +
               `Skipped: ${remaining.join(', ')}`
             );
             break;
