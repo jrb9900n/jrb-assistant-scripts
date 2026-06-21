@@ -137,8 +137,14 @@ export async function getInvoicesForWeek(startDate, endDate) {
   const result = [];
   for (const inv of invoices) {
     const lines = inv.Line ?? [];
+    // Scan all line descriptions and pick the first non-"Other" category found
+    let cat = 'Other';
+    for (const line of lines) {
+      if (!line.Description) continue;
+      const c = categorize(line.Description);
+      if (c !== 'Other') { cat = c; break; }
+    }
     const firstDesc = lines.find(l => l.Description)?.Description ?? '';
-    const cat = categorize(firstDesc);
     result.push({
       id: inv.Id,
       invoiceNum: inv.DocNumber,
