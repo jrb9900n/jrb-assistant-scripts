@@ -209,8 +209,8 @@ async function getDraftEstimates() {
       daysOld: e.quoteDate ? daysBetween(e.quoteDate, new Date()) : null,
     }));
   logger.info('overnight-report: Draft estimates from SA', { count: drafts.length });
-  // Sort oldest first; null-date estimates go to bottom (treated as Infinity age)
-  return drafts.sort((a, b) => (b.daysOld ?? Infinity) - (a.daysOld ?? Infinity));
+  // Sort oldest first; null-date estimates go to bottom
+  return drafts.sort((a, b) => (b.daysOld ?? -Infinity) - (a.daysOld ?? -Infinity));
 }
 
 // ── Section 4: Aging estimates ────────────────────────────────────────────────
