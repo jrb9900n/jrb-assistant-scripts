@@ -69,16 +69,6 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Sunday 1:30 AM — QBO ↔ SA audit matching engine (runs after 1 AM sa_nightly_sync)
-    schedule: '30 1 * * 0',
-    name: 'weekly_audit_run',
-    run: async () => {
-      const { runAudit } = await import('../tools/impl/audit.js');
-      const result = await runAudit();
-      logger.info('Weekly audit run complete', result);
-    },
-  },
-  {
     // Sunday 6 AM — send QBO ↔ SA audit summary email to Michael
     schedule: '0 6 * * 0',
     name: 'weekly_audit_email',
