@@ -93,7 +93,9 @@ const SCHEDULED_TASKS = [
       }
 
       try {
+        const { runAudit } = await import('../tools/impl/audit.js');
         const { generateAndSendWeeklyFinanceReport } = await import('../tools/impl/weekly-finance-report.js');
+        await runAudit();
         const result = await generateAndSendWeeklyFinanceReport({ delayed, delayMinutes });
         logger.info('weekly_finance_report: done', result);
       } catch (err) {

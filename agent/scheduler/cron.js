@@ -53,35 +53,68 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Monday 7 AM — prior week credit card expense summary to Michael
-    schedule: '0 7 * * 1',
-    name: 'weekly_expense_report',
-    run: async () => {
-      const { generateWeeklyExpenseReport } = await import('../tools/impl/expense.js');
-      const { sendEmail } = await import('../tools/impl/m365.js');
-      const report = await generateWeeklyExpenseReport();
-      await sendEmail({
-        to: ['michael@jrboehlke.com'],
-        subject: report.subject,
-        body: report.body,
-      });
-      logger.info('Weekly expense report sent', { subject: report.subject });
-    },
-  },
-  {
-    // Sunday 6 AM — send QBO ↔ SA audit summary email to Michael
+    // Sunday 6 AM — consolidated weekly finance report (Revenue, AR, Expenses, Reconciliation)
+    // Replaces: weekly_crm_report, weekly_expense_report, weekly_audit_email
+    // Waits for AME to finish if still running at 6 AM — sends delay notification and polls.
+    // runAudit() refreshes audit_issues so reconciliation sections have current data.
     schedule: '0 6 * * 0',
-    name: 'weekly_audit_email',
+    name: 'weekly_finance_report',
     run: async () => {
-      const { generateAuditEmail } = await import('../tools/impl/audit.js');
-      const { sendEmail } = await import('../tools/impl/m365.js');
-      const report = await generateAuditEmail();
-      await sendEmail({
-        to: ['michael@jrboehlke.com'],
-        subject: report.subject,
-        body: report.body,
-      });
-      logger.info('Weekly audit email sent', { subject: report.subject });
+      const ameLockFile = join(tmpdir(), 'ame-weekly-sync.lock');
+      let delayed = false;
+      let delayMinutes = 0;
+
+      if (existsSync(ameLockFile)) {
+        delayed = true;
+        const ameStartMs = Number(readFileSync(ameLockFile, 'utf8') || 0);
+        const runningMin = ameStartMs ? Math.round((Date.now() - ameStartMs) / 60000) : '?';
+        logger.info('weekly_finance_report: AME still running, sending delay notification', { runningMin });
+
+        try {
+          const { sendEmail } = await import('../tools/impl/m365.js');
+          await sendEmail({
+            to: ['michael@jrboehlke.com'],
+            subject: `Weekly Finance Report Delayed — AME sync still running`,
+            body: `<p style="font-family:Arial,sans-serif;">The weekly finance report is ready to run, but the AuditMatchingEngine sync started at 10 PM Saturday is still in progress (${runningMin} min elapsed).</p><p style="font-family:Arial,sans-serif;">The report will be sent automatically as soon as AME finishes. No action needed.</p>`,
+          });
+        } catch (e) {
+          logger.warn('weekly_finance_report: delay notification failed', { err: e.message });
+        }
+
+        // Poll every 2 min until lock gone, stale (>5h old), or 4h timeout
+        const pollStart = Date.now();
+        await new Promise(resolve => {
+          const iv = setInterval(() => {
+            if (!existsSync(ameLockFile)) { clearInterval(iv); resolve(); return; }
+            try {
+              const lockTs = Number(readFileSync(ameLockFile, 'utf8') || 0);
+              const lockAge = lockTs ? Date.now() - lockTs : 0;
+              if (lockAge > 5 * 60 * 60 * 1000 || Date.now() - pollStart > 4 * 60 * 60 * 1000) {
+                clearInterval(iv); resolve();
+              }
+            } catch { clearInterval(iv); resolve(); }
+          }, 2 * 60 * 1000);
+        });
+
+        delayMinutes = Math.round((Date.now() - pollStart) / 60000);
+        logger.info('weekly_finance_report: AME done (or timed out), proceeding', { delayMinutes });
+      }
+
+      try {
+        const { runAudit } = await import('../tools/impl/audit.js');
+        const { generateAndSendWeeklyFinanceReport } = await import('../tools/impl/weekly-finance-report.js');
+        await runAudit();
+        const result = await generateAndSendWeeklyFinanceReport({ delayed, delayMinutes });
+        logger.info('weekly_finance_report: done', result);
+      } catch (err) {
+        logger.error('weekly_finance_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Weekly Finance Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('weekly_finance_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
     },
   },
   {
@@ -91,33 +124,6 @@ const SCHEDULED_TASKS = [
     run: async () => {
       const { runWeeklySynthesis } = await import('../tools/impl/feedback.js');
       await runWeeklySynthesis();
-    },
-  },
-  {
-    // Monday 7 AM — prior week QBO AR/payment summary to Michael
-    schedule: '0 7 * * 1',
-    name: 'weekly_crm_report',
-    run: async () => {
-      const { sendEmail } = await import('../tools/impl/m365.js');
-      const d = new Date();
-      const dayNum = d.getUTCDay() || 7;
-      const thu = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 4 - dayNum));
-      const yearStart = new Date(Date.UTC(thu.getUTCFullYear(), 0, 1));
-      const weekNum = Math.ceil((((thu - yearStart) / 86400000) + 1) / 7);
-      const weekLabel = `${thu.getUTCFullYear()}-W${String(weekNum).padStart(2, '0')}`;
-
-      const { result: reportContent } = await runAgent({
-        task: `Pull QuickBooks data for the prior week. Include: outstanding invoices (total AR, overdue breakdown), payments received, any new customers, and top open balances. Write a concise executive summary. Save to OneDrive at /Agent Reports/Weekly CRM/${weekLabel}.md. Return the full report as plain text. Do NOT send a Teams message.`,
-        taskType: 'report',
-        saveContext: true,
-      });
-
-      await sendEmail({
-        to: ['michael@jrboehlke.com'],
-        subject: `Weekly Finance Report — ${weekLabel}`,
-        body: `<p>${(reportContent ?? 'Report generated — see OneDrive for full details.').replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
-      });
-      logger.info('Weekly CRM report sent', { week: weekLabel });
     },
   },
   {
