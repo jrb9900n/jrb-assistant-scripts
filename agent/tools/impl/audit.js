@@ -19,7 +19,8 @@ const AMOUNT_MISMATCH_THRESHOLD = 50;   // flag customer-level delta > $50
 const UNBILLED_GRACE_DAYS = 30;         // ignore completed jobs < 30 days old (landscape monthly billing)
 const SNOW_GRACE_DAYS = 60;             // snow billing can lag up to 60 days
 const STALLED_AR_THRESHOLD = 500;       // flag QB customer with open AR > $500 and no payment in 90 days
-const SNOW_BILLING_LOOKBACK_DAYS = 180; // QB-linked invoice lookback for SALT/ICE suppression — covers full post-season window
+const SNOW_BILLING_LOOKBACK_DAYS = 180; // QB invoice fetch window for SALT/ICE coverage check
+const SALT_INVOICE_WINDOW_DAYS = 90;   // QB invoice must fall within 90 days after SALT/ICE service date
 
 // Word-bounded regex so "service", "price", "device" do not match "ice"
 const SALT_ICE_RE = /\bsalt\b|\bice\b/i;
@@ -61,10 +62,11 @@ async function checkUnbilledComplete(runId) {
   const lookbackDate = dateStr(LOOKBACK_DAYS);
 
   // Fetch contract client names to exclude (is_contract = true in sa_invoices).
-  // Also fetch all customers that appear in QB invoices within 180 days — SA creates the
-  // invoice and pushes it to QB, so qb_invoices is the reliable signal that billing exists.
-  // QB customer names can differ from SA client names (e.g. "CUI-Huntington..." vs
-  // "Huntington...(CUI)"), so fuzzy matching is applied at the filter step below.
+  // Fetch QB invoice dates per customer — SA creates invoices and pushes to QB, so
+  // qb_invoices is the reliable signal. We check per-job: a SALT/ICE job is suppressed
+  // only if the client has a QB invoice within SALT_INVOICE_WINDOW_DAYS of the service date.
+  // QB customer names can differ from SA names ("CUI-Huntington..." vs "Huntington...(CUI)"),
+  // so fuzzy matching is used when building the per-client date index.
   const [contractResult, qbBilledResult] = await Promise.all([
     fleetops
       .from('sa_invoices')
@@ -73,11 +75,31 @@ async function checkUnbilledComplete(runId) {
       .gte('date', lookbackDate),
     fleetops
       .from('qb_invoices')
-      .select('customer_name')
+      .select('customer_name, date')
       .gte('date', dateStr(SNOW_BILLING_LOOKBACK_DAYS)),
   ]);
   const contractClients = new Set((contractResult.data ?? []).map(r => normalizeName(r.client)));
-  const qbBilledClients = new Set((qbBilledResult.data ?? []).map(r => normalizeName(r.customer_name)));
+
+  // Build Map<normalizedQBName, string[]> of invoice dates per QB customer
+  const qbInvoiceDates = new Map();
+  for (const inv of qbBilledResult.data ?? []) {
+    const norm = normalizeName(inv.customer_name);
+    if (!qbInvoiceDates.has(norm)) qbInvoiceDates.set(norm, []);
+    qbInvoiceDates.get(norm).push(inv.date);
+  }
+
+  // Returns true if a QB invoice exists within SALT_INVOICE_WINDOW_DAYS after service date
+  function isSaltJobCovered(job) {
+    const svc = job.date_completed;
+    const winEnd = new Date(svc + 'T00:00:00Z');
+    winEnd.setUTCDate(winEnd.getUTCDate() + SALT_INVOICE_WINDOW_DAYS);
+    const winEndStr = winEnd.toISOString().split('T')[0];
+    for (const [qbNorm, dates] of qbInvoiceDates) {
+      if (!matchesContractClient(job.client, new Set([qbNorm]))) continue;
+      if (dates.some(d => d >= svc && d <= winEndStr)) return true;
+    }
+    return false;
+  }
 
   // DB cutoff uses the shorter grace period; snow jobs get additional JS-level filtering below
   const { data: jobs, error } = await fleetops
@@ -96,10 +118,9 @@ async function checkUnbilledComplete(runId) {
     .filter(job => !matchesContractClient(job.client, contractClients))
     // Snow billing cycles lag up to 60 days — skip snow jobs completed within 60 days
     .filter(job => /snow/i.test(job.service ?? '') ? job.date_completed < snowCutoff : true)
-    // SALT/ICE: batch-billed snow accounts are invoiced directly in QB with no SA invoice.
-    // Suppress if the client appears in QB invoices within 180 days — fuzzy match handles
-    // name variants like "CUI-Huntington..." (QB) vs "Huntington...(CUI)" (SA).
-    .filter(job => !SALT_ICE_RE.test(job.service ?? '') || !matchesContractClient(job.client, qbBilledClients))
+    // SALT/ICE: suppress only when a QB invoice exists within 90 days of the service date.
+    // A real billing gap (no covering invoice) still surfaces as an issue.
+    .filter(job => !SALT_ICE_RE.test(job.service ?? '') || !isSaltJobCovered(job))
     .map(job => ({
     fingerprint: `unbilled_complete|${job.id}`,
     issue_type: 'unbilled_complete',
