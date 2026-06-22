@@ -253,3 +253,50 @@ export async function uploadReceiptToQbo(transactionId, fileBuffer, contentType,
   logger.info('Receipt attached to QBO purchase', { transactionId, attachableId: attachable.Id, fileName });
   return attachable.Id;
 }
+
+// ── CC Sub-account creation ────────────────────────────────────
+
+/**
+ * Create a CreditCard sub-account under the Chase parent account in QBO.
+ * Called when an unknown Chase card is identified and linked to an employee.
+ */
+export async function createQBCCSubAccount(employeeName, lastFour) {
+  const token = await getToken();
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    Accept: 'application/json',
+    'Content-Type': 'application/json',
+  };
+
+  const parentRes = await axios.get(`${BASE}/query`, {
+    params: { query: "SELECT * FROM Account WHERE AccountType = 'CreditCard' MAXRESULTS 50" },
+    headers,
+  });
+  const accounts = parentRes.data.QueryResponse?.Account ?? [];
+  // Parent account has no ParentRef; prefer one whose name includes 'Chase'
+  const parent =
+    accounts.find(a => !a.ParentRef && /chase/i.test(a.Name)) ??
+    accounts.find(a => !a.ParentRef);
+  if (!parent) throw new Error('No top-level CreditCard account found in QBO');
+
+  const accountName = `${employeeName} ...${lastFour}`;
+  const createRes = await axios.post(
+    `${BASE}/account`,
+    {
+      Name: accountName,
+      AccountType: 'CreditCard',
+      AccountSubType: 'CreditCard',
+      ParentRef: { value: parent.Id, name: parent.Name },
+    },
+    { headers }
+  );
+
+  if (createRes.data?.Fault) {
+    const msg = createRes.data.Fault?.Error?.[0]?.Message ?? JSON.stringify(createRes.data.Fault);
+    throw new Error(`QBO account creation failed: ${msg}`);
+  }
+  const created = createRes.data.Account;
+  if (!created) throw new Error('QBO account creation returned no Account object');
+  logger.info('QB CC sub-account created', { name: created.Name, id: created.Id });
+  return { id: created.Id, name: created.Name };
+}

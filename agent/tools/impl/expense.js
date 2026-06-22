@@ -2,7 +2,7 @@
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
-import { getPurchase, uploadReceiptToQbo } from './quickbooks.js';
+import { getPurchase, uploadReceiptToQbo, createQBCCSubAccount } from './quickbooks.js';
 import { sendEmail } from './m365.js';
 import { sendProactiveMessage } from '../../teams/notify.js';
 import twilio from 'twilio';
@@ -543,8 +543,8 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
     .maybeSingle();
 
   if (!card) {
-    logger.warn('Chase alert: no active card found for last four', { cardLastFour, subject: email.subject });
-    return true; // handled — don't let it fall through to general email reply
+    await handleUnknownCard({ cardLastFour, amount, merchant, transactionDate });
+    return true;
   }
 
   // Dedup: existing report within ±1 day with same card + amount
@@ -593,6 +593,148 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
 
   logger.info('Chase alert: expense report created', { reportId: report.id, employee: card.employee_name, merchant, amount });
   return true;
+}
+
+// ── Unknown card handling ──────────────────────────────────────
+
+async function handleUnknownCard({ cardLastFour, amount, merchant, transactionDate }) {
+  logger.warn('Chase alert: unknown card', { cardLastFour, merchant, amount });
+
+  // Dedup: same guard as the known-card path — skip if a stub already exists ±1 day
+  const dayBefore = new Date(`${transactionDate}T12:00:00`); dayBefore.setDate(dayBefore.getDate() - 1);
+  const dayAfter  = new Date(`${transactionDate}T12:00:00`); dayAfter.setDate(dayAfter.getDate() + 1);
+  const { data: dup } = await supabase
+    .from('expense_reports')
+    .select('id')
+    .eq('card_last_four', cardLastFour)
+    .gte('transaction_date', dayBefore.toISOString().slice(0, 10))
+    .lte('transaction_date', dayAfter.toISOString().slice(0, 10))
+    .gte('amount', amount - 0.02)
+    .lte('amount', amount + 0.02)
+    .maybeSingle();
+  if (dup) {
+    logger.info('Chase alert: duplicate unknown-card stub already exists, skipping', { reportId: dup.id });
+    return;
+  }
+
+  let reportId = null;
+  try {
+    const { data } = await supabase
+      .from('expense_reports')
+      .insert({
+        card_last_four: cardLastFour,
+        amount,
+        vendor: merchant,
+        transaction_date: transactionDate,
+        status: 'pending_identification',
+      })
+      .select('id')
+      .single();
+    reportId = data?.id;
+  } catch (err) {
+    logger.warn('Unknown card: failed to create expense stub', { err: err.message });
+  }
+
+  const amountStr = `$${Number(amount).toFixed(2)}`;
+  sendProactiveMessage(
+    `\u{1F6A8} Unknown card **${cardLastFour}** charged ${amountStr} at ${merchant} on ${transactionDate}.\n` +
+    (reportId ? `Expense stub created (ID: ${reportId}).\n` : '') +
+    `Reply: \`identify card ${cardLastFour} as [Employee Name]\` to register this card and route the expense.`
+  ).catch(() => {});
+}
+
+/**
+ * Link a previously-unknown card to an employee, route pending expenses, and create a QB CC sub-account.
+ * Called by the agent in response to Michael's "identify card XXXX as Name" message.
+ */
+export async function identifyUnknownCard({ lastFour, employeeName }) {
+  if (!/^\d{4}$/.test(lastFour)) throw new Error('lastFour must be exactly 4 digits');
+
+  // Check for an existing record (placeholder or otherwise) for this employee.
+  // Use wildcards so partial names like "Steffen Jacob" match "Steffen J." in the DB.
+  const { data: existing } = await supabase
+    .from('credit_cards')
+    .select('*')
+    .ilike('employee_name', `%${employeeName}%`)
+    .maybeSingle();
+
+  let cardRecord;
+  if (existing) {
+    const { data, error } = await supabase
+      .from('credit_cards')
+      .update({ last_four: lastFour, is_active: true })
+      .eq('id', existing.id)
+      .select()
+      .single();
+    if (error) throw new Error(`Failed to update card record: ${error.message}`);
+    cardRecord = data;
+  } else {
+    const { data, error } = await supabase
+      .from('credit_cards')
+      .insert({ last_four: lastFour, employee_name: employeeName, label: employeeName, is_active: true })
+      .select()
+      .single();
+    if (error) throw new Error(`Failed to create card record: ${error.message}`);
+    cardRecord = data;
+  }
+
+  // Route pending expense stubs created while the card was unidentified
+  const { data: pending, error: pendingErr } = await supabase
+    .from('expense_reports')
+    .update({
+      employee_name: cardRecord.employee_name,
+      phone_number:  cardRecord.phone_number  ?? null,
+      sms_gateway:   cardRecord.sms_gateway   ?? null,
+      profile_id:    cardRecord.profile_id    ?? null,
+      status: 'pending_employee',
+    })
+    .eq('card_last_four', lastFour)
+    .eq('status', 'pending_identification')
+    .select('id, amount, vendor, transaction_date');
+
+  if (pendingErr) {
+    logger.warn('identifyUnknownCard: failed to route pending stubs', { err: pendingErr.message, lastFour });
+  }
+
+  if (cardRecord.phone_number) {
+    for (const report of (pending ?? [])) {
+      try {
+        await sendExpenseSms(cardRecord.phone_number, {
+          report,
+          amount: report.amount,
+          vendor: report.vendor,
+          date: report.transaction_date,
+          cardLastFour: lastFour,
+        });
+        await supabase.from('expense_reports')
+          .update({ sms_sent_at: new Date().toISOString() })
+          .eq('id', report.id);
+      } catch (err) {
+        logger.warn('identifyUnknownCard: SMS failed for report', { reportId: report.id, err: err.message });
+      }
+    }
+  }
+
+  // Create QB CC sub-account under the Chase parent
+  let qbAccount = null;
+  try {
+    qbAccount = await createQBCCSubAccount(cardRecord.employee_name, lastFour);
+  } catch (err) {
+    logger.warn('identifyUnknownCard: QB sub-account creation failed', { err: err.message });
+  }
+
+  logger.info('Unknown card identified', {
+    lastFour,
+    employee: cardRecord.employee_name,
+    expensesRouted: (pending ?? []).length,
+    qbAccount: qbAccount?.name,
+  });
+
+  return {
+    card: { id: cardRecord.id, employee_name: cardRecord.employee_name, last_four: lastFour },
+    expensesRouted: (pending ?? []).length,
+    qbAccount,
+  };
 }
 
 function parseChaseAlert(text) {

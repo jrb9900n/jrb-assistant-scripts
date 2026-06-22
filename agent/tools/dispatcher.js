@@ -13,6 +13,7 @@ async function webSearch({ query }) {
 import { logger } from '../core/logger.js';
 import * as m365        from './impl/m365.js';
 import * as qb          from './impl/quickbooks.js';
+import * as expense     from './impl/expense.js';
 import * as files       from './impl/files.js';
 import * as github      from './impl/github.js';
 import * as scripts     from './impl/scripts.js';
@@ -68,6 +69,7 @@ const HANDLERS = {
 
   // CRM / Finance
   qb_query:              (i) => qb.query(i),
+  identify_unknown_card: (i) => expense.identifyUnknownCard(i),
 
   // Files / OneDrive
   save_to_onedrive:      (i) => m365.saveToOneDrive(i),

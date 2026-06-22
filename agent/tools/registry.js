@@ -281,6 +281,18 @@ const QB_TOOLS = [
       required: ['query'],
     },
   },
+  {
+    name: 'identify_unknown_card',
+    description: 'Register an unknown Chase credit card by linking it to an employee. Updates the credit_cards record with the real last-four digits, routes any pending_identification expense stubs to that employee (sends SMS), and creates a QB CreditCard sub-account under the Chase parent. Call this when Michael says "identify card XXXX as [Employee Name]" after an unknown-card Teams alert.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lastFour:     { type: 'string', description: '4-digit card number from the Chase alert (digits only, e.g. "3421")' },
+        employeeName: { type: 'string', description: 'Employee name matching the credit_cards table (e.g. "Steffen Jacob")' },
+      },
+      required: ['lastFour', 'employeeName'],
+    },
+  },
 ];
 
 const FILE_TOOLS = [
