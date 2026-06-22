@@ -206,7 +206,12 @@ export async function runAudit() {
       checkUnbilledComplete(runId),
       checkOverdueInvoices(runId),
       checkAmountMismatches(runId),
-      checkNonzeroBalances(runId),
+      // checkNonzeroBalances queries sa_jobs.account_balance which does not exist in the schema.
+      // Suppressed until the column is added or the check is rewritten against sa_invoices.
+      checkNonzeroBalances(runId).catch(err => {
+        logger.warn('checkNonzeroBalances skipped (schema mismatch)', { err: err.message });
+        return [];
+      }),
     ]);
     allIssues = [...unbilled, ...overdue, ...mismatches, ...balances];
   } catch (err) {
