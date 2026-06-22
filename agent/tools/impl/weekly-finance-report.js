@@ -537,19 +537,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   }
 
   if (earnedNotInvoiced.length) {
-    html += `<p style="margin:0 0 6px;font-size:13px;color:#444444;"><strong>Earned but Not Yet Invoiced &mdash; ${f$(totalUnbilled)}</strong> (${earnedNotInvoiced.length} SA jobs completed, no QB invoice)</p>`;
-    const topUnbilled = earnedNotInvoiced.slice(0, 6);
-    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:14px;">`;
-    for (const [i, u] of topUnbilled.entries()) {
-      html += `<tr style="${i % 2 ? 'background:#f8f8f8;' : ''}">
-        <td style="padding:5px 8px;font-size:13px;color:#333333;">${u.sa_client ?? '—'}</td>
-        <td style="padding:5px 8px;font-size:13px;color:#b35900;font-weight:bold;text-align:right;white-space:nowrap;">${f$(u.sa_amount ?? 0)}</td>
-      </tr>`;
-    }
-    if (earnedNotInvoiced.length > 6) {
-      html += `<tr><td colspan="2" style="padding:5px 8px;font-size:12px;color:#888888;">… and ${earnedNotInvoiced.length - 6} more</td></tr>`;
-    }
-    html += `</table>`;
+    html += `<p style="margin:0 0 14px;font-size:13px;color:#444444;"><strong>Earned but Not Yet Invoiced &mdash; ${f$(totalUnbilled)}</strong> (${earnedNotInvoiced.length} SA jobs completed, no QB invoice &mdash; see Section 4)</p>`;
   }
 
   // ── Payments received — grouped by client ────────────────────────────────

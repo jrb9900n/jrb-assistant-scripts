@@ -19,6 +19,10 @@ const AMOUNT_MISMATCH_THRESHOLD = 50;   // flag customer-level delta > $50
 const UNBILLED_GRACE_DAYS = 30;         // ignore completed jobs < 30 days old (landscape monthly billing)
 const SNOW_GRACE_DAYS = 60;             // snow billing can lag up to 60 days
 const STALLED_AR_THRESHOLD = 500;       // flag QB customer with open AR > $500 and no payment in 90 days
+const SNOW_BILLING_LOOKBACK_DAYS = 180; // QB-linked invoice lookback for SALT/ICE suppression — covers full post-season window
+
+// Word-bounded regex so "service", "price", "device" do not match "ice"
+const SALT_ICE_RE = /\bsalt\b|\bice\b/i;
 
 function normalizeName(name) {
   return (name || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
@@ -56,13 +60,24 @@ async function checkUnbilledComplete(runId) {
   const snowCutoff = dateStr(SNOW_GRACE_DAYS);
   const lookbackDate = dateStr(LOOKBACK_DAYS);
 
-  // Fetch contract client names to exclude (is_contract = true in sa_invoices)
-  const { data: contractRows } = await fleetops
-    .from('sa_invoices')
-    .select('client')
-    .eq('is_contract', true)
-    .gte('date', lookbackDate);
-  const contractClients = new Set((contractRows ?? []).map(r => normalizeName(r.client)));
+  // Fetch contract client names to exclude (is_contract = true in sa_invoices).
+  // Also fetch all clients that have ANY QB-linked invoice in the lookback period —
+  // these are batch-billed accounts; SALT/ICE job-level invoice_id is never populated
+  // for them because billing happens at the consolidated monthly invoice level.
+  const [contractResult, qboLinkedResult] = await Promise.all([
+    fleetops
+      .from('sa_invoices')
+      .select('client')
+      .eq('is_contract', true)
+      .gte('date', lookbackDate),
+    fleetops
+      .from('sa_invoices')
+      .select('client')
+      .not('qbo_invoice_id', 'is', null)
+      .gte('date', dateStr(SNOW_BILLING_LOOKBACK_DAYS)),
+  ]);
+  const contractClients   = new Set((contractResult.data   ?? []).map(r => normalizeName(r.client)));
+  const qboLinkedClients  = new Set((qboLinkedResult.data  ?? []).map(r => normalizeName(r.client)));
 
   // DB cutoff uses the shorter grace period; snow jobs get additional JS-level filtering below
   const { data: jobs, error } = await fleetops
@@ -81,6 +96,10 @@ async function checkUnbilledComplete(runId) {
     .filter(job => !matchesContractClient(job.client, contractClients))
     // Snow billing cycles lag up to 60 days — skip snow jobs completed within 60 days
     .filter(job => /snow/i.test(job.service ?? '') ? job.date_completed < snowCutoff : true)
+    // SALT/ICE: individual jobs are never invoice-linked for batch-billed snow accounts.
+    // If the client has any QB-linked sa_invoice in the 180-day window, the billing is covered.
+    // Use exact normalized match (not fuzzy) — both sa_jobs and sa_invoices share the same SA client names.
+    .filter(job => !SALT_ICE_RE.test(job.service ?? '') || !qboLinkedClients.has(normalizeName(job.client)))
     .map(job => ({
     fingerprint: `unbilled_complete|${job.id}`,
     issue_type: 'unbilled_complete',
@@ -136,7 +155,7 @@ async function checkAmountMismatches(runId) {
   const [saResult, qbResult, contractResult] = await Promise.all([
     fleetops
       .from('sa_jobs')
-      .select('client, amount')
+      .select('client, amount, service')
       .eq('status', 3)
       .gte('date_completed', lookbackDate)
       .not('amount', 'is', null),
@@ -156,13 +175,17 @@ async function checkAmountMismatches(runId) {
 
   const contractClients = new Set((contractResult.data ?? []).map(r => normalizeName(r.client)));
 
-  // Aggregate SA totals by normalized client name, skipping contract clients
+  // Aggregate SA totals by normalized client name, skipping contract clients.
+  // Track whether ALL of a client's jobs are SALT/ICE — seasonal billing means the
+  // 90-day SA job window never aligns with QB invoice timing for those clients.
   const saMap = new Map();
+  const saAllSaltIce = new Map(); // norm → true if every job is SALT/ICE
   for (const row of saResult.data) {
     const norm = normalizeName(row.client);
     if (matchesContractClient(row.client, contractClients)) continue;
-    if (!saMap.has(norm)) saMap.set(norm, { original: row.client, total: 0 });
+    if (!saMap.has(norm)) { saMap.set(norm, { original: row.client, total: 0 }); saAllSaltIce.set(norm, true); }
     saMap.get(norm).total += parseFloat(row.amount || 0);
+    if (!SALT_ICE_RE.test(row.service ?? '')) saAllSaltIce.set(norm, false);
   }
 
   // Aggregate QB totals by normalized customer name
@@ -174,6 +197,7 @@ async function checkAmountMismatches(runId) {
 
   const issues = [];
   for (const [norm, saData] of saMap) {
+    if (saAllSaltIce.get(norm)) continue; // seasonal snow billing — comparison never aligns
     const qboTotal = qboMap.get(norm) || 0;
     const delta = Math.abs(saData.total - qboTotal);
     if (delta > AMOUNT_MISMATCH_THRESHOLD) {
