@@ -44,6 +44,18 @@ function matchesContractClient(jobClient, contractClients) {
   return false;
 }
 
+// Match a single SA client name against a single already-normalized QB customer name.
+// Used when iterating qboMap entries one-by-one (avoids repeated Set allocation).
+function nameMatchesQBCustomer(saName, qbNorm) {
+  const saNorm = normalizeName(saName);
+  if (saNorm === qbNorm) return true;
+  const saWords = saNorm.split(' ').filter(w => w.length > 2);
+  const qbWords = qbNorm.split(' ').filter(w => w.length > 2);
+  if (qbWords.length === 0) return false;
+  const shared = qbWords.filter(w => saWords.includes(w)).length;
+  return shared >= 2 && shared / qbWords.length >= 0.6;
+}
+
 
 function dateStr(daysAgo) {
   const d = new Date();
@@ -95,7 +107,7 @@ async function checkUnbilledComplete(runId) {
     winEnd.setUTCDate(winEnd.getUTCDate() + SALT_INVOICE_WINDOW_DAYS);
     const winEndStr = winEnd.toISOString().split('T')[0];
     for (const [qbNorm, dates] of qbInvoiceDates) {
-      if (!matchesContractClient(job.client, new Set([qbNorm]))) continue;
+      if (!nameMatchesQBCustomer(job.client, qbNorm)) continue;
       if (dates.some(d => d >= svc && d <= winEndStr)) return true;
     }
     return false;
@@ -193,6 +205,7 @@ async function checkAmountMismatches(runId) {
 
   if (saResult.error) throw new Error(`amount_mismatch SA query failed: ${saResult.error.message}`);
   if (qbResult.error) throw new Error(`amount_mismatch QB query failed: ${qbResult.error.message}`);
+  if (contractResult.error) throw new Error(`amount_mismatch contract query failed: ${contractResult.error.message}`);
 
   const contractClients = new Set((contractResult.data ?? []).map(r => normalizeName(r.client)));
 
@@ -201,7 +214,7 @@ async function checkAmountMismatches(runId) {
   // 90-day SA job window never aligns with QB invoice timing for those clients.
   const saMap = new Map();
   const saAllSaltIce = new Map(); // norm → true if every job is SALT/ICE
-  for (const row of saResult.data) {
+  for (const row of saResult.data ?? []) {
     const norm = normalizeName(row.client);
     if (matchesContractClient(row.client, contractClients)) continue;
     if (!saMap.has(norm)) { saMap.set(norm, { original: row.client, total: 0 }); saAllSaltIce.set(norm, true); }
@@ -209,28 +222,47 @@ async function checkAmountMismatches(runId) {
     if (!SALT_ICE_RE.test(row.service ?? '')) saAllSaltIce.set(norm, false);
   }
 
-  // Aggregate QB totals by normalized customer name
-  const qboMap = new Map();
+  // Aggregate QB totals by normalized customer name; store original for display
+  const qboMap = new Map(); // norm → { total, original }
   for (const inv of qbResult.data ?? []) {
     const norm = normalizeName(inv.customer_name);
-    qboMap.set(norm, (qboMap.get(norm) || 0) + parseFloat(inv.amount || 0));
+    if (!qboMap.has(norm)) qboMap.set(norm, { total: 0, original: inv.customer_name });
+    qboMap.get(norm).total += parseFloat(inv.amount || 0);
   }
 
   const issues = [];
   for (const [norm, saData] of saMap) {
     if (saAllSaltIce.get(norm)) continue; // seasonal snow billing — comparison never aligns
-    const qboTotal = qboMap.get(norm) || 0;
+
+    // Fuzzy QB lookup: exact normalized match first, then matchesContractClient fallback.
+    // Handles name variants like "David Wierzbicki" (SA) vs "David & Courtney Wierzbicki" (QB).
+    let qboTotal = 0, qboName = null;
+    if (qboMap.has(norm)) {
+      const e = qboMap.get(norm);
+      qboTotal = e.total;
+      qboName = e.original;
+    } else {
+      for (const [qbNorm, e] of qboMap) {
+        if (nameMatchesQBCustomer(saData.original, qbNorm)) {
+          qboTotal = e.total;
+          qboName = e.original;
+          break;
+        }
+      }
+    }
+
     const delta = Math.abs(saData.total - qboTotal);
     if (delta > AMOUNT_MISMATCH_THRESHOLD) {
+      const nameNote = qboName && qboName !== saData.original ? ` (QB: ${qboName})` : '';
       issues.push({
         fingerprint: `amount_mismatch|${norm}`,
         issue_type: 'amount_mismatch',
         severity: 'high',
         sa_client: saData.original,
         sa_amount: parseFloat(saData.total.toFixed(2)),
-        qbo_customer_name: saData.original,
+        qbo_customer_name: qboName || saData.original,
         qbo_amount: parseFloat(qboTotal.toFixed(2)),
-        description: `SA completed $${saData.total.toFixed(2)} vs QBO invoiced $${qboTotal.toFixed(2)} for ${saData.original} — $${delta.toFixed(2)} gap over past ${LOOKBACK_DAYS} days`,
+        description: `SA completed $${saData.total.toFixed(2)} vs QBO invoiced $${qboTotal.toFixed(2)} for ${saData.original}${nameNote} — $${delta.toFixed(2)} gap over past ${LOOKBACK_DAYS} days`,
         last_audit_run_id: runId,
       });
     }
