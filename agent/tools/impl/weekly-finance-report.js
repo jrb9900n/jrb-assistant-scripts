@@ -804,9 +804,9 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
 
   // overdue_invoice omitted — already covered by Section 2 AR Aging
   const issueTypes = {
-    unbilled_complete: { label: 'SA Completed — No QB Invoice',   color: '#c0392b' },
-    amount_mismatch:   { label: 'Invoice Amount Mismatches',       color: '#b35900' },
-    nonzero_balance:   { label: 'SA Clients with Open Balance',    color: '#888888' },
+    unbilled_complete: { label: 'SA Completed — No QB Invoice',            color: '#c0392b' },
+    amount_mismatch:   { label: 'Invoice Amount Mismatches',                color: '#b35900' },
+    stalled_ar:        { label: 'QB Open AR — No Payment in 90 Days',       color: '#7b2d8b' },
   };
   let hasAnyIssue = false;
   for (const [type, meta] of Object.entries(issueTypes)) {
