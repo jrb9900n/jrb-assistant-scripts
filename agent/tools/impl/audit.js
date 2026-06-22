@@ -61,23 +61,23 @@ async function checkUnbilledComplete(runId) {
   const lookbackDate = dateStr(LOOKBACK_DAYS);
 
   // Fetch contract client names to exclude (is_contract = true in sa_invoices).
-  // Also fetch all clients that have ANY QB-linked invoice in the lookback period —
-  // these are batch-billed accounts; SALT/ICE job-level invoice_id is never populated
-  // for them because billing happens at the consolidated monthly invoice level.
-  const [contractResult, qboLinkedResult] = await Promise.all([
+  // Also fetch all customers that appear in QB invoices within 180 days — SA creates the
+  // invoice and pushes it to QB, so qb_invoices is the reliable signal that billing exists.
+  // QB customer names can differ from SA client names (e.g. "CUI-Huntington..." vs
+  // "Huntington...(CUI)"), so fuzzy matching is applied at the filter step below.
+  const [contractResult, qbBilledResult] = await Promise.all([
     fleetops
       .from('sa_invoices')
       .select('client')
       .eq('is_contract', true)
       .gte('date', lookbackDate),
     fleetops
-      .from('sa_invoices')
-      .select('client')
-      .not('qbo_invoice_id', 'is', null)
+      .from('qb_invoices')
+      .select('customer_name')
       .gte('date', dateStr(SNOW_BILLING_LOOKBACK_DAYS)),
   ]);
-  const contractClients   = new Set((contractResult.data   ?? []).map(r => normalizeName(r.client)));
-  const qboLinkedClients  = new Set((qboLinkedResult.data  ?? []).map(r => normalizeName(r.client)));
+  const contractClients = new Set((contractResult.data ?? []).map(r => normalizeName(r.client)));
+  const qbBilledClients = new Set((qbBilledResult.data ?? []).map(r => normalizeName(r.customer_name)));
 
   // DB cutoff uses the shorter grace period; snow jobs get additional JS-level filtering below
   const { data: jobs, error } = await fleetops
@@ -96,10 +96,10 @@ async function checkUnbilledComplete(runId) {
     .filter(job => !matchesContractClient(job.client, contractClients))
     // Snow billing cycles lag up to 60 days — skip snow jobs completed within 60 days
     .filter(job => /snow/i.test(job.service ?? '') ? job.date_completed < snowCutoff : true)
-    // SALT/ICE: individual jobs are never invoice-linked for batch-billed snow accounts.
-    // If the client has any QB-linked sa_invoice in the 180-day window, the billing is covered.
-    // Use exact normalized match (not fuzzy) — both sa_jobs and sa_invoices share the same SA client names.
-    .filter(job => !SALT_ICE_RE.test(job.service ?? '') || !qboLinkedClients.has(normalizeName(job.client)))
+    // SALT/ICE: batch-billed snow accounts are invoiced directly in QB with no SA invoice.
+    // Suppress if the client appears in QB invoices within 180 days — fuzzy match handles
+    // name variants like "CUI-Huntington..." (QB) vs "Huntington...(CUI)" (SA).
+    .filter(job => !SALT_ICE_RE.test(job.service ?? '') || !matchesContractClient(job.client, qbBilledClients))
     .map(job => ({
     fingerprint: `unbilled_complete|${job.id}`,
     issue_type: 'unbilled_complete',
