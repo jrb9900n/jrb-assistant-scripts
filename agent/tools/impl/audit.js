@@ -16,7 +16,8 @@ const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
 const LOOKBACK_DAYS = 90;
 const OVERDUE_THRESHOLD_DAYS = 30;
 const AMOUNT_MISMATCH_THRESHOLD = 50;   // flag customer-level delta > $50
-const UNBILLED_GRACE_DAYS = 30;         // ignore completed jobs < 30 days old (snow ~30d, landscape monthly billing)
+const UNBILLED_GRACE_DAYS = 30;         // ignore completed jobs < 30 days old (landscape monthly billing)
+const SNOW_GRACE_DAYS = 60;             // snow billing can lag up to 60 days
 const BALANCE_MIN_THRESHOLD = 10;       // ignore SA balances < $10
 
 function normalizeName(name) {
@@ -36,6 +37,7 @@ function dateStr(daysAgo) {
 
 async function checkUnbilledComplete(runId) {
   const cutoff = dateStr(UNBILLED_GRACE_DAYS);
+  const snowCutoff = dateStr(SNOW_GRACE_DAYS);
   const lookbackDate = dateStr(LOOKBACK_DAYS);
 
   // Fetch contract client names to exclude (is_contract = true in sa_invoices)
@@ -46,6 +48,7 @@ async function checkUnbilledComplete(runId) {
     .gte('date', lookbackDate);
   const contractClients = new Set((contractRows ?? []).map(r => normalizeName(r.client)));
 
+  // DB cutoff uses the shorter grace period; snow jobs get additional JS-level filtering below
   const { data: jobs, error } = await fleetops
     .from('sa_jobs')
     .select('id, client, amount, invoice_id, date_completed, service, address')
@@ -60,6 +63,8 @@ async function checkUnbilledComplete(runId) {
 
   return (jobs ?? [])
     .filter(job => !contractClients.has(normalizeName(job.client)))
+    // Snow billing cycles lag up to 60 days — skip snow jobs completed within 60 days
+    .filter(job => /snow/i.test(job.service ?? '') ? job.date_completed < snowCutoff : true)
     .map(job => ({
     fingerprint: `unbilled_complete|${job.id}`,
     issue_type: 'unbilled_complete',

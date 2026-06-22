@@ -267,28 +267,31 @@ async function gatherFreshnessStatus() {
   };
 }
 
+// SA payments with no matching QB payment — unexplained cash inflows not yet recorded in QB.
+// Matches by customer name similarity + amount ±$1 + date within 21 days.
 async function gatherUnrecordedPayments() {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() - 90);
   const cutoffStr = cutoff.toISOString().slice(0, 10);
 
-  const [{ data: qbPmts, error: e1 }, { data: saPmts, error: e2 }] = await Promise.all([
-    supabase.from('qb_payments').select('qb_id,customer_name,amount,date,payment_method').gte('date', cutoffStr).order('date', { ascending: false }),
-    supabase.from('sa_payments').select('sa_id,client,payment_amount,payment_date').gte('payment_date', cutoffStr).eq('deleted', false),
+  const [{ data: saPmts, error: e1 }, { data: qbPmts, error: e2 }] = await Promise.all([
+    supabase.from('sa_payments').select('sa_id,client,payment_amount,payment_date,payment_type,reference').gte('payment_date', cutoffStr).eq('deleted', false).order('payment_date', { ascending: false }),
+    supabase.from('qb_payments').select('qb_id,customer_name,amount,date,payment_method').gte('date', cutoffStr),
   ]);
   if (e1 || e2) { logger.warn('Unrecorded payments query failed', { e1: e1?.message, e2: e2?.message }); return []; }
 
   const unrecorded = [];
-  for (const qb of (qbPmts ?? [])) {
-    const qbDate = new Date(qb.date + 'T12:00:00Z');
-    const qbAmt  = Number(qb.amount);
-    const match = (saPmts ?? []).find(sa => {
-      if (Math.abs(Number(sa.payment_amount) - qbAmt) > 1) return false;
-      const saDate = new Date(sa.payment_date + 'T12:00:00Z');
-      if (Math.abs(saDate - qbDate) > 14 * 86400000) return false;
-      return nameSimilarity(qb.customer_name, sa.client) >= 0.5;
+  for (const sa of (saPmts ?? [])) {
+    const saDate = new Date(sa.payment_date + 'T12:00:00Z');
+    const saAmt  = Number(sa.payment_amount);
+    if (saAmt <= 0) continue;
+    const match = (qbPmts ?? []).find(qb => {
+      if (Math.abs(Number(qb.amount) - saAmt) > 1) return false;
+      const qbDate = new Date(qb.date + 'T12:00:00Z');
+      if (Math.abs(saDate - qbDate) > 21 * 86400000) return false;
+      return nameSimilarity(sa.client, qb.customer_name) >= 0.5;
     });
-    if (!match) unrecorded.push(qb);
+    if (!match) unrecorded.push(sa);
   }
   return unrecorded;
 }
@@ -799,9 +802,9 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   // ══════════════════════════════════════════════════════════════════════════
   html += sectionHeader('Section 4 — Reconciliation & Errors');
 
+  // overdue_invoice omitted — already covered by Section 2 AR Aging
   const issueTypes = {
     unbilled_complete: { label: 'SA Completed — No QB Invoice',   color: '#c0392b' },
-    overdue_invoice:   { label: 'QB Invoices Overdue (30d+)',      color: '#b35900' },
     amount_mismatch:   { label: 'Invoice Amount Mismatches',       color: '#b35900' },
     nonzero_balance:   { label: 'SA Clients with Open Balance',    color: '#888888' },
   };
@@ -871,31 +874,33 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // SECTION 5 — UNRECORDED PAYMENTS
+  // SECTION 5 — SA PAYMENTS NOT IN QB
   // ══════════════════════════════════════════════════════════════════════════
-  html += sectionHeader('Section 5 — Unrecorded Payments (QB received, not in SA)');
+  html += sectionHeader('Section 5 — SA Payments Not in QB (Unexplained Cash Inflows)');
 
   if (!unrecordedPayments.length) {
-    html += `<p style="margin:0 0 16px;font-size:13px;color:#1a6e1a;font-style:italic;">No unrecorded payments found in the last 90 days.</p>`;
+    html += `<p style="margin:0 0 16px;font-size:13px;color:#1a6e1a;font-style:italic;">All SA payments from the last 90 days have a matching QB record.</p>`;
   } else {
-    const unrecordedTotal = unrecordedPayments.reduce((s, p) => s + Number(p.amount), 0);
-    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">The following ${unrecordedPayments.length} QB payment${unrecordedPayments.length > 1 ? 's' : ''} (${f$(unrecordedTotal)} total) have no matching SA payment within 14 days at a similar amount and customer name. These may need to be applied in SA.</p>`;
+    const unrecordedTotal = unrecordedPayments.reduce((s, p) => s + Number(p.payment_amount), 0);
+    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">The following ${unrecordedPayments.length} SA payment${unrecordedPayments.length > 1 ? 's' : ''} (${f$(unrecordedTotal)} total) have no matching QB payment within 21 days. These are cash inflows recorded in SA but not yet entered in QB.</p>`;
     html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
     <tr style="background-color:#f8f8f8;">
       <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Date</td>
-      <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Customer</td>
+      <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Client (SA)</td>
+      <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Type</td>
       <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;text-align:right;">Amount</td>
     </tr>`;
     for (let i = 0; i < unrecordedPayments.length; i++) {
       const p = unrecordedPayments[i];
       html += `<tr style="background-color:${i % 2 ? '#f8f8f8' : '#ffffff'};">
-        <td style="padding:5px 8px;font-size:13px;color:#888888;white-space:nowrap;">${fD(p.date)}</td>
-        <td style="padding:5px 8px;font-size:13px;color:#333333;">${p.customer_name || '—'}</td>
-        <td style="padding:5px 8px;font-size:13px;font-weight:bold;color:#1a6e1a;text-align:right;white-space:nowrap;">${f$(p.amount)}</td>
+        <td style="padding:5px 8px;font-size:13px;color:#888888;white-space:nowrap;">${fD(p.payment_date)}</td>
+        <td style="padding:5px 8px;font-size:13px;color:#333333;">${p.client || '—'}</td>
+        <td style="padding:5px 8px;font-size:12px;color:#888888;">${p.payment_type || '—'}</td>
+        <td style="padding:5px 8px;font-size:13px;font-weight:bold;color:#b35900;text-align:right;white-space:nowrap;">${f$(p.payment_amount)}</td>
       </tr>`;
     }
     html += `</table>`;
-    html += `<p style="margin:0 0 16px;font-size:12px;color:#888888;font-style:italic;">Source: QB payments vs SA payment records (last AME sync). Run <code>ame-run.ps1 sync:sa</code> to refresh SA data before relying on this section.</p>`;
+    html += `<p style="margin:0 0 16px;font-size:12px;color:#888888;font-style:italic;">Source: SA payments vs QB payment records (last AME sync). Match: same customer ±name + amount ±$1 + date ±21 days.</p>`;
   }
 
   // ── BTA Files ───────────────────────────────────────────────────────────────
