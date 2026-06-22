@@ -322,6 +322,56 @@ function alertBox(color, borderColor, title, rows) {
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${color};border-left:4px solid ${borderColor};border-radius:4px;margin-bottom:16px;"><tr><td style="padding:12px 16px;"><p style="margin:0 0 8px 0;font-size:12px;font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;color:${borderColor};">${title}</p>${rows}</td></tr></table>`;
 }
 
+// ── Audit CSV builder ───────────────────────────────────────────────────────
+// Generates a CSV Buffer with all open audit issues + AME matches.
+// Attached to the weekly finance email so Michael can inspect the full list.
+
+function buildAuditCSV(auditIssues, ameMatches) {
+  const escape = val => {
+    const s = String(val ?? '');
+    return s.includes(',') || s.includes('"') || s.includes('\n') || s.includes('\r') ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const row = cells => cells.map(escape).join(',');
+
+  const today = Date.now();
+  const lines = [];
+
+  lines.push(row(['Severity', 'Type', 'Client', 'SA Amount', 'QB Amount', 'QB Balance', 'Description', 'First Seen', 'Days Open']));
+  for (const iss of auditIssues) {
+    const daysOpen = iss.first_seen_at ? Math.floor((today - new Date(iss.first_seen_at).getTime()) / 86400000) : '';
+    lines.push(row([
+      iss.severity ?? '',
+      iss.issue_type ?? '',
+      iss.sa_client || iss.qbo_customer_name || '',
+      iss.sa_amount != null ? `$${Number(iss.sa_amount).toFixed(2)}` : '',
+      iss.qbo_amount != null ? `$${Number(iss.qbo_amount).toFixed(2)}` : '',
+      iss.qbo_balance != null ? `$${Number(iss.qbo_balance).toFixed(2)}` : '',
+      iss.description ?? '',
+      iss.first_seen_at ? iss.first_seen_at.slice(0, 10) : '',
+      daysOpen,
+    ]));
+  }
+
+  if (ameMatches.length) {
+    lines.push('');
+    lines.push(row(['Status', 'Customer', 'SA Invoice #', 'QB Invoice #', 'SA Amount', 'QB Amount', 'Difference', '', '']));
+    for (const m of ameMatches) {
+      lines.push(row([
+        m.match_status ?? '',
+        m.sa_customer || m.qb_customer || '',
+        m.sa_invoice_number ? `SA #${m.sa_invoice_number}` : '',
+        m.qb_invoice_number ? `QB #${m.qb_invoice_number}` : '',
+        m.sa_amount != null ? `$${Number(m.sa_amount).toFixed(2)}` : '',
+        m.qb_amount != null ? `$${Number(m.qb_amount).toFixed(2)}` : '',
+        m.amount_diff != null ? Number(m.amount_diff).toFixed(2) : '',
+        '', '',
+      ]));
+    }
+  }
+
+  return Buffer.from(lines.join('\r\n'), 'utf-8');
+}
+
 // ── HTML email builder ──────────────────────────────────────────────────────
 
 function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, freshness, unrecordedPayments, activeCards, delayed = false, delayMinutes = 0 }) {
@@ -906,10 +956,24 @@ export async function generateAndSendWeeklyFinanceReport({ delayed = false, dela
   const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
   const delayNote = delayed ? ` (delayed ${delayMinutes}m — awaited AME)` : '';
 
+  const attachments = [];
+  if (auditIssues.length > 0 || ameMatches.length > 0) {
+    try {
+      attachments.push({
+        name: `audit-issues-${weekLabel}.csv`,
+        contentType: 'text/csv',
+        content: buildAuditCSV(auditIssues, ameMatches),
+      });
+    } catch (err) {
+      logger.warn('weekly_finance_report: CSV attachment failed — email will send without it', { err: err.message });
+    }
+  }
+
   await sendEmail({
     to: ['michael@jrboehlke.com'],
     subject: `Weekly Finance Report — ${weekLabel} | ${new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 }).format(totalCollected)} collected${delayNote}`,
     body,
+    attachments,
   });
 
   logger.info('weekly_finance_report: sent', { weekLabel, totalCollected });
