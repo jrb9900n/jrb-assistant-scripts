@@ -16,7 +16,7 @@ const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
 const LOOKBACK_DAYS = 90;
 const OVERDUE_THRESHOLD_DAYS = 30;
 const AMOUNT_MISMATCH_THRESHOLD = 50;   // flag customer-level delta > $50
-const UNBILLED_GRACE_DAYS = 7;          // ignore completed jobs < 7 days old
+const UNBILLED_GRACE_DAYS = 30;         // ignore completed jobs < 30 days old (snow ~30d, landscape monthly billing)
 const BALANCE_MIN_THRESHOLD = 10;       // ignore SA balances < $10
 
 function normalizeName(name) {
