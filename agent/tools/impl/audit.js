@@ -18,11 +18,27 @@ const OVERDUE_THRESHOLD_DAYS = 30;
 const AMOUNT_MISMATCH_THRESHOLD = 50;   // flag customer-level delta > $50
 const UNBILLED_GRACE_DAYS = 30;         // ignore completed jobs < 30 days old (landscape monthly billing)
 const SNOW_GRACE_DAYS = 60;             // snow billing can lag up to 60 days
-const BALANCE_MIN_THRESHOLD = 10;       // ignore SA balances < $10
+const STALLED_AR_THRESHOLD = 500;       // flag QB customer with open AR > $500 and no payment in 90 days
 
 function normalizeName(name) {
   return (name || '').toLowerCase().replace(/[^a-z0-9\s]/g, '').replace(/\s+/g, ' ').trim();
 }
+
+// Fuzzy contract-client match: exact normalized match OR >= 2 shared words covering >= 60% of contract name.
+// Handles variants like "CUI-Acme" vs "Acme (CUI)" and "(AUTOPAY)" suffixes.
+function matchesContractClient(jobClient, contractClients) {
+  const norm = normalizeName(jobClient);
+  if (contractClients.has(norm)) return true;
+  const jobWords = norm.split(' ').filter(w => w.length > 2);
+  for (const contractNorm of contractClients) {
+    const cWords = contractNorm.split(' ').filter(w => w.length > 2);
+    if (cWords.length === 0) continue;
+    const shared = cWords.filter(w => jobWords.includes(w)).length;
+    if (shared >= 2 && shared / cWords.length >= 0.6) return true;
+  }
+  return false;
+}
+
 
 function dateStr(daysAgo) {
   const d = new Date();
@@ -62,7 +78,7 @@ async function checkUnbilledComplete(runId) {
   if (error) throw new Error(`unbilled_complete query failed: ${error.message}`);
 
   return (jobs ?? [])
-    .filter(job => !contractClients.has(normalizeName(job.client)))
+    .filter(job => !matchesContractClient(job.client, contractClients))
     // Snow billing cycles lag up to 60 days — skip snow jobs completed within 60 days
     .filter(job => /snow/i.test(job.service ?? '') ? job.date_completed < snowCutoff : true)
     .map(job => ({
@@ -116,16 +132,18 @@ async function checkOverdueInvoices(runId) {
 async function checkAmountMismatches(runId) {
   const lookbackDate = dateStr(LOOKBACK_DAYS);
 
-  const [saResult, qboResult, contractResult] = await Promise.all([
+  // Use fleetops qb_invoices (AME-synced) — avoids QB API memory issues from full SELECT *
+  const [saResult, qbResult, contractResult] = await Promise.all([
     fleetops
       .from('sa_jobs')
       .select('client, amount')
       .eq('status', 3)
       .gte('date_completed', lookbackDate)
       .not('amount', 'is', null),
-    query({
-      query: `SELECT * FROM Invoice WHERE TxnDate >= '${lookbackDate}' STARTPOSITION 1 MAXRESULTS 500`,
-    }),
+    fleetops
+      .from('qb_invoices')
+      .select('customer_name, amount')
+      .gte('date', lookbackDate),
     fleetops
       .from('sa_invoices')
       .select('client')
@@ -134,6 +152,7 @@ async function checkAmountMismatches(runId) {
   ]);
 
   if (saResult.error) throw new Error(`amount_mismatch SA query failed: ${saResult.error.message}`);
+  if (qbResult.error) throw new Error(`amount_mismatch QB query failed: ${qbResult.error.message}`);
 
   const contractClients = new Set((contractResult.data ?? []).map(r => normalizeName(r.client)));
 
@@ -141,17 +160,16 @@ async function checkAmountMismatches(runId) {
   const saMap = new Map();
   for (const row of saResult.data) {
     const norm = normalizeName(row.client);
-    if (contractClients.has(norm)) continue;
+    if (matchesContractClient(row.client, contractClients)) continue;
     if (!saMap.has(norm)) saMap.set(norm, { original: row.client, total: 0 });
     saMap.get(norm).total += parseFloat(row.amount || 0);
   }
 
-  // Aggregate QBO totals by normalized customer name
-  const qboInvoices = qboResult?.Invoice ?? [];
+  // Aggregate QB totals by normalized customer name
   const qboMap = new Map();
-  for (const inv of qboInvoices) {
-    const norm = normalizeName(inv.CustomerRef?.name);
-    qboMap.set(norm, (qboMap.get(norm) || 0) + parseFloat(inv.TotalAmt || 0));
+  for (const inv of qbResult.data ?? []) {
+    const norm = normalizeName(inv.customer_name);
+    qboMap.set(norm, (qboMap.get(norm) || 0) + parseFloat(inv.amount || 0));
   }
 
   const issues = [];
@@ -175,40 +193,63 @@ async function checkAmountMismatches(runId) {
   return issues;
 }
 
-// ── Check 4: SA clients with non-zero account balance ────────────────────────
-// Groups by client — one issue per client with a meaningful balance.
-// Reads sa_invoices.account_balance (account-level field populated by AME sync).
-// Fingerprint per normalized client name — auto-resolves when balance clears.
+// ── Check 4: QB customers with significant open AR and no payment in 90 days ──
+// Flags customers who have open invoices (total > STALLED_AR_THRESHOLD) with no
+// QB payment recorded in the past 90 days — ACH/wire payments not entered in QB,
+// or genuinely delinquent accounts. Fingerprint per customer — auto-resolves when
+// a payment is recorded or the open balance drops to zero.
 
-async function checkNonzeroBalances(runId) {
-  const { data: invoices, error } = await fleetops
-    .from('sa_invoices')
-    .select('client, account_balance')
-    .not('account_balance', 'is', null)
-    .eq('deleted', false);
+async function checkStalledAR(runId) {
+  const lookbackDate = dateStr(LOOKBACK_DAYS);
 
-  if (error) throw new Error(`nonzero_balance query failed: ${error.message}`);
+  const [{ data: openInvoices, error: e1 }, { data: recentPayments, error: e2 }] = await Promise.all([
+    fleetops
+      .from('qb_invoices')
+      .select('customer_name, balance, due_date')
+      .gt('balance', 0),
+    fleetops
+      .from('qb_payments')
+      .select('customer_name, amount, date')
+      .gte('date', lookbackDate),
+  ]);
 
-  // One record per client — account_balance is account-level so same value on all invoices for a client
-  const clientMap = new Map();
-  for (const inv of invoices ?? []) {
-    const balance = parseFloat(inv.account_balance || 0);
-    if (Math.abs(balance) > BALANCE_MIN_THRESHOLD && !clientMap.has(normalizeName(inv.client))) {
-      clientMap.set(normalizeName(inv.client), { client: inv.client, balance });
+  if (e1) throw new Error(`stalled_ar qb_invoices query failed: ${e1.message}`);
+  if (e2) throw new Error(`stalled_ar qb_payments query failed: ${e2.message}`);
+
+  const recentPayerSet = new Set((recentPayments ?? []).map(p => normalizeName(p.customer_name)));
+
+  // Aggregate open AR by customer
+  const arByCustomer = new Map();
+  for (const inv of openInvoices ?? []) {
+    const norm = normalizeName(inv.customer_name);
+    if (!arByCustomer.has(norm)) {
+      arByCustomer.set(norm, { name: inv.customer_name, totalBalance: 0, oldestDue: inv.due_date });
+    }
+    const entry = arByCustomer.get(norm);
+    entry.totalBalance += parseFloat(inv.balance || 0);
+    if (inv.due_date && (!entry.oldestDue || inv.due_date < entry.oldestDue)) {
+      entry.oldestDue = inv.due_date;
     }
   }
 
-  return Array.from(clientMap.values()).map(({ client, balance }) => {
-    const direction = balance > 0 ? 'owes' : 'has credit of';
-    return {
-      fingerprint: `nonzero_balance|${normalizeName(client)}`,
-      issue_type: 'nonzero_balance',
-      severity: 'low',
-      sa_client: client,
-      description: `${client} ${direction} $${Math.abs(balance).toFixed(2)} in SA — account balance`,
+  const issues = [];
+  for (const [norm, { name, totalBalance, oldestDue }] of arByCustomer) {
+    if (totalBalance < STALLED_AR_THRESHOLD) continue;
+    if (recentPayerSet.has(norm)) continue;
+    const daysOldest = oldestDue
+      ? Math.floor((Date.now() - new Date(oldestDue).getTime()) / 86400000)
+      : 0;
+    issues.push({
+      fingerprint: `stalled_ar|${norm}`,
+      issue_type: 'stalled_ar',
+      severity: totalBalance > 5000 ? 'high' : 'medium',
+      qbo_customer_name: name,
+      qbo_amount: parseFloat(totalBalance.toFixed(2)),
+      description: `${name} — $${totalBalance.toFixed(2)} open in QB, no payment in 90 days (oldest due: ${oldestDue ?? 'unknown'}, ${daysOldest}d ago)`,
       last_audit_run_id: runId,
-    };
-  });
+    });
+  }
+  return issues;
 }
 
 // ── Main audit runner ─────────────────────────────────────────────────────────
@@ -225,13 +266,13 @@ export async function runAudit() {
 
   let allIssues = [];
   try {
-    const [unbilled, overdue, mismatches, balances] = await Promise.all([
+    const [unbilled, overdue, mismatches, stalledAR] = await Promise.all([
       checkUnbilledComplete(runId),
       checkOverdueInvoices(runId),
       checkAmountMismatches(runId),
-      checkNonzeroBalances(runId),
+      checkStalledAR(runId),
     ]);
-    allIssues = [...unbilled, ...overdue, ...mismatches, ...balances];
+    allIssues = [...unbilled, ...overdue, ...mismatches, ...stalledAR];
   } catch (err) {
     await fleetops.from('audit_runs')
       .update({ status: 'error', error_message: err.message })
