@@ -424,11 +424,18 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   </td>
 </tr></table>`;
 
-  // ── Priority alert bar ─────────────────────────────────────────────────────
-  const pastDue = (arAging.flagged ?? []).filter(r => r.ageDays > 14).slice(0, 5);
+  // ── Priority alert bar — aggregate by master account ─────────────────────
+  const flaggedByAccount = {};
+  for (const r of (arAging.flagged ?? []).filter(r => r.ageDays > 14)) {
+    const master = masterCustomer(r.customer);
+    if (!flaggedByAccount[master]) flaggedByAccount[master] = { balance: 0, maxAgeDays: 0 };
+    flaggedByAccount[master].balance    += r.balance;
+    if (r.ageDays > flaggedByAccount[master].maxAgeDays) flaggedByAccount[master].maxAgeDays = r.ageDays;
+  }
+  const pastDue = Object.entries(flaggedByAccount).sort((a, b) => b[1].balance - a[1].balance).slice(0, 5);
   if (pastDue.length) {
-    let rows = pastDue.map(r =>
-      `<tr><td style="padding:3px 0;font-size:13px;color:#533f03;">${r.customer}</td><td style="padding:3px 0;font-size:13px;color:#533f03;font-weight:bold;text-align:right;">${f$(r.balance)}</td></tr>`
+    let rows = pastDue.map(([account, info]) =>
+      `<tr><td style="padding:3px 0;font-size:13px;color:#533f03;">${account} <span style="font-size:11px;color:#888888;">(${info.maxAgeDays}d past due)</span></td><td style="padding:3px 0;font-size:13px;color:#533f03;font-weight:bold;text-align:right;">${f$(info.balance)}</td></tr>`
     ).join('');
     html += alertBox('#fff3cd', '#e6a817', 'Past-Due Priority Calls',
       `<table role="presentation" width="100%" cellpadding="0" cellspacing="0">${rows}</table>`);

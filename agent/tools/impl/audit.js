@@ -32,10 +32,19 @@ function dateStr(daysAgo) {
 // ── Check 1: SA completed jobs with no QBO invoice reference ──────────────────
 // Completed SA jobs older than UNBILLED_GRACE_DAYS with no invoice_id.
 // Fingerprint per job — auto-resolves when invoice_id gets populated.
+// Contract clients excluded — their billing is aggregate/fixed-price, not per-job.
 
 async function checkUnbilledComplete(runId) {
   const cutoff = dateStr(UNBILLED_GRACE_DAYS);
   const lookbackDate = dateStr(LOOKBACK_DAYS);
+
+  // Fetch contract client names to exclude (is_contract = true in sa_invoices)
+  const { data: contractRows } = await fleetops
+    .from('sa_invoices')
+    .select('client')
+    .eq('is_contract', true)
+    .gte('date', lookbackDate);
+  const contractClients = new Set((contractRows ?? []).map(r => normalizeName(r.client)));
 
   const { data: jobs, error } = await fleetops
     .from('sa_jobs')
@@ -49,7 +58,9 @@ async function checkUnbilledComplete(runId) {
 
   if (error) throw new Error(`unbilled_complete query failed: ${error.message}`);
 
-  return jobs.map(job => ({
+  return (jobs ?? [])
+    .filter(job => !contractClients.has(normalizeName(job.client)))
+    .map(job => ({
     fingerprint: `unbilled_complete|${job.id}`,
     issue_type: 'unbilled_complete',
     severity: 'high',
@@ -95,11 +106,12 @@ async function checkOverdueInvoices(runId) {
 // Sums SA completed job amounts vs QBO invoice amounts per customer over LOOKBACK_DAYS.
 // Flags customers where the delta exceeds AMOUNT_MISMATCH_THRESHOLD.
 // Fingerprint per customer name — auto-resolves when delta drops below threshold.
+// Contract clients excluded — fixed-price contracts always show a gap at the job level.
 
 async function checkAmountMismatches(runId) {
   const lookbackDate = dateStr(LOOKBACK_DAYS);
 
-  const [saResult, qboResult] = await Promise.all([
+  const [saResult, qboResult, contractResult] = await Promise.all([
     fleetops
       .from('sa_jobs')
       .select('client, amount')
@@ -109,14 +121,22 @@ async function checkAmountMismatches(runId) {
     query({
       query: `SELECT * FROM Invoice WHERE TxnDate >= '${lookbackDate}' STARTPOSITION 1 MAXRESULTS 500`,
     }),
+    fleetops
+      .from('sa_invoices')
+      .select('client')
+      .eq('is_contract', true)
+      .gte('date', lookbackDate),
   ]);
 
   if (saResult.error) throw new Error(`amount_mismatch SA query failed: ${saResult.error.message}`);
 
-  // Aggregate SA totals by normalized client name
+  const contractClients = new Set((contractResult.data ?? []).map(r => normalizeName(r.client)));
+
+  // Aggregate SA totals by normalized client name, skipping contract clients
   const saMap = new Map();
   for (const row of saResult.data) {
     const norm = normalizeName(row.client);
+    if (contractClients.has(norm)) continue;
     if (!saMap.has(norm)) saMap.set(norm, { original: row.client, total: 0 });
     saMap.get(norm).total += parseFloat(row.amount || 0);
   }
@@ -152,26 +172,24 @@ async function checkAmountMismatches(runId) {
 
 // ── Check 4: SA clients with non-zero account balance ────────────────────────
 // Groups by client — one issue per client with a meaningful balance.
+// Reads sa_invoices.account_balance (account-level field populated by AME sync).
 // Fingerprint per normalized client name — auto-resolves when balance clears.
 
 async function checkNonzeroBalances(runId) {
-  const lookbackDate = dateStr(LOOKBACK_DAYS);
-
-  const { data: jobs, error } = await fleetops
-    .from('sa_jobs')
+  const { data: invoices, error } = await fleetops
+    .from('sa_invoices')
     .select('client, account_balance')
-    .eq('status', 3)
     .not('account_balance', 'is', null)
-    .gte('date_completed', lookbackDate);
+    .eq('deleted', false);
 
   if (error) throw new Error(`nonzero_balance query failed: ${error.message}`);
 
-  // Reduce to one record per client (latest non-trivial balance wins)
+  // One record per client — account_balance is account-level so same value on all invoices for a client
   const clientMap = new Map();
-  for (const job of jobs) {
-    const balance = parseFloat(job.account_balance || 0);
-    if (Math.abs(balance) > BALANCE_MIN_THRESHOLD) {
-      clientMap.set(normalizeName(job.client), { client: job.client, balance });
+  for (const inv of invoices ?? []) {
+    const balance = parseFloat(inv.account_balance || 0);
+    if (Math.abs(balance) > BALANCE_MIN_THRESHOLD && !clientMap.has(normalizeName(inv.client))) {
+      clientMap.set(normalizeName(inv.client), { client: inv.client, balance });
     }
   }
 
@@ -182,7 +200,7 @@ async function checkNonzeroBalances(runId) {
       issue_type: 'nonzero_balance',
       severity: 'low',
       sa_client: client,
-      description: `${client} ${direction} $${Math.abs(balance).toFixed(2)} in SA — account balance on completed jobs`,
+      description: `${client} ${direction} $${Math.abs(balance).toFixed(2)} in SA — account balance`,
       last_audit_run_id: runId,
     };
   });
@@ -206,12 +224,7 @@ export async function runAudit() {
       checkUnbilledComplete(runId),
       checkOverdueInvoices(runId),
       checkAmountMismatches(runId),
-      // checkNonzeroBalances queries sa_jobs.account_balance which does not exist in the schema.
-      // Suppressed until the column is added or the check is rewritten against sa_invoices.
-      checkNonzeroBalances(runId).catch(err => {
-        logger.warn('checkNonzeroBalances skipped (schema mismatch)', { err: err.message });
-        return [];
-      }),
+      checkNonzeroBalances(runId),
     ]);
     allIssues = [...unbilled, ...overdue, ...mismatches, ...balances];
   } catch (err) {
