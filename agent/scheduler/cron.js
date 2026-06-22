@@ -842,6 +842,18 @@ for (const task of SCHEDULED_TASKS) {
 }
 logger.info('All schedules registered. Scheduler running.');
 
+// Chase session keep-alive — fire immediately on every scheduler startup so a session
+// that went stale while the agent was offline is refreshed without waiting up to 15 min
+// for the Task Scheduler trigger. Fire-and-forget; errors are logged inside the script.
+(function fireChaseKeepalive() {
+  const child = spawn('powershell.exe', [
+    '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
+    '-File', 'C:\\Users\\Assistant\\ChasePoller\\run.ps1', '-KeepAlive',
+  ], { stdio: 'ignore', detached: true });
+  child.unref();
+  logger.info('Chase keepalive triggered: scheduler startup');
+})();
+
 // MCP keepalive — ping /health every 4 minutes to verify the bot server is alive
 // (previously pinged /mcp which caused 401s and created orphaned MCP sessions)
 let mcpKeepaliveFailures = 0;
