@@ -19,6 +19,8 @@ const AMOUNT_MISMATCH_THRESHOLD = 50;   // flag customer-level delta > $50
 const UNBILLED_GRACE_DAYS = 30;         // ignore completed jobs < 30 days old (landscape monthly billing)
 const SNOW_GRACE_DAYS = 60;             // snow billing can lag up to 60 days
 const STALLED_AR_THRESHOLD = 500;       // flag QB customer with open AR > $500 and no payment in 90 days
+const SA_OPEN_BALANCE_THRESHOLD = 100;  // flag SA client with > $100 open invoice balance past grace
+const SA_OPEN_BALANCE_GRACE_DAYS = 14;  // ignore invoices < 14 days past due (recently issued)
 const SNOW_BILLING_LOOKBACK_DAYS = 180; // QB invoice fetch window for SALT/ICE coverage check
 const SALT_INVOICE_WINDOW_DAYS = 90;   // QB invoice must fall within 90 days after SALT/ICE service date
 
@@ -329,6 +331,64 @@ async function checkStalledAR(runId) {
   return issues;
 }
 
+// ── Check 5: SA clients with open invoice balance past grace period ───────────
+// Sums invoice_balance across all non-deleted SA invoices per client where
+// days_past_due >= SA_OPEN_BALANCE_GRACE_DAYS. Catches unpaid SA invoices that
+// may not appear in QB AR (e.g. payment recorded in QB but not synced back to SA,
+// or invoices created in SA that were never pushed to QB).
+// Fingerprint per client — auto-resolves when SA invoice balances clear.
+// Contract clients excluded (managed via fixed-price billing, not per-invoice).
+
+async function checkSAOpenBalances(runId) {
+  const [contractResult, invoiceResult] = await Promise.all([
+    fleetops
+      .from('sa_invoices')
+      .select('client')
+      .eq('is_contract', true),           // no date cap — exclude ALL contract clients, not just recent 90 days
+    fleetops
+      .from('sa_invoices')
+      .select('client, invoice_balance, days_past_due')
+      .gt('invoice_balance', 0)
+      .eq('deleted', false)
+      .gte('days_past_due', SA_OPEN_BALANCE_GRACE_DAYS)
+      .gte('date', dateStr(365)),          // cap at 1 year — avoids surfacing uncollectible write-offs
+  ]);
+
+  if (contractResult.error) throw new Error(`sa_open_balances contract query failed: ${contractResult.error.message}`);
+  if (invoiceResult.error) throw new Error(`sa_open_balances query failed: ${invoiceResult.error.message}`);
+
+  const contractClients = new Set(
+    (contractResult.data ?? []).filter(r => r.client).map(r => normalizeName(r.client))
+  );
+
+  const balanceMap = new Map();
+  for (const inv of invoiceResult.data ?? []) {
+    if (!inv.client) continue;
+    if (matchesContractClient(inv.client, contractClients)) continue;
+    const norm = normalizeName(inv.client);
+    if (!balanceMap.has(norm)) balanceMap.set(norm, { original: inv.client, total: 0, maxDaysPastDue: 0 });
+    const entry = balanceMap.get(norm);
+    entry.total += parseFloat(inv.invoice_balance || 0);
+    const dpd = inv.days_past_due ?? 0;
+    if (dpd > entry.maxDaysPastDue) entry.maxDaysPastDue = dpd;
+  }
+
+  const issues = [];
+  for (const [norm, data] of balanceMap) {
+    if (data.total < SA_OPEN_BALANCE_THRESHOLD) continue;
+    issues.push({
+      fingerprint: `sa_open_balance|${norm}`,
+      issue_type: 'sa_open_balance',
+      severity: data.total > 1000 ? 'high' : 'medium',
+      sa_client: data.original,
+      sa_amount: parseFloat(data.total.toFixed(2)),
+      description: `${data.original} — $${data.total.toFixed(2)} open in SA (${data.maxDaysPastDue}d past due)`,
+      last_audit_run_id: runId,
+    });
+  }
+  return issues;
+}
+
 // ── Main audit runner ─────────────────────────────────────────────────────────
 
 export async function runAudit() {
@@ -343,13 +403,14 @@ export async function runAudit() {
 
   let allIssues = [];
   try {
-    const [unbilled, overdue, mismatches, stalledAR] = await Promise.all([
+    const [unbilled, overdue, mismatches, stalledAR, saOpenBalances] = await Promise.all([
       checkUnbilledComplete(runId),
       checkOverdueInvoices(runId),
       checkAmountMismatches(runId),
       checkStalledAR(runId),
+      checkSAOpenBalances(runId),
     ]);
-    allIssues = [...unbilled, ...overdue, ...mismatches, ...stalledAR];
+    allIssues = [...unbilled, ...overdue, ...mismatches, ...stalledAR, ...saOpenBalances];
   } catch (err) {
     await fleetops.from('audit_runs')
       .update({ status: 'error', error_message: err.message })

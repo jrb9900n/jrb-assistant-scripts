@@ -795,6 +795,7 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
     unbilled_complete: { label: 'SA Completed — No QB Invoice',            color: '#c0392b' },
     amount_mismatch:   { label: 'Invoice Amount Mismatches',                color: '#b35900' },
     stalled_ar:        { label: 'QB Open AR — No Payment in 90 Days',       color: '#7b2d8b' },
+    sa_open_balance:   { label: 'SA Open Invoice Balances',                 color: '#1a6b3c' },
   };
   let hasAnyIssue = false;
   for (const [type, meta] of Object.entries(issueTypes)) {
