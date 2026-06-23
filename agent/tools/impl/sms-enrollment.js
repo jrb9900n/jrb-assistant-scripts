@@ -77,7 +77,7 @@ export async function handleInboundSms(fromPhone, messageBody) {
 
   const { data: enrollment } = await supabase
     .from('sms_enrollments')
-    .select('id, status')
+    .select('id, status, name')
     .eq('phone_number', e164)
     .order('created_at', { ascending: false })
     .limit(1)
@@ -91,6 +91,8 @@ export async function handleInboundSms(fromPhone, messageBody) {
         .eq('id', enrollment.id);
     }
     logger.info('SMS enrollment: confirmed', { phone: e164 });
+    const label = (enrollment && enrollment.name) ? enrollment.name : e164;
+    sendSms('+14146593840', `JRB: ${label} (${e164}) enrolled for card SMS alerts.`).catch(() => {});
     return 'You are now enrolled in J.R. Boehlke company card alerts. Reply STOP anytime to opt out. Help: (262) 242-9924.';
   }
 
