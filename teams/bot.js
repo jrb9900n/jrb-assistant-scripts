@@ -711,6 +711,37 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /maintenance-log-data?log=<uuid> — returns pre-filled log data for the portal
+  if (req.method === 'GET' && url.startsWith('/maintenance-log-data')) {
+    const logId = new URL(req.url, 'https://agent.jrboehlke.com').searchParams.get('log');
+    if (!logId) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'log required' })); return; }
+    const { getMaintenanceLogData } = await import('../tools/impl/expense.js');
+    const data = await getMaintenanceLogData(logId);
+    if (!data) { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'Not found' })); return; }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(data));
+    return;
+  }
+
+  // POST /maintenance-log-complete — marks the maintenance log done and expense report complete
+  if (req.method === 'POST' && url === '/maintenance-log-complete') {
+    let body = '';
+    req.on('data', d => body += d);
+    await new Promise(r => req.on('end', r));
+    let parsed;
+    try { parsed = JSON.parse(body); } catch {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+    }
+    const { log_id } = parsed;
+    if (!log_id) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'log_id required' })); return; }
+    const { completeMaintenanceLog } = await import('../tools/impl/expense.js');
+    const result = await completeMaintenanceLog(log_id);
+    res.writeHead(result.error ? 400 : 200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(result));
+    return;
+  }
+
   // POST /enroll — SMS double opt-in enrollment from FieldOps form
   if (req.method === 'POST' && url === '/enroll') {
     let body = '';
