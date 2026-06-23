@@ -326,6 +326,47 @@ export async function submitExpenseReport(token, fields) {
   return { success: true, status: newStatus, maintenance_log_id, maintenance_log_url: maintLogUrl };
 }
 
+// ── Maintenance Log Portal ─────────────────────────────────────
+
+export async function getMaintenanceLogData(logId) {
+  const { data: log, error } = await supabase
+    .from('maintenance_logs')
+    .select('*, assets(id, name, year, make, model)')
+    .eq('id', logId)
+    .single();
+
+  if (error || !log) return null;
+
+  const { data: report } = await supabase
+    .from('expense_reports')
+    .select('id, status, employee_name, submitted_at')
+    .eq('maintenance_log_id', logId)
+    .single();
+
+  return { log, report };
+}
+
+export async function completeMaintenanceLog(logId) {
+  const { data: report, error } = await supabase
+    .from('expense_reports')
+    .select('id, status')
+    .eq('maintenance_log_id', logId)
+    .single();
+
+  if (error || !report) return { error: 'Maintenance log not found' };
+  if (report.status === 'complete') return { success: true, already_complete: true };
+
+  const { error: updateErr } = await supabase
+    .from('expense_reports')
+    .update({ status: 'complete' })
+    .eq('id', report.id);
+
+  if (updateErr) return { error: 'Failed to update status' };
+
+  logger.info('Maintenance log completed', { logId, reportId: report.id });
+  return { success: true };
+}
+
 async function uploadReceiptToQboAsync(reportId, qboTransactionId, storagePath) {
   try {
     const { data: blob, error } = await supabase.storage
@@ -589,6 +630,15 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
   if (card.phone_number) {
     await sendExpenseSms(card.phone_number, { report, amount, vendor: merchant, date: transactionDate, cardLastFour });
     await supabase.from('expense_reports').update({ sms_sent_at: new Date().toISOString() }).eq('id', report.id);
+  }
+
+  // Trigger Menards rebate immediately at charge time — don't wait for portal submission
+  // so the rebate form is generated even if Michael never fills the portal for his own charges.
+  // triggerMenardsRebate() deduplicates, so a later portal submission won't double-fire.
+  if (merchant?.toLowerCase().includes('menard')) {
+    import('./menards.js')
+      .then(m => m.triggerMenardsRebate(report.id))
+      .catch(err => logger.error('Menards rebate trigger (Chase alert) failed', { err: err.message }));
   }
 
   logger.info('Chase alert: expense report created', { reportId: report.id, employee: card.employee_name, merchant, amount });
