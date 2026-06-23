@@ -747,10 +747,16 @@ const server = http.createServer(async (req, res) => {
     let body = '';
     req.on('data', d => body += d);
     await new Promise(r => req.on('end', r));
+    const ct = req.headers['content-type'] || '';
     let parsed;
-    try { parsed = JSON.parse(body); } catch {
-      res.writeHead(400, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+    if (ct.includes('application/json')) {
+      try { parsed = JSON.parse(body); } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid JSON' })); return;
+      }
+    } else {
+      const p = new URLSearchParams(body);
+      parsed = { phone: p.get('phone'), name: p.get('name') };
     }
     const { phone, name } = parsed;
     if (!phone) {
