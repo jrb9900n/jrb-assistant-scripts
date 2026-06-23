@@ -1,46 +1,55 @@
 // tools/impl/menards.js — Menards rebate form automation
-// Uses puppeteer-core with the system Edge browser (no Chromium download).
-// After filling the rebate form, saves to PDF and sends to the default printer.
 //
-// NOTE: Form field selectors were written against the Menards rebate page
-// structure as of 2026-05. Run triggerMenardsRebate() on a test charge and
-// check C:\Users\Assistant\logs\menards-rebate-*.pdf to verify the output
-// before relying on it. Adjust selectors in FORM_FIELDS if Menards updates
-// their site.
+// Fills the rebate form at menards.com/main/rebate-form.html using puppeteer-extra
+// with the stealth plugin (bypasses Incapsula/Imperva bot detection).
+// The form asks only for mailing address; no receipt fields. After submitting,
+// it calls window.print() and @media print CSS reveals the completed form.
+// We intercept window.print(), switch puppeteer to print media, and save a PDF.
+// That PDF is emailed to Michael with instructions to attach the physical rebate
+// receipt from his Menards purchase receipt and mail both to Menards.
+//
+// The stealth plugin keeps a minimal browser fingerprint. In production each run
+// is triggered by a Chase alert (days apart), so Incapsula rate limiting is not
+// a concern.
 
+import puppeteerExtra from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import path from 'path';
 import fs from 'fs';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
+import { sendProactiveMessage } from '../../teams/notify.js';
+
+puppeteerExtra.use(StealthPlugin());
 
 const supabase = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
   process.env.FLEETOPS_SUPABASE_SERVICE_KEY
 );
 
-// Michael's rebate mailing info — override via env vars if needed, otherwise uses JRB mailing address
+// Michael's rebate mailing info — override via env vars if ever needed
 const OWNER_INFO = {
   firstName: process.env.MENARDS_REBATE_FIRST_NAME || 'Michael',
   lastName:  process.env.MENARDS_REBATE_LAST_NAME  || 'Reardon',
   address1:  process.env.MENARDS_REBATE_ADDRESS1   || 'PO Box 105',
-  address2:  process.env.MENARDS_REBATE_ADDRESS2   || '',
   city:      process.env.MENARDS_REBATE_CITY       || 'Mequon',
   state:     process.env.MENARDS_REBATE_STATE      || 'WI',
   zip:       process.env.MENARDS_REBATE_ZIP        || '53092',
-  phone:     process.env.MENARDS_REBATE_PHONE      || '2622429924',
+  country:   process.env.MENARDS_REBATE_COUNTRY    || 'US',
   email:     process.env.MENARDS_REBATE_EMAIL      || 'michael@jrboehlke.com',
 };
 
-const PDF_DIR      = 'C:\\Users\\Assistant\\logs\\';
-const EDGE_PATH    = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
-const CHROME_PATH  = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const PDF_DIR    = 'C:\\Users\\Assistant\\logs\\';
+const EDGE_PATH  = 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe';
+const CHROME_PATH = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const REBATE_URL  = 'https://www.menards.com/main/rebate-form.html';
+const USER_AGENT  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0';
 
 // ── Public API ─────────────────────────────────────────────────
 
 export async function triggerMenardsRebate(expenseReportId) {
-  // Dedup: skip if a rebate was already triggered (e.g. Chase alert path fired
-  // then portal submission also fired for the same expense report)
+  // Dedup: skip if a rebate was already triggered for this expense report
   const { data: existing, error: dedupErr } = await supabase
     .from('menards_rebates')
     .select('id, status')
@@ -61,7 +70,6 @@ export async function triggerMenardsRebate(expenseReportId) {
     .single();
   if (insErr) {
     if (insErr.code === '23505') {
-      // Unique constraint violation — concurrent trigger already created this row
       logger.info('Menards rebate concurrent insert detected, skipping', { expenseReportId });
       return;
     }
@@ -75,7 +83,10 @@ export async function triggerMenardsRebate(expenseReportId) {
     .select('*')
     .eq('id', expenseReportId)
     .single();
-  if (!expense) { logger.error('Expense report not found for Menards rebate', { expenseReportId }); return; }
+  if (!expense) {
+    logger.error('Expense report not found for Menards rebate', { expenseReportId });
+    return;
+  }
 
   try {
     const pdfPath = await fillAndPrintRebateForm(expense);
@@ -90,131 +101,146 @@ export async function triggerMenardsRebate(expenseReportId) {
       .update({ status: 'error', error_message: err.message })
       .eq('id', rebate.id);
     logger.error('Menards rebate failed', { expenseReportId, err: err.message });
+    try { await sendProactiveMessage(`⚠️ Menards rebate failed for expense ${expenseReportId}: ${err.message}`); } catch {}
   }
 }
 
-// ── Core: generate rebate PDF locally and email it ────────────
-// The Menards rebate form website (menards.com/rebate-form.html) blocks headless
-// browsers with Incapsula/hCaptcha. We generate a clean local PDF instead —
-// same data, ready for Michael to submit at menards.com/rebate-center or
-// print + attach the receipt + mail.
+// ── Core: fill menards.com rebate form and capture PDF ─────────
 
 async function fillAndPrintRebateForm(expense) {
-  let puppeteer;
-  try {
-    puppeteer = (await import('puppeteer-core')).default;
-  } catch {
-    throw new Error('puppeteer-core not installed. Run: npm install puppeteer-core --prefix C:\\Users\\Assistant\\JRBAgent\\agent');
-  }
-
   const executablePath = fs.existsSync(EDGE_PATH)   ? EDGE_PATH
     : fs.existsSync(CHROME_PATH) ? CHROME_PATH
     : null;
   if (!executablePath) throw new Error('No Chrome or Edge browser found on this machine');
 
-  const amount      = Number(expense.amount || 0).toFixed(2);
-  const vendor      = expense.vendor || 'Menards';
-  const date        = expense.transaction_date || new Date().toISOString().slice(0, 10);
-  const phoneFormatted = OWNER_INFO.phone
-    ? `(${OWNER_INFO.phone.slice(0,3)}) ${OWNER_INFO.phone.slice(3,6)}-${OWNER_INFO.phone.slice(6)}`
-    : '';
-
-  const html = `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<style>
-  body { font-family: Arial, sans-serif; font-size: 12pt; color: #111; margin: 0; padding: 0; }
-  .page { padding: 0.5in; max-width: 7.5in; }
-  h1 { font-size: 18pt; color: #c8102e; margin: 0 0 4px 0; }
-  h2 { font-size: 12pt; color: #333; border-bottom: 1px solid #c8102e; padding-bottom: 4px; margin: 20px 0 10px 0; }
-  .logo-bar { display: flex; align-items: center; margin-bottom: 18px; border-bottom: 3px solid #c8102e; padding-bottom: 12px; }
-  .logo-bar h1 { margin: 0; }
-  .logo-bar .tag { font-size: 9pt; color: #666; margin-left: 12px; margin-top: 2px; }
-  table.fields { width: 100%; border-collapse: collapse; margin-bottom: 16px; }
-  table.fields td { padding: 6px 8px; vertical-align: top; }
-  table.fields td.label { width: 160px; font-weight: bold; color: #444; white-space: nowrap; }
-  table.fields td.value { border-bottom: 1px solid #ccc; min-width: 200px; }
-  .instructions { background: #f9f9f9; border: 1px solid #ddd; border-radius: 4px; padding: 12px 16px; margin-top: 20px; font-size: 10pt; }
-  .instructions p { margin: 6px 0; }
-  .instructions strong { color: #c8102e; }
-  .footer { font-size: 8pt; color: #999; margin-top: 30px; border-top: 1px solid #eee; padding-top: 8px; }
-  .highlight { background: #fffbe6; border: 1px solid #f0d000; border-radius: 3px; padding: 2px 6px; }
-</style>
-</head>
-<body>
-<div class="page">
-  <div class="logo-bar">
-    <h1>Menards&reg; Rebate Submission</h1>
-    <span class="tag">Generated by JRB Assistant &mdash; ${new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}</span>
-  </div>
-
-  <h2>Mailing Address (Rebate Check Recipient)</h2>
-  <table class="fields">
-    <tr><td class="label">Name</td><td class="value">${OWNER_INFO.firstName} ${OWNER_INFO.lastName}</td></tr>
-    <tr><td class="label">Address</td><td class="value">${OWNER_INFO.address1}${OWNER_INFO.address2 ? ', ' + OWNER_INFO.address2 : ''}</td></tr>
-    <tr><td class="label">City, State ZIP</td><td class="value">${OWNER_INFO.city}, ${OWNER_INFO.state} ${OWNER_INFO.zip}</td></tr>
-    <tr><td class="label">Phone</td><td class="value">${phoneFormatted}</td></tr>
-    <tr><td class="label">Email</td><td class="value">${OWNER_INFO.email}</td></tr>
-  </table>
-
-  <h2>Purchase Details</h2>
-  <table class="fields">
-    <tr><td class="label">Store / Vendor</td><td class="value">${vendor}</td></tr>
-    <tr><td class="label">Purchase Date</td><td class="value">${date}</td></tr>
-    <tr><td class="label">Total Amount</td><td class="value"><span class="highlight"><strong>$${amount}</strong></span></td></tr>
-  </table>
-
-  <div class="instructions">
-    <p><strong>How to submit your Menards rebate:</strong></p>
-    <p>&#9312; &nbsp; Go to <strong>www.menards.com/rebate-center</strong> and submit online using the information above.</p>
-    <p>&#9313; &nbsp; <em>Or</em> print this form, attach the <strong>original receipt</strong>, and mail to the address on your Menards rebate form.</p>
-    <p>&nbsp;</p>
-    <p>The rebate check will be mailed to: <strong>${OWNER_INFO.firstName} ${OWNER_INFO.lastName}, ${OWNER_INFO.address1}, ${OWNER_INFO.city} ${OWNER_INFO.state} ${OWNER_INFO.zip}</strong></p>
-  </div>
-
-  <div class="footer">
-    Auto-generated from Chase alert &mdash; Expense Report for card ending in ${expense.card_last_four || 'XXXX'} &mdash; Amount: $${amount} &mdash; Vendor: ${vendor}
-  </div>
-</div>
-</body>
-</html>`;
-
-  const browser = await puppeteer.launch({
+  const browser = await puppeteerExtra.launch({
     executablePath,
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-gpu',
+      '--window-size=1280,900',
+      '--disable-blink-features=AutomationControlled',
+    ],
   });
 
-  const page = await browser.newPage();
   try {
-    await page.setContent(html, { waitUntil: 'networkidle0' });
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 900 });
+    await page.setUserAgent(USER_AGENT);
+
+    // Intercept window.print() — the PRINT button calls it after Vue validates the form.
+    // We suppress the system dialog and capture the page via page.pdf() instead.
+    let printCalled = false;
+    await page.exposeFunction('__menardsPrintInterceptor', () => { printCalled = true; });
+    await page.evaluateOnNewDocument(() => {
+      window.print = function() { window.__menardsPrintInterceptor(); };
+    });
+
+    await page.goto(REBATE_URL, { waitUntil: 'networkidle2', timeout: 45_000 });
+
+    // Wait for Vue app to mount the form
+    await page.waitForSelector('#formFirstName', { timeout: 20_000 });
+
+    // Fill all fields with Vue-reactive events (native setter + input/change/blur dispatch).
+    // Standard page.type() updates the DOM value but doesn't trigger Vue's reactive watchers.
+    await vueSetValue(page, '#formFirstName',    OWNER_INFO.firstName);
+    await vueSetValue(page, '#formLastName',     OWNER_INFO.lastName);
+    await vueSetValue(page, '#formAddressLine1', OWNER_INFO.address1);
+    await vueSetValue(page, '#FormPostalCode',   OWNER_INFO.zip);
+    await vueSetValue(page, '#cityForm',         OWNER_INFO.city);
+    await vueSetValue(page, '#stateForm',        OWNER_INFO.state);
+    await vueSetValue(page, '#countryForm',      OWNER_INFO.country);
+    await vueSetValue(page, '#formEmail',        OWNER_INFO.email);
+
+    // Check the terms checkbox
+    await page.evaluate(() => {
+      const cb = document.querySelector('#termsAccepted');
+      if (cb && !cb.checked) {
+        cb.click();
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+      }
+    });
+    // Wait for Vue to re-evaluate form validity and enable the PRINT button (up to 5s)
+    await page.waitForFunction(
+      () => { const btn = document.querySelector('button[type="submit"]'); return btn && !btn.disabled; },
+      { timeout: 5000 }
+    ).catch(() => { throw new Error('Menards PRINT button did not become enabled within 5s — Vue validation failed'); });
+
+    // Click PRINT and wait up to 6s for window.print() to be intercepted
+    await page.click('button[type="submit"]');
+    await waitFor(() => printCalled, 6000);
+
+    if (!printCalled) {
+      throw new Error('Menards: window.print() was not intercepted — form may not have submitted successfully');
+    }
+
+    // Switch to print media so @media print CSS reveals the completed form layout
+    await page.emulateMediaType('print');
+    await new Promise(r => setTimeout(r, 800));
 
     if (!fs.existsSync(PDF_DIR)) fs.mkdirSync(PDF_DIR, { recursive: true });
     const ts      = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const pdfPath = path.join(PDF_DIR, `menards-rebate-${ts}.pdf`);
-    await page.pdf({ path: pdfPath, format: 'Letter', printBackground: true, margin: { top: '0.5in', bottom: '0.5in', left: '0.5in', right: '0.5in' } });
 
-    const pdfBuffer = fs.readFileSync(pdfPath);
-    const fileName  = path.basename(pdfPath);
-    await sendEmail({
-      to: ['michael@jrboehlke.com'],
-      subject: `Menards Rebate — ${vendor} $${amount} (${date})`,
-      body: `<p>Menards rebate submission document for the <strong>$${amount}</strong> charge at <strong>${vendor}</strong> on ${date}.</p>
-<p>To submit your rebate:</p>
-<ol>
-  <li>Submit online at <a href="https://www.menards.com/rebate-center">www.menards.com/rebate-center</a> using the information in the attached PDF.</li>
-  <li><em>Or</em> print the attached PDF, attach the original receipt, and mail it in.</li>
-</ol>
-<p>The rebate check will be sent to: <strong>${OWNER_INFO.firstName} ${OWNER_INFO.lastName}, ${OWNER_INFO.address1}, ${OWNER_INFO.city} ${OWNER_INFO.state} ${OWNER_INFO.zip}</strong></p>
-<p><em>— JRB Assistant</em></p>`,
-      attachments: [{ name: fileName, contentType: 'application/pdf', content: pdfBuffer }],
+    const pdfBuffer = await page.pdf({
+      format: 'Letter',
+      printBackground: true,
+      margin: { top: '0.5in', bottom: '0.5in', left: '0.5in', right: '0.5in' },
     });
+    fs.writeFileSync(pdfPath, pdfBuffer);
 
+    await emailRebateForm(pdfPath, expense, pdfBuffer);
     return pdfPath;
   } finally {
     await browser.close();
   }
 }
 
+// ── Helpers ────────────────────────────────────────────────────
 
+// Set a form field value and dispatch the events Vue needs to update reactive state.
+async function vueSetValue(page, selector, value) {
+  await page.evaluate((sel, val) => {
+    const el = document.querySelector(sel);
+    if (!el) throw new Error(`Menards form element not found: ${sel}`);
+    const ProtoEl = el.tagName === 'SELECT' ? window.HTMLSelectElement : window.HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(ProtoEl.prototype, 'value').set;
+    setter.call(el, val);
+    el.dispatchEvent(new Event('input',  { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    el.dispatchEvent(new Event('blur',   { bubbles: true }));
+  }, selector, value);
+}
+
+// Poll predicate every 100ms, resolve when true or timeout expires.
+function waitFor(predicate, timeoutMs) {
+  return new Promise(resolve => {
+    const iv = setInterval(() => { if (predicate()) { clearInterval(iv); resolve(); } }, 100);
+    setTimeout(() => { clearInterval(iv); resolve(); }, timeoutMs);
+  });
+}
+
+async function emailRebateForm(pdfPath, expense, pdfBuffer) {
+  const amount = Number(expense.amount || 0).toFixed(2);
+  const vendor = expense.vendor || 'Menards';
+  const date   = expense.transaction_date || new Date().toISOString().slice(0, 10);
+  const fileName = path.basename(pdfPath);
+  await sendEmail({
+    to: ['michael@jrboehlke.com'],
+    subject: `Menards Rebate Form — ${vendor} $${amount} (${date})`,
+    body: `<p>Here is a complete Menards rebate form. Please print and mail this.</p>
+<p><strong>To complete your rebate:</strong></p>
+<ol>
+  <li>Print the attached PDF — it is pre-filled with your mailing address.</li>
+  <li>From your Menards receipt, cut out the <strong>Rebate Receipt</strong> stub
+      (printed at the bottom of the receipt, below the regular receipt).</li>
+  <li>Place both the printed form and the rebate receipt stub in an envelope and mail to:<br>
+      <strong>Rebate Offer<br>PO Box 155<br>Elk Mound, WI 54739-0155</strong></li>
+</ol>
+<p><em>Charge: $${amount} at ${vendor} on ${date} — card ending ${expense.card_last_four || 'XXXX'}.</em></p>
+<p><em>— JRB Assistant</em></p>`,
+    attachments: [{ name: fileName, contentType: 'application/pdf', content: pdfBuffer }],
+  });
+}
