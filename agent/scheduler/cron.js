@@ -842,17 +842,40 @@ for (const task of SCHEDULED_TASKS) {
 }
 logger.info('All schedules registered. Scheduler running.');
 
-// Chase session keep-alive — fire immediately on every scheduler startup so a session
-// that went stale while the agent was offline is refreshed without waiting up to 15 min
-// for the Task Scheduler trigger. Fire-and-forget; errors are logged inside the script.
-(function fireChaseKeepalive() {
+// Chase daemon watchdog — ensures chase-daemon.js is always running.
+// Fires on scheduler startup and every 5 minutes.
+// Does NOT start the daemon if session/expired.flag exists (session needs -Init).
+const CHASE_EXPIRED_FLAG = 'C:\\Users\\Assistant\\ChasePoller\\session\\expired.flag';
+const CHASE_STATE_PATH   = 'C:\\Users\\Assistant\\ChasePoller\\session\\state.json';
+const CHASE_PID_FILE     = 'C:\\Users\\Assistant\\ChasePoller\\session\\daemon.pid';
+
+function startChaseDaemonIfNeeded(reason) {
+  if (existsSync(CHASE_EXPIRED_FLAG)) {
+    logger.info('Chase daemon: session expired, not starting');
+    return;
+  }
+  if (!existsSync(CHASE_STATE_PATH)) {
+    logger.info('Chase daemon: no session file, not starting');
+    return;
+  }
+  if (existsSync(CHASE_PID_FILE)) {
+    const pid = parseInt(readFileSync(CHASE_PID_FILE, 'utf8').trim(), 10);
+    try { process.kill(pid, 0); logger.info(`Chase daemon already running (PID ${pid})`); return; } catch {}
+    // PID file exists but process is dead — clean it up
+    try { unlinkSync(CHASE_PID_FILE); } catch {}
+  }
   const child = spawn('powershell.exe', [
     '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden',
-    '-File', 'C:\\Users\\Assistant\\ChasePoller\\run.ps1', '-KeepAlive',
+    '-File', 'C:\\Users\\Assistant\\ChasePoller\\run.ps1', '-Daemon',
   ], { stdio: 'ignore', detached: true });
   child.unref();
-  logger.info('Chase keepalive triggered: scheduler startup');
-})();
+  logger.info(`Chase daemon started (${reason})`);
+}
+
+startChaseDaemonIfNeeded('scheduler startup');
+
+// Watchdog: restart daemon if it dies (every 5 minutes)
+cron.schedule('*/5 * * * *', () => startChaseDaemonIfNeeded('watchdog'));
 
 // MCP keepalive — ping /health every 4 minutes to verify the bot server is alive
 // (previously pinged /mcp which caused 401s and created orphaned MCP sessions)
