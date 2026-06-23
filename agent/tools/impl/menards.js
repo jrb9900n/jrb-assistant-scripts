@@ -122,6 +122,7 @@ async function fillAndPrintRebateForm(expense) {
       '--disable-gpu',
       '--window-size=1280,900',
       '--disable-blink-features=AutomationControlled',
+      '--proxy-server=socks5://127.0.0.1:40000', // Cloudflare WARP — egress via Cloudflare IP
     ],
   });
 
