@@ -156,26 +156,65 @@ async function fillAndPrintRebateForm(expense) {
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent(USER_AGENT);
 
-    // Intercept the submit.ajx response. Menards generates the rebate form PDF
-    // server-side (Adobe InDesign template) and returns it as application/pdf.
-    // The browser loads it into a blob iframe and calls window.print() on the main page.
-    // We capture the PDF bytes directly from the network response instead of
-    // trying to PDF-print the main page (which only shows a warning in print media).
+    // Capture the submit.ajx PDF from inside the browser as an ArrayBuffer, then pass
+    // it back as base64. Puppeteer's resp.buffer() goes through CDP Network.getResponseBody
+    // which returns the body as a string when base64Encoded=false — Node.js then re-encodes
+    // it as UTF-8, corrupting every byte >= 0x80 into a 3-byte replacement sequence.
+    // Reading via XHR responseType='arraybuffer' inside the browser context is binary-safe.
     let submitPdfBuffer = null;
-    page.on('response', async resp => {
-      if (resp.url().includes('submit.ajx') && resp.status() === 200) {
-        try {
-          submitPdfBuffer = await resp.buffer();
-          logger.info('Menards: submit.ajx PDF captured', { bytes: submitPdfBuffer.length });
-        } catch (err) {
-          logger.warn('Menards: failed to read submit.ajx response body', { err: err.message });
-        }
-      }
+    await page.exposeFunction('__captureSubmitAjxPdf', (base64) => {
+      submitPdfBuffer = Buffer.from(base64, 'base64');
+      logger.info('Menards: submit.ajx PDF captured via in-browser XHR', { bytes: submitPdfBuffer.length });
     });
-
-    // Suppress window.print() (the main page calls it after submitting, but we
-    // already have the PDF from submit.ajx — we don't need a page render).
     await page.evaluateOnNewDocument(() => {
+      function b64FromArrayBuffer(ab) {
+        const bytes = new Uint8Array(ab);
+        let b64 = '';
+        const CHUNK = 8192;
+        for (let i = 0; i < bytes.length; i += CHUNK) {
+          b64 += btoa(String.fromCharCode(...bytes.subarray(i, i + CHUNK)));
+        }
+        return b64;
+      }
+
+      // Intercept XHR (axios uses this by default in Vue apps).
+      // Force arraybuffer so the browser never decodes bytes as text.
+      const origOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        if (typeof url === 'string' && url.includes('submit.ajx')) {
+          this.__isSubmitAjx = true;
+        }
+        return origOpen.call(this, method, url, ...rest);
+      };
+      const origSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.send = function(...args) {
+        if (this.__isSubmitAjx) {
+          this.responseType = 'arraybuffer';
+          this.addEventListener('load', function() {
+            if (this.status === 200 && this.response instanceof ArrayBuffer) {
+              window.__captureSubmitAjxPdf(b64FromArrayBuffer(this.response));
+            }
+          });
+        }
+        return origSend.call(this, ...args);
+      };
+
+      // Also intercept fetch in case the Vue app uses it instead of XHR.
+      const origFetch = window.fetch;
+      window.fetch = async function(input, init) {
+        const url = typeof input === 'string' ? input : (input?.url ?? '');
+        const resp = await origFetch.call(this, input, init);
+        if (url.includes('submit.ajx') && resp.ok) {
+          const clone = resp.clone();
+          clone.arrayBuffer().then(ab => {
+            window.__captureSubmitAjxPdf(b64FromArrayBuffer(ab));
+          }).catch(() => {});
+          return resp;
+        }
+        return resp;
+      };
+
+      // Suppress window.print() — the main page calls it after submitting
       window.print = function() {};
     });
 
