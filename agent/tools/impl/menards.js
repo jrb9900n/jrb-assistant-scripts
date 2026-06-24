@@ -152,11 +152,27 @@ async function fillAndPrintRebateForm(expense) {
     : null;
   if (!executablePath) throw new Error('No Chrome or Edge browser found on this machine');
 
-  // Log the outbound IP used for this attempt so we know which exit node was active.
-  // The --proxy-server flag below routes ONLY the Puppeteer browser through the proxy;
-  // the rest of the agent (axios, Supabase, etc.) continues on the machine's default route.
+  // Reuse the SA residential proxy when available — it provides a clean exit IP
+  // that bypasses the Incapsula rate limit that the machine's direct IP (75.184.100.83)
+  // can accumulate after repeated requests to ajx endpoints.
+  const saProxyUrl = process.env.SA_PROXY_URL || '';
+  let proxyArg  = null;
+  let proxyAuth = null;
+  if (saProxyUrl) {
+    try {
+      const u  = new URL(saProxyUrl);
+      proxyArg = `${u.protocol}//${u.host}`;
+      if (u.username) proxyAuth = { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) };
+      logger.info('Menards: using residential proxy', { server: proxyArg });
+    } catch {
+      proxyArg  = null;
+      proxyAuth = null;
+      logger.warn('Menards: SA_PROXY_URL is malformed — falling back to direct connection');
+    }
+  }
+
   const egressIp = await getEgressIp().catch(() => 'unknown');
-  logger.info('Menards: starting rebate attempt', { egressIp });
+  logger.info('Menards: starting rebate attempt', { egressIp, proxy: proxyArg ?? 'direct' });
 
   const browser = await puppeteerExtra.launch({
     executablePath,
@@ -167,16 +183,13 @@ async function fillAndPrintRebateForm(expense) {
       '--disable-gpu',
       '--window-size=1280,900',
       '--disable-blink-features=AutomationControlled',
-      // Direct connection. WARP (socks5://127.0.0.1:40000) gives a hard "Request
-      // unsuccessful" block from Incapsula — VPN/datacenter exit IPs are permanently
-      // blocked. The direct residential IP (75.184.100.83) is only temporarily
-      // rate-limited after rapid test runs and recovers within a few hours.
+      ...(proxyArg ? [`--proxy-server=${proxyArg}`] : []),
     ],
   });
-  logger.info('Menards: browser launched via WARP proxy (socks5://127.0.0.1:40000)');
 
   try {
     const page = await browser.newPage();
+    if (proxyAuth) await page.authenticate(proxyAuth);
     await page.setViewport({ width: 1280, height: 900 });
     await page.setUserAgent(USER_AGENT);
 
