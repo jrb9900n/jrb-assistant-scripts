@@ -101,24 +101,53 @@ export async function sendEmail({ draft_id, to, subject, body, contentType = 'HT
     await graph('POST', `/users/${USER()}/messages/${encodeURIComponent(draft_id)}/send`);
     return { sent: true, draft_id };
   }
-  const message = {
-    message: {
-      subject: subject ?? '',
-      body: { contentType, content: body },
-      toRecipients: to.map(a => ({ emailAddress: { address: a } })),
-      ...(attachments.length ? {
-        attachments: attachments.map(a => ({
-          '@odata.type': '#microsoft.graph.fileAttachment',
-          name: a.name,
-          contentType: a.contentType,
-          contentBytes: Buffer.isBuffer(a.content) ? a.content.toString('base64') : a.content,
-        })),
-      } : {}),
-    },
-    saveToSentItems: false,
-  };
-  await graph('POST', `/users/${USER()}/sendMail`, message);
-  return { sent: true };
+
+  if (attachments.length === 0) {
+    await graph('POST', `/users/${USER()}/sendMail`, {
+      message: {
+        subject: subject ?? '',
+        body: { contentType, content: body },
+        toRecipients: to.map(a => ({ emailAddress: { address: a } })),
+      },
+      saveToSentItems: false,
+    });
+    return { sent: true };
+  }
+
+  // With attachments: create draft, upload each via upload session (raw bytes, no
+  // base64 JSON encoding), then send. This avoids Exchange corruption of large binaries.
+  const draft = await graph('POST', `/users/${USER()}/messages`, {
+    subject: subject ?? '',
+    body: { contentType, content: body },
+    toRecipients: to.map(a => ({ emailAddress: { address: a } })),
+  });
+  const draftId = draft.id;
+
+  try {
+    for (const a of attachments) {
+      const buf = Buffer.isBuffer(a.content) ? a.content : Buffer.from(a.content, 'base64');
+      const session = await graph(
+        'POST',
+        `/users/${USER()}/messages/${draftId}/attachments/createUploadSession`,
+        { AttachmentItem: { attachmentType: 'file', name: a.name, size: buf.length, contentType: a.contentType } }
+      );
+      // uploadUrl is pre-authenticated — do NOT add Authorization header
+      await axios.put(session.uploadUrl, buf, {
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Range': `bytes 0-${buf.length - 1}/${buf.length}`,
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      });
+      logger.info('Attachment uploaded via session', { name: a.name, bytes: buf.length });
+    }
+    await graph('POST', `/users/${USER()}/messages/${draftId}/send`);
+    return { sent: true };
+  } catch (err) {
+    try { await graph('DELETE', `/users/${USER()}/messages/${draftId}`); } catch {}
+    throw err;
+  }
 }
 
 export async function createReminder({ title, due_date, notes = '' }) {

@@ -291,6 +291,35 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Hourly — retry any Menards rebates that failed transiently (IP rate limits clear within 1-2h).
+    // First-attempt failures are queued as retry_pending; this cron fires the second attempt.
+    // If the second attempt also fails, the manual fallback email is sent then.
+    schedule: '0 * * * *',
+    name: 'menards_rebate_retry',
+    run: async () => {
+      const { createClient } = await import('@supabase/supabase-js');
+      const sb = createClient(
+        process.env.FLEETOPS_SUPABASE_URL,
+        process.env.FLEETOPS_SUPABASE_SERVICE_KEY
+      );
+      const { data: pending } = await sb
+        .from('menards_rebates')
+        .select('expense_report_id')
+        .eq('status', 'retry_pending')
+        .lte('retry_after', new Date().toISOString());
+      if (!pending?.length) return;
+      logger.info('menards_rebate_retry: retrying pending rebates', { count: pending.length });
+      const { triggerMenardsRebate } = await import('../tools/impl/menards.js');
+      for (const row of pending) {
+        try {
+          await triggerMenardsRebate(row.expense_report_id);
+        } catch (err) {
+          logger.error('menards_rebate_retry: unhandled error', { expenseReportId: row.expense_report_id, err: err.message });
+        }
+      }
+    },
+  },
+  {
     schedule: '*/5 * * * *',
     name: 'email_poller',
     run: async () => {

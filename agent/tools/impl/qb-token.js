@@ -100,6 +100,9 @@ export function buildQBAuthUrl(state) {
 async function saveRefreshToken(token) {
   // Write a temp PS1 script that uses Win32 CredWrite (handles long tokens
   // that cmdkey silently truncates).
+  // IMPORTANT: check CredWrite return value and exit 1 on failure so
+  // execFileSync throws — previously | Out-Null discarded the result and
+  // silent failures were logged as successes, leaving Credential Manager stale.
   const tmpFile = join(tmpdir(), `qb-cred-save-${Date.now()}.ps1`);
   const ps = `param([string]$Token)
 Add-Type -TypeDefinition @"
@@ -125,14 +128,35 @@ public class CredSaver {
     }
 }
 "@
-[CredSaver]::Write('JRBAgent:QB_REFRESH_TOKEN', 'JRBAgent', $Token) | Out-Null
+$ok = [CredSaver]::Write('JRBAgent:QB_REFRESH_TOKEN', 'JRBAgent', $Token)
+if (-not $ok) {
+    $errCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    Write-Error "CredWrite failed with Win32 error $errCode"
+    exit 1
+}
 `;
 
   writeFileSync(tmpFile, ps, 'utf8');
+  // Outer finally guarantees the token-containing PS1 is removed on every exit path
+  // (success on attempt 1, success on attempt 2, all retries exhausted, or early throw).
   try {
-    execFileSync('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-File', tmpFile, '-Token', token], {
-      timeout: 15_000,
-    });
+    const MAX_ATTEMPTS = 3;
+    let lastErr;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        execFileSync('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-File', tmpFile, '-Token', token], {
+          timeout: 15_000,
+        });
+        return; // success
+      } catch (err) {
+        lastErr = err;
+        if (attempt < MAX_ATTEMPTS) {
+          logger.warn(`QB: saveRefreshToken attempt ${attempt} failed, retrying`, { err: err.message });
+          await new Promise(r => setTimeout(r, 2000 * attempt));
+        }
+      }
+    }
+    throw lastErr;
   } finally {
     try { unlinkSync(tmpFile); } catch {}
   }
