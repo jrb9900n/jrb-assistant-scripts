@@ -31,19 +31,19 @@ Add-Type -TypeDefinition $src
 
 function Get-S { param([string]$n); [CredMgrRS]::GetPassword("JRBAgent:$n") }
 
-[System.Environment]::SetEnvironmentVariable("FLEETOPS_SUPABASE_URL",         "https://mzywmgesulyalevtzudw.supabase.co",  "Process")
+[System.Environment]::SetEnvironmentVariable("FLEETOPS_SUPABASE_URL",         (Get-S "FLEETOPS_SUPABASE_URL"),              "Process")
 [System.Environment]::SetEnvironmentVariable("FLEETOPS_SUPABASE_SERVICE_KEY",  (Get-S "FLEETOPS_SUPABASE_SERVICE_KEY"),      "Process")
 [System.Environment]::SetEnvironmentVariable("M365_TENANT_ID",                 (Get-S "M365_TENANT_ID"),                    "Process")
 [System.Environment]::SetEnvironmentVariable("M365_CLIENT_ID",                 (Get-S "M365_CLIENT_ID"),                    "Process")
 [System.Environment]::SetEnvironmentVariable("M365_CLIENT_SECRET",             (Get-S "M365_CLIENT_SECRET"),                "Process")
-[System.Environment]::SetEnvironmentVariable("M365_USER_EMAIL",                "assistant@jrboehlke.com",                   "Process")
-[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_FIRST_NAME",      "Michael",                                   "Process")
-[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_LAST_NAME",       "Reardon",                                   "Process")
-[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_ADDRESS1",        "PO Box 105",                                "Process")
-[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_CITY",            "Mequon",                                    "Process")
-[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_STATE",           "WI",                                        "Process")
-[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_ZIP",             "53092",                                     "Process")
-[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_EMAIL",           "michael@jrboehlke.com",                     "Process")
+[System.Environment]::SetEnvironmentVariable("M365_USER_EMAIL",                (Get-S "M365_USER_EMAIL"),                   "Process")
+[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_FIRST_NAME",      (Get-S "MENARDS_REBATE_FIRST_NAME"),         "Process")
+[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_LAST_NAME",       (Get-S "MENARDS_REBATE_LAST_NAME"),          "Process")
+[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_ADDRESS1",        (Get-S "MENARDS_REBATE_ADDRESS1"),           "Process")
+[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_CITY",            (Get-S "MENARDS_REBATE_CITY"),               "Process")
+[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_STATE",           (Get-S "MENARDS_REBATE_STATE"),              "Process")
+[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_ZIP",             (Get-S "MENARDS_REBATE_ZIP"),                "Process")
+[System.Environment]::SetEnvironmentVariable("MENARDS_REBATE_EMAIL",           (Get-S "MENARDS_REBATE_EMAIL"),              "Process")
 [System.Environment]::SetEnvironmentVariable("SA_PROXY_URL",                   (Get-S "SA_PROXY_URL"),                      "Process")
 
 Set-Location $AgentDir
