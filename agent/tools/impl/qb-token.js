@@ -21,6 +21,11 @@ let _accessToken = null;
 let _accessTokenExpiry = 0;
 let _refreshToken = null; // populated lazily from process.env
 
+// Mutex: prevents concurrent callers from each firing a refresh with the same
+// stale refresh token. Intuit invalidates the old token the moment the first
+// rotation succeeds, so the second concurrent caller would receive HTTP 400.
+let _refreshPromise = null;
+
 function currentRefreshToken() {
   if (!_refreshToken) _refreshToken = process.env.QB_REFRESH_TOKEN;
   return _refreshToken;
@@ -31,6 +36,16 @@ function currentRefreshToken() {
 export async function getQBAccessToken() {
   if (_accessToken && Date.now() < _accessTokenExpiry - 60_000) return _accessToken;
 
+  // Serialize concurrent refresh attempts behind a single promise.
+  // Any caller that arrives while a refresh is already in flight waits for it
+  // instead of launching a second one with the same (now-invalid) refresh token.
+  if (_refreshPromise) return _refreshPromise;
+
+  _refreshPromise = _doRefresh().finally(() => { _refreshPromise = null; });
+  return _refreshPromise;
+}
+
+async function _doRefresh() {
   const rt = currentRefreshToken();
   if (!rt) throw new Error('QB_REFRESH_TOKEN not set — run QB re-auth at /qb-reauth');
 
