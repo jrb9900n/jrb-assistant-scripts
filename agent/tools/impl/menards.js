@@ -167,11 +167,13 @@ async function fillAndPrintRebateForm(expense) {
       '--disable-gpu',
       '--window-size=1280,900',
       '--disable-blink-features=AutomationControlled',
-      // Use direct connection (no WARP proxy) — WARP exit IP may be rate-limited after
-      // rapid test runs. Re-enable with --proxy-server=socks5://127.0.0.1:40000 if needed.
-      // '--proxy-server=socks5://127.0.0.1:40000',
+      // Direct connection. WARP (socks5://127.0.0.1:40000) gives a hard "Request
+      // unsuccessful" block from Incapsula — VPN/datacenter exit IPs are permanently
+      // blocked. The direct residential IP (75.184.100.83) is only temporarily
+      // rate-limited after rapid test runs and recovers within a few hours.
     ],
   });
+  logger.info('Menards: browser launched via WARP proxy (socks5://127.0.0.1:40000)');
 
   try {
     const page = await browser.newPage();
@@ -273,28 +275,53 @@ async function fillAndPrintRebateForm(expense) {
 
     await page.goto(REBATE_URL, { waitUntil: 'networkidle2', timeout: 45_000 });
 
-    // Detect bot-challenge page before attempting to fill the form.
-    // Incapsula/Imperva challenge pages include _Incapsula_Resource in the HTML.
-    const pageHtml = await page.content();
-    if (pageHtml.includes('_Incapsula_Resource') || pageHtml.includes('Request unsuccessful')) {
+    // ── Incapsula challenge handling ────────────────────────────────────────────
+    // Incapsula serves two types of responses that need different treatment:
+    //
+    //   _Incapsula_Resource → JavaScript challenge page. The browser executes the
+    //   challenge script, which sets auth cookies and reloads the page via
+    //   window.location. The real form then loads. We wait for #formFirstName to
+    //   appear rather than throwing immediately — the browser solves the challenge.
+    //
+    //   Request unsuccessful → hard IP block; throw immediately with MenardsBlockedError.
+    //
+    const initialHtml = await page.content();
+    const challengeDetected = initialHtml.includes('_Incapsula_Resource');
+
+    if (initialHtml.includes('Request unsuccessful')) {
       const screenshotPath = path.join(PDF_DIR, `menards-block-${Date.now()}.png`);
       await page.screenshot({ path: screenshotPath }).catch(() => {});
-      const err = new Error('Menards page returned a bot-challenge response — rebate requires manual submission');
-      err.name          = 'MenardsBlockedError';
-      err.egressIp      = egressIp;
+      const err = new Error('Menards page returned a hard block response — rebate requires manual submission');
+      err.name           = 'MenardsBlockedError';
+      err.egressIp       = egressIp;
       err.screenshotPath = screenshotPath;
       throw err;
     }
+    if (challengeDetected) {
+      logger.info('Menards: Incapsula JS challenge page detected — waiting up to 25s for browser to solve...');
+    }
 
-    // Wait for Vue app to mount the form.
-    // If this times out, the page structure may have changed — save a diagnostic snapshot.
-    await page.waitForSelector('#formFirstName', { timeout: 20_000 }).catch(async () => {
+    // Wait for the Vue form to mount. If a challenge was detected, allow extra time
+    // for the challenge JS to execute, set cookies, reload, and render the form.
+    const formTimeout = challengeDetected ? 25_000 : 20_000;
+    await page.waitForSelector('#formFirstName', { timeout: formTimeout }).catch(async () => {
       const screenshotPath = path.join(PDF_DIR, `menards-form-missing-${Date.now()}.png`);
       const htmlPath       = path.join(PDF_DIR, `menards-form-missing-${Date.now()}.html`);
       await page.screenshot({ path: screenshotPath }).catch(() => {});
       fs.writeFileSync(htmlPath, await page.content().catch(() => ''), 'utf8');
-      throw new Error(`Menards: #formFirstName not found after 20s — form may have changed. Screenshot: ${screenshotPath}`);
+      if (challengeDetected) {
+        const err = new Error('Menards: Incapsula challenge did not resolve within 25s — rebate requires manual submission');
+        err.name           = 'MenardsBlockedError';
+        err.egressIp       = egressIp;
+        err.screenshotPath = screenshotPath;
+        throw err;
+      }
+      throw new Error(`Menards: #formFirstName not found after ${formTimeout / 1000}s — form may have changed. Screenshot: ${screenshotPath}`);
     });
+    if (challengeDetected) {
+      logger.info('Menards: Incapsula challenge resolved — form is now loaded');
+    }
+    // ── End challenge handling ───────────────────────────────────────────────
 
     // Fill all fields with Vue-reactive events (native setter + input/change/blur dispatch).
     // Standard page.type() updates the DOM value but doesn't trigger Vue's reactive watchers.
