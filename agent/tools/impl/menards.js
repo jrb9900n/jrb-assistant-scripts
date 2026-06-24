@@ -53,32 +53,45 @@ const USER_AGENT  = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.3
 // ── Public API ─────────────────────────────────────────────────
 
 export async function triggerMenardsRebate(expenseReportId) {
-  // Dedup: skip if a rebate was already triggered for this expense report
+  // Dedup check: skip completed/in-progress rows; retry if retry window has passed.
   const { data: existing, error: dedupErr } = await supabase
     .from('menards_rebates')
-    .select('id, status')
+    .select('id, status, retry_after, attempts')
     .eq('expense_report_id', expenseReportId)
     .maybeSingle();
+
+  let rebate;
+
   if (dedupErr) {
     logger.warn('Menards rebate dedup check failed — proceeding with insert', { expenseReportId, err: dedupErr.message });
   } else if (existing) {
-    logger.info('Menards rebate already exists for this expense report, skipping', { expenseReportId, status: existing.status });
-    return;
-  }
-
-  // Create a tracking record
-  const { data: rebate, error: insErr } = await supabase
-    .from('menards_rebates')
-    .insert({ expense_report_id: expenseReportId, status: 'pending' })
-    .select()
-    .single();
-  if (insErr) {
-    if (insErr.code === '23505') {
-      logger.info('Menards rebate concurrent insert detected, skipping', { expenseReportId });
+    if (existing.status === 'retry_pending' && existing.retry_after && new Date(existing.retry_after) <= new Date()) {
+      // Retry window has passed — reset status and re-run
+      await supabase.from('menards_rebates').update({ status: 'pending' }).eq('id', existing.id);
+      rebate = existing;
+      logger.info('Menards rebate: retrying after delay', { expenseReportId, attempts: existing.attempts });
+    } else {
+      logger.info('Menards rebate already exists, skipping', { expenseReportId, status: existing.status });
       return;
     }
-    logger.error('Failed to create menards_rebates row', { err: insErr.message });
-    return;
+  }
+
+  if (!rebate) {
+    // First attempt — create the tracking row
+    const { data: newRebate, error: insErr } = await supabase
+      .from('menards_rebates')
+      .insert({ expense_report_id: expenseReportId, status: 'pending', attempts: 1 })
+      .select()
+      .single();
+    if (insErr) {
+      if (insErr.code === '23505') {
+        logger.info('Menards rebate concurrent insert detected, skipping', { expenseReportId });
+        return;
+      }
+      logger.error('Failed to create menards_rebates row', { err: insErr.message });
+      return;
+    }
+    rebate = newRebate;
   }
 
   // Fetch expense details
@@ -100,25 +113,34 @@ export async function triggerMenardsRebate(expenseReportId) {
       .eq('id', rebate.id);
     logger.info('Menards rebate emailed', { expenseReportId, pdfPath });
   } catch (err) {
-    const isBlocked = err.name === 'MenardsBlockedError';
-    const status    = isBlocked ? 'blocked' : 'error';
+    const isBlocked  = err.name === 'MenardsBlockedError';
+    const attemptNum = rebate.attempts || 1;
+
+    // Transient failures (network blocks, USPS timeouts) get one automatic retry after 2 hours.
+    // Only blocked status (Incapsula JS challenge) and persistent errors send the fallback email.
+    const shouldRetry = !isBlocked && attemptNum < 2;
+    const newStatus   = shouldRetry ? 'retry_pending' : (isBlocked ? 'blocked' : 'error');
+    const retryAfter  = shouldRetry ? new Date(Date.now() + 2 * 60 * 60 * 1000).toISOString() : null;
+
     await supabase
       .from('menards_rebates')
       .update({
-        status,
-        error_message:  err.message,
-        egress_ip:      err.egressIp ?? null,
+        status:          newStatus,
+        error_message:   err.message,
+        egress_ip:       err.egressIp       ?? null,
         screenshot_path: err.screenshotPath ?? null,
+        ...(retryAfter ? { retry_after: retryAfter, attempts: attemptNum + 1 } : {}),
       })
       .eq('id', rebate.id);
-    logger.error(`Menards rebate ${status}`, { expenseReportId, err: err.message });
 
-    // Automation-first, manual-fallback: always notify Michael so the rebate
-    // opportunity is not silently lost, even if automation failed.
-    await sendManualFallback(expense, isBlocked
-      ? `Menards rebate automation was blocked (possible bot challenge). Manual submission required.`
-      : `Menards rebate automation failed: ${err.message}`
-    ).catch(e => logger.warn('Menards: failed to send manual fallback', { err: e.message }));
+    logger.error(`Menards rebate ${newStatus}`, { expenseReportId, err: err.message, shouldRetry, retryAfter });
+
+    if (!shouldRetry) {
+      await sendManualFallback(expense, isBlocked
+        ? `Menards rebate automation was blocked (possible bot challenge). Manual submission required.`
+        : `Menards rebate automation failed after ${attemptNum} attempt(s): ${err.message}`
+      ).catch(e => logger.warn('Menards: failed to send manual fallback', { err: e.message }));
+    }
   }
 }
 
@@ -145,9 +167,9 @@ async function fillAndPrintRebateForm(expense) {
       '--disable-gpu',
       '--window-size=1280,900',
       '--disable-blink-features=AutomationControlled',
-      // Route only this browser through Cloudflare WARP (socks5 proxy on port 40000).
-      // This changes the egress IP for Puppeteer traffic only, not the whole machine.
-      '--proxy-server=socks5://127.0.0.1:40000',
+      // Use direct connection (no WARP proxy) — WARP exit IP may be rate-limited after
+      // rapid test runs. Re-enable with --proxy-server=socks5://127.0.0.1:40000 if needed.
+      // '--proxy-server=socks5://127.0.0.1:40000',
     ],
   });
 
@@ -162,9 +184,14 @@ async function fillAndPrintRebateForm(expense) {
     // it as UTF-8, corrupting every byte >= 0x80 into a 3-byte replacement sequence.
     // Reading via XHR responseType='arraybuffer' inside the browser context is binary-safe.
     let submitPdfBuffer = null;
+    const xhrLog = [];
     await page.exposeFunction('__captureSubmitAjxPdf', (base64) => {
       submitPdfBuffer = Buffer.from(base64, 'base64');
       logger.info('Menards: submit.ajx PDF captured via in-browser XHR', { bytes: submitPdfBuffer.length });
+    });
+    await page.exposeFunction('__logXhrActivity', (info) => {
+      xhrLog.push(info);
+      logger.info('Menards: XHR', info);
     });
     await page.evaluateOnNewDocument(() => {
       function b64FromArrayBuffer(ab) {
@@ -181,6 +208,8 @@ async function fillAndPrintRebateForm(expense) {
       // Force arraybuffer so the browser never decodes bytes as text.
       const origOpen = XMLHttpRequest.prototype.open;
       XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+        this.__xhrUrl    = url;
+        this.__xhrMethod = method;
         if (typeof url === 'string' && url.includes('submit.ajx')) {
           this.__isSubmitAjx = true;
         }
@@ -188,11 +217,21 @@ async function fillAndPrintRebateForm(expense) {
       };
       const origSend = XMLHttpRequest.prototype.send;
       XMLHttpRequest.prototype.send = function(...args) {
+        const self = this;
         if (this.__isSubmitAjx) {
           this.responseType = 'arraybuffer';
           this.addEventListener('load', function() {
+            window.__logXhrActivity({ tag: 'submit.ajx', url: self.__xhrUrl, status: this.status, bytes: this.response?.byteLength ?? 0 });
             if (this.status === 200 && this.response instanceof ArrayBuffer) {
               window.__captureSubmitAjxPdf(b64FromArrayBuffer(this.response));
+            }
+          });
+        } else {
+          // Log any XHR that looks related to rebate/address so we can trace the form flow.
+          this.addEventListener('load', function() {
+            const url = self.__xhrUrl || '';
+            if (/\.ajx|rebate|submit|usps|address/i.test(url)) {
+              window.__logXhrActivity({ tag: 'xhr', url, method: self.__xhrMethod, status: this.status });
             }
           });
         }
@@ -207,11 +246,25 @@ async function fillAndPrintRebateForm(expense) {
         if (url.includes('submit.ajx') && resp.ok) {
           const clone = resp.clone();
           clone.arrayBuffer().then(ab => {
+            window.__logXhrActivity({ tag: 'fetch-submit.ajx', url, status: resp.status, bytes: ab.byteLength });
             window.__captureSubmitAjxPdf(b64FromArrayBuffer(ab));
           }).catch(() => {});
           return resp;
         }
         return resp;
+      };
+
+      // Intercept window.open — the page may open the PDF blob URL in a new tab.
+      const origWindowOpen = window.open;
+      window.open = function(url, target, features) {
+        if (typeof url === 'string' && url.startsWith('blob:')) {
+          window.__logXhrActivity({ tag: 'window.open-blob', url });
+          fetch(url)
+            .then(r => r.arrayBuffer())
+            .then(ab => window.__captureSubmitAjxPdf(b64FromArrayBuffer(ab)))
+            .catch(() => {});
+        }
+        return origWindowOpen ? origWindowOpen.call(this, url, target, features) : null;
       };
 
       // Suppress window.print() — the main page calls it after submitting
@@ -273,16 +326,19 @@ async function fillAndPrintRebateForm(expense) {
     // reloads with the USPS-corrected address and PRINT must be clicked a second time.
     // On the second click, submit.ajx is called and the server returns the filled PDF.
     await page.click('button[type="submit"]');
+    logger.info('Menards: first PRINT click sent, waiting for USPS modal or direct submission');
 
     // Detect the address-validation modal by waiting for the "Use Original Address"
     // button to appear. Using button text rather than a Vue scoped-attribute selector
     // (data-v-HASH) — Vue hashes change on every build and would silently break detection
     // when Menards deploys a frontend update.
+    // Timeout is 12s (not 5s) — PO Box addresses often take 5-8s for USPS to respond.
     const modalDetected = await page.waitForFunction(
       () => Array.from(document.querySelectorAll('button'))
               .some(b => b.textContent.trim() === 'Use Original Address'),
-      { timeout: 5000 }
+      { timeout: 12000 }
     ).then(() => true).catch(() => false);
+    logger.info('Menards: address modal detection complete', { modalDetected });
 
     if (modalDetected) {
       // Find the rendered "Continue" button using bounding-rect dimensions.
@@ -324,8 +380,45 @@ async function fillAndPrintRebateForm(expense) {
       logger.info('Menards: clicked PRINT after address confirmation (step 2)');
     }
 
+    logger.info('Menards: waiting for submit.ajx PDF', { modalDetected });
     // Wait for submit.ajx to return the server-generated PDF (up to 15s)
     await waitFor(() => submitPdfBuffer !== null, 15000);
+
+    // Fallback: look for a blob URL the page opened after submission.
+    // submit.ajx returns the PDF bytes; the Vue app typically calls window.open(blobUrl)
+    // or embeds the result in an iframe — our window.open interceptor handles the former;
+    // this handles the latter and any case the XHR interceptor missed.
+    if (!submitPdfBuffer) {
+      const snapPath = path.join(PDF_DIR, `menards-timeout-${Date.now()}.png`);
+      await page.screenshot({ path: snapPath }).catch(() => {});
+      logger.warn('Menards: primary capture timed out, trying blob URL fallback', {
+        xhrLog: xhrLog.slice(-20),
+        snapPath,
+      });
+
+      const blobB64 = await page.evaluate(() => new Promise((resolve) => {
+        const el = [...document.querySelectorAll('iframe, object, embed')]
+          .find(e => (e.src || e.data || '').startsWith('blob:'));
+        const blobUrl = el ? (el.src || el.data) : null;
+        if (!blobUrl) { resolve(null); return; }
+        fetch(blobUrl)
+          .then(r => r.arrayBuffer())
+          .then(ab => {
+            const bytes = new Uint8Array(ab);
+            let b64 = '';
+            for (let i = 0; i < bytes.length; i += 8192) {
+              b64 += btoa(String.fromCharCode(...bytes.subarray(i, i + 8192)));
+            }
+            resolve(b64);
+          })
+          .catch(() => resolve(null));
+      })).catch(() => null);
+
+      if (blobB64) {
+        submitPdfBuffer = Buffer.from(blobB64, 'base64');
+        logger.info('Menards: PDF captured via blob URL fallback', { bytes: submitPdfBuffer.length });
+      }
+    }
 
     if (!submitPdfBuffer) {
       throw new Error('Menards: submit.ajx did not return a PDF within 15s — form submission may have failed');
