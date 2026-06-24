@@ -46,15 +46,43 @@ export async function getQBAccessToken() {
 }
 
 async function _doRefresh() {
-  const rt = currentRefreshToken();
+  let rt = currentRefreshToken();
   if (!rt) throw new Error('QB_REFRESH_TOKEN not set — run QB re-auth at /qb-reauth');
 
   const creds = Buffer.from(`${process.env.QB_CLIENT_ID}:${process.env.QB_CLIENT_SECRET}`).toString('base64');
-  const res = await axios.post(
-    'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
-    `grant_type=refresh_token&refresh_token=${encodeURIComponent(rt)}`,
-    { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
-  );
+
+  async function callIntuit(token) {
+    return axios.post(
+      'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
+      `grant_type=refresh_token&refresh_token=${encodeURIComponent(token)}`,
+      { headers: { Authorization: `Basic ${creds}`, 'Content-Type': 'application/x-www-form-urlencoded' } }
+    );
+  }
+
+  let res;
+  try {
+    res = await callIntuit(rt);
+  } catch (err) {
+    // 400 (invalid_grant) means another process already rotated this token.
+    // Re-read the current token from Credential Manager and retry once.
+    if (err.response?.status === 400) {
+      const latestRt = await readRefreshTokenFromCredMgr();
+      if (!latestRt) {
+        logger.warn('QB: CredMgr re-read returned null — cannot recover from 400', { err: err.message });
+        throw err;
+      }
+      if (latestRt === rt) {
+        logger.warn('QB: CredMgr token matches in-memory token — not a cross-process race; re-auth required', { err: err.message });
+        throw err;
+      }
+      logger.info('QB: stale token detected — retrying with current Credential Manager token');
+      _refreshToken = latestRt;
+      process.env.QB_REFRESH_TOKEN = latestRt;
+      res = await callIntuit(latestRt); // throws if still invalid
+    } else {
+      throw err;
+    }
+  }
 
   _accessToken = res.data.access_token;
   _accessTokenExpiry = Date.now() + res.data.expires_in * 1000;
@@ -108,6 +136,51 @@ export function buildQBAuthUrl(state) {
     state: state || 'qb-reauth',
   });
   return `https://appcenter.intuit.com/connect/oauth2?${params}`;
+}
+
+// ── Read current refresh token from Credential Manager ────────
+
+async function readRefreshTokenFromCredMgr() {
+  const tmpFile = join(tmpdir(), `qb-cred-read-${Date.now()}.ps1`);
+  const ps = `Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class CredReader {
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+    public struct CREDENTIAL {
+        public uint Flags; public uint Type; public string TargetName; public string Comment;
+        public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+        public uint CredentialBlobSize; public IntPtr CredentialBlob; public uint Persist;
+        public uint AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
+    }
+    [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    public static extern bool CredRead(string target, uint type, uint flags, out IntPtr credential);
+    [DllImport("advapi32.dll")]
+    public static extern void CredFree(IntPtr buffer);
+    public static string Read(string target) {
+        IntPtr ptr = IntPtr.Zero;
+        if (!CredRead(target, 1, 0, out ptr)) return null;
+        var cred = Marshal.PtrToStructure<CREDENTIAL>(ptr);
+        var password = Marshal.PtrToStringUni(cred.CredentialBlob, (int)(cred.CredentialBlobSize / 2));
+        CredFree(ptr);
+        return password;
+    }
+}
+"@
+Write-Output ([CredReader]::Read('JRBAgent:QB_REFRESH_TOKEN'))
+`;
+  try {
+    writeFileSync(tmpFile, ps, 'utf8');
+    const out = execFileSync('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-File', tmpFile], {
+      timeout: 10_000,
+      encoding: 'utf8',
+    });
+    return out.trim() || null;
+  } catch {
+    return null;
+  } finally {
+    try { unlinkSync(tmpFile); } catch {}
+  }
 }
 
 // ── Persist rotated refresh token to Credential Manager ───────
