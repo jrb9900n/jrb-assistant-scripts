@@ -31,7 +31,7 @@ Add-Type -TypeDefinition $src
 
 function Get-S { param([string]$n); [CredMgrRS]::GetPassword("JRBAgent:$n") }
 
-[System.Environment]::SetEnvironmentVariable("FLEETOPS_SUPABASE_URL",         (Get-S "FLEETOPS_SUPABASE_URL"),              "Process")
+[System.Environment]::SetEnvironmentVariable("FLEETOPS_SUPABASE_URL",         "https://mzywmgesulyalevtzudw.supabase.co",  "Process")
 [System.Environment]::SetEnvironmentVariable("FLEETOPS_SUPABASE_SERVICE_KEY",  (Get-S "FLEETOPS_SUPABASE_SERVICE_KEY"),      "Process")
 [System.Environment]::SetEnvironmentVariable("M365_TENANT_ID",                 (Get-S "M365_TENANT_ID"),                    "Process")
 [System.Environment]::SetEnvironmentVariable("M365_CLIENT_ID",                 (Get-S "M365_CLIENT_ID"),                    "Process")
