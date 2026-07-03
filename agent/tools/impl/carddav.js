@@ -11,6 +11,7 @@ import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getQBAccessToken } from './qb-token.js';
 import { getAllSAAccounts, getSAClientPhone } from './serviceautopilot.js';
+import { fetchEmployeeDirectory } from './m365.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
 
@@ -88,13 +89,21 @@ async function getContacts() {
   if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
 
   logger.info('CardDAV: refreshing contact cache');
-  let customers, vendors, saAccounts;
+  let customers, vendors, saAccounts, qboEmployees, empDirectory;
   try {
-    [customers, vendors, saAccounts] = await Promise.all([
+    [customers, vendors, saAccounts, qboEmployees, empDirectory] = await Promise.all([
       fetchQBOEntities('Customer'),
       fetchQBOEntities('Vendor'),
       getAllSAAccounts().catch(err => {
         logger.warn('CardDAV: SA account fetch failed', { err: err.message });
+        return [];
+      }),
+      fetchQBOEntities('Employee').catch(err => {
+        logger.warn('CardDAV: QBO Employee fetch failed — employees will be omitted from this refresh', { err: err.message });
+        return [];
+      }),
+      fetchEmployeeDirectory().catch(err => {
+        logger.warn('CardDAV: Employee Directory fetch failed — employees will appear without directory phones', { err: err.message });
         return [];
       }),
     ]);
@@ -106,10 +115,18 @@ async function getContacts() {
     throw err;
   }
 
+  // Build name→phone lookup from SharePoint Employee Directory (authoritative phone source)
+  const dirPhoneByName = new Map();
+  for (const emp of empDirectory) {
+    const key = normalizeName(emp.name);
+    if (key && emp.phone) dirPhoneByName.set(key, emp.phone);
+  }
+
   // Build phone + email sets from all QBO entities for cross-source dedup
+  // Include employees so their personal numbers don't create duplicate SA-only entries
   const qboPhones = new Set();
   const qboEmails = new Set();
-  for (const e of [...customers, ...vendors]) {
+  for (const e of [...customers, ...vendors, ...qboEmployees]) {
     for (const num of [e.PrimaryPhone?.FreeFormNumber, e.Mobile?.FreeFormNumber, e.AlternatePhone?.FreeFormNumber]) {
       const n = normalizePhone(num);
       if (n.length >= 7) qboPhones.add(n);
@@ -213,10 +230,18 @@ async function getContacts() {
   });
   const saOnlyVcards = saOnlyDeduped.map(saClientToVCard);
 
+  // Build employee vCards: QBO active employees + SharePoint directory phone overlay
+  const employeeVcards = qboEmployees.map(emp => {
+    const nameKey = normalizeName([emp.GivenName, emp.FamilyName].filter(Boolean).join(' ') || emp.DisplayName || '');
+    const dirPhone = dirPhoneByName.get(nameKey) ?? null;
+    return employeeToVCard(emp, dirPhone);
+  });
+
   _cache = [
     ...qboVcards,
     ...vendors.map(v => entityToVCard(v, 'vendor', null)),
     ...saOnlyVcards,
+    ...employeeVcards,
   ];
   _cacheTime = Date.now();
   _cacheEtag = crypto.createHash('md5').update(String(_cacheTime)).digest('hex');
@@ -226,6 +251,7 @@ async function getContacts() {
     saAccounts: saAccounts.length,
     saOnly: saOnlyVcards.length,
     saOnlyDropped: saOnlyProcessed.length - saOnlyDeduped.length,
+    employees: employeeVcards.length,
   });
   return _cache;
 }
@@ -336,6 +362,49 @@ function saClientToVCard(client) {
   ].filter(Boolean).join('\r\n');
 
   const etag = crypto.createHash('md5').update(uid + fn + (client.phone ?? '') + (client.address ?? '')).digest('hex');
+  return { uid, etag, vcard: lines };
+}
+
+function employeeToVCard(emp, dirPhone) {
+  const uid = `JRB-EMPLOYEE-${emp.Id}@jrboehlke.com`;
+  const givenName  = escapeVCard(emp.GivenName  ?? '');
+  const familyName = escapeVCard(emp.FamilyName ?? '');
+  const name = (givenName || familyName)
+    ? escapeVCard([emp.GivenName, emp.FamilyName].filter(Boolean).join(' '))
+    : escapeVCard(emp.DisplayName || 'Unknown');
+
+  const primaryPhone = emp.PrimaryPhone?.FreeFormNumber ?? '';
+  const mobilePhone  = emp.Mobile?.FreeFormNumber ?? '';
+  const email = emp.PrimaryEmailAddr?.Address ?? '';
+
+  const addr = emp.PrimaryAddr;
+
+  const seen = new Set();
+  function tel(number, telType) {
+    const n = (number || '').trim();
+    if (!n || seen.has(n)) return null;
+    seen.add(n);
+    return `TEL;TYPE=${telType}:${escapeVCard(n)}`;
+  }
+
+  const lines = [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    `UID:${uid}`,
+    `FN:${name}`,
+    `N:${familyName};${givenName};;;`,
+    'ORG:J.R. Boehlke',
+    tel(dirPhone, 'CELL,VOICE'),
+    tel(primaryPhone, 'WORK,VOICE'),
+    tel(mobilePhone, 'CELL,VOICE'),
+    email ? `EMAIL;TYPE=WORK:${escapeVCard(email)}` : null,
+    addr?.Line1 ? `ADR;TYPE=WORK:;;${escapeVCard(addr.Line1)};${escapeVCard(addr.City ?? '')};${escapeVCard(addr.CountrySubDivisionCode ?? '')};${escapeVCard(addr.PostalCode ?? '')};US` : null,
+    'CATEGORIES:JRB Employee',
+    `NOTE:${uid}`,
+    'END:VCARD',
+  ].filter(Boolean).join('\r\n');
+
+  const etag = crypto.createHash('md5').update(uid + name + (dirPhone ?? '') + primaryPhone + mobilePhone + email + (addr?.Line1 ?? '')).digest('hex');
   return { uid, etag, vcard: lines };
 }
 
