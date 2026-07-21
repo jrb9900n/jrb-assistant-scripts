@@ -212,10 +212,19 @@ async function getContacts() {
         batch.map(async c => {
           try {
             const detail = await getSAClientDetails(c.clientId);
-            return [c.clientId, { phone: detail.phone || null, address: detail.address || null, city: detail.city, state: detail.state, zip: detail.zip }];
+            return [c.clientId, {
+              homePhone:  detail.homePhone  || null,
+              cellPhone:  detail.cellPhone  || null,
+              workPhone:  detail.workPhone  || null,
+              otherPhone: detail.otherPhone || null,
+              address: detail.address || null, city: detail.city, state: detail.state, zip: detail.zip,
+            }];
           } catch {
-            // API error — fall back to bulk-list data for this contact
-            return [c.clientId, { phone: c.phone || null, address: c.address || null, city: c.city, state: c.state, zip: c.zip }];
+            // API error — fall back to bulk-list data; bulk collapses to one phone so put it in homePhone
+            return [c.clientId, {
+              homePhone: c.phone || null, cellPhone: null, workPhone: null, otherPhone: null,
+              address: c.address || null, city: c.city, state: c.state, zip: c.zip,
+            }];
           }
         })
       );
@@ -226,7 +235,10 @@ async function getContacts() {
     // Preserve any API-fetched entries; add bulk data only for unfetched accounts.
     for (const c of saOnlyForPhones) {
       if (!saDetailById.has(c.clientId)) {
-        saDetailById.set(c.clientId, { phone: c.phone || null, address: c.address || null, city: c.city, state: c.state, zip: c.zip });
+        saDetailById.set(c.clientId, {
+          homePhone: c.phone || null, cellPhone: null, workPhone: null, otherPhone: null,
+          address: c.address || null, city: c.city, state: c.state, zip: c.zip,
+        });
       }
     }
   }
@@ -239,9 +251,19 @@ async function getContacts() {
     .map(c => {
       const detail = saDetailById.get(c.clientId);
       const apiAddr = detail?.address || null;
+      // API returns all four phone fields; bulk list collapses to one phone.
+      // Fall back to bulk-list phone (in homePhone slot) when API returned no phones at all —
+      // covers beyond-cap accounts (detail undefined) and accounts whose phones are only in
+      // SA's Phone1/PhoneNumber fields that GetClientInfo doesn't check.
+      const homePhone  = detail?.homePhone  || null;
+      const cellPhone  = detail?.cellPhone  || null;
+      const workPhone  = detail?.workPhone  || null;
+      const otherPhone = detail?.otherPhone || null;
+      const effectiveHomePhone = homePhone || (!(cellPhone || workPhone || otherPhone) ? (c.phone || null) : null);
+      const phone = effectiveHomePhone || cellPhone || workPhone || otherPhone || null;
       return {
         ...c,
-        phone:   detail?.phone || c.phone || null,
+        homePhone: effectiveHomePhone, cellPhone, workPhone, otherPhone, phone,
         address: apiAddr || c.address || null,
         city:    apiAddr ? detail.city : c.city,
         state:   apiAddr ? detail.state : c.state,
@@ -250,9 +272,12 @@ async function getContacts() {
     })
     .filter(c => {
       if (!c.phone && !c.address) return false;
-      if (c.phone) {
-        const n = normalizePhone(c.phone);
-        if (n.length >= 7 && qboPhones.has(n)) return false;
+      // Drop if any phone matches a QBO contact (same person — QBO is authoritative)
+      for (const ph of [c.homePhone, c.cellPhone, c.workPhone, c.otherPhone]) {
+        if (ph) {
+          const n = normalizePhone(ph);
+          if (n.length >= 7 && qboPhones.has(n)) return false;
+        }
       }
       return true;
     });
@@ -377,20 +402,34 @@ function saClientToVCard(client) {
     fn = escapeVCard(raw);
   }
 
+  const tel = (num, type) => num ? `TEL;TYPE=${type}:${escapeVCard(num)}` : null;
+  const seen = new Set();
+  const telLine = (num, type) => {
+    if (!num) return null;
+    const n = normalizePhone(num);
+    if (seen.has(n)) return null;
+    seen.add(n);
+    return tel(num, type);
+  };
+
   const lines = [
     'BEGIN:VCARD',
     'VERSION:3.0',
     `UID:${uid}`,
     `FN:${fn}`,
     `N:${familyName};${givenName};;;`,
-    client.phone ? `TEL;TYPE=WORK,VOICE:${escapeVCard(client.phone)}` : null,
+    telLine(client.homePhone,  'HOME,VOICE'),
+    telLine(client.cellPhone,  'CELL,VOICE'),
+    telLine(client.workPhone,  'WORK,VOICE'),
+    telLine(client.otherPhone, 'VOICE'),
     client.address ? `ADR;TYPE=WORK:;;${escapeVCard(client.address)};${escapeVCard(client.city ?? '')};${escapeVCard(client.state ?? '')};${escapeVCard(client.zip ?? '')};US` : null,
     'CATEGORIES:JRB Customer',
     `NOTE:${uid}`,
     'END:VCARD',
   ].filter(Boolean).join('\r\n');
 
-  const etag = crypto.createHash('md5').update(uid + fn + (client.phone ?? '') + (client.address ?? '')).digest('hex');
+  const allPhones = [client.homePhone, client.cellPhone, client.workPhone, client.otherPhone].filter(Boolean).join('|');
+  const etag = crypto.createHash('md5').update(uid + fn + allPhones + (client.address ?? '')).digest('hex');
   return { uid, etag, vcard: lines };
 }
 

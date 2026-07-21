@@ -1218,13 +1218,16 @@ export async function getSAClientPhone(clientId) {
 export async function getSAClientDetails(clientId) {
   const res = await post('/WebServices/ClientEditOverlayWs.asmx/GetClientInfo', { ClientID: clientId }, 'ClientView.aspx');
   const d = res.data?.d;
-  if (!d) return { phone: '', address: '', city: '', state: '', zip: '' };
+  if (!d) return { homePhone: '', cellPhone: '', workPhone: '', otherPhone: '', address: '', city: '', state: '', zip: '' };
   return {
-    phone:   d.HomePhone || d.CellPhone || d.WorkPhone || d.OtherPhone || '',
-    address: d.Address || '',
-    city:    d.City || '',
-    state:   d.State || d.StateAbbr || '',
-    zip:     d.PostalCode || d.Zip || '',
+    homePhone:  d.HomePhone  || '',
+    cellPhone:  d.CellPhone  || '',
+    workPhone:  d.WorkPhone  || '',
+    otherPhone: d.OtherPhone || '',
+    address:    d.Address    || '',
+    city:       d.City       || '',
+    state:      d.State || d.StateAbbr || '',
+    zip:        d.PostalCode || d.Zip || '',
   };
 }
 
