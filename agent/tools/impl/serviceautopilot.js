@@ -1211,6 +1211,24 @@ export async function getSAClientPhone(clientId) {
 }
 
 /**
+ * Fetch phone AND address for a single SA account via GetClientInfo in one call.
+ * Same endpoint as getSAClientPhone; returns the full contact detail needed for CardDAV vCards.
+ * Returns { phone, address, city, state, zip } — empty strings where SA has no data.
+ */
+export async function getSAClientDetails(clientId) {
+  const res = await post('/WebServices/ClientEditOverlayWs.asmx/GetClientInfo', { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) return { phone: '', address: '', city: '', state: '', zip: '' };
+  return {
+    phone:   d.HomePhone || d.CellPhone || d.WorkPhone || d.OtherPhone || '',
+    address: d.Address || '',
+    city:    d.City || '',
+    state:   d.State || d.StateAbbr || '',
+    zip:     d.PostalCode || d.Zip || '',
+  };
+}
+
+/**
  * Fetch scheduling-relevant client profile: OfficeNotes (gate codes, property access,
  * special instructions), BillingNotes, contact info, and custom fields (CustomField1-6)
  * if configured in SA Admin → Account Settings → Custom Fields.

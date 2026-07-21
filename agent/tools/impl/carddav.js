@@ -10,7 +10,7 @@ import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getQBAccessToken } from './qb-token.js';
-import { getAllSAAccounts, getSAClientPhone } from './serviceautopilot.js';
+import { getAllSAAccounts, getSAClientDetails } from './serviceautopilot.js';
 import { fetchEmployeeDirectory } from './m365.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
@@ -193,41 +193,69 @@ async function getContacts() {
     .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)) && !c.type.toLowerCase().includes('closed'))
     .sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
 
-  // Fetch phones for SA-only contacts. Contacts without a phone are still
-  // included — they appear in the addressbook without a phone number so they
-  // can be looked up / called manually after the number is obtained.
+  // Fetch per-account phone numbers for the top N SA-only contacts (leads first).
+  // SA bulk list phone fields are often empty — GetClientInfo gives the definitive number.
+  // Contacts beyond the cap fall back to the bulk-list phone (if populated) or appear
+  // address-only. No contact is silently excluded just because it's past position N.
   const PHONE_FETCH_CAP = 150;
   const PHONE_CONCURRENCY = 5;
-  const saOnlyToFetch = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
-  const saOnlyProcessed = [];
+  const saOnlyForPhones = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
+  // saDetailById tracks every account that was attempted via GetClientInfo so the outer map
+  // can distinguish "API returned no data" from "account was never fetched" and apply
+  // bulk-list fallbacks only to beyond-cap accounts.
+  // GetClientInfo returns both phone AND address in one call — no extra API cost.
+  const saDetailById = new Map();
   try {
-    for (let i = 0; i < saOnlyToFetch.length; i += PHONE_CONCURRENCY) {
-      const batch = saOnlyToFetch.slice(i, i + PHONE_CONCURRENCY);
+    for (let i = 0; i < saOnlyForPhones.length; i += PHONE_CONCURRENCY) {
+      const batch = saOnlyForPhones.slice(i, i + PHONE_CONCURRENCY);
       const batchResults = await Promise.all(
         batch.map(async c => {
           try {
-            const phone = await getSAClientPhone(c.clientId);
-            return { ...c, phone: phone || null };
-          } catch { return { ...c, phone: null }; }
+            const detail = await getSAClientDetails(c.clientId);
+            return [c.clientId, { phone: detail.phone || null, address: detail.address || null, city: detail.city, state: detail.state, zip: detail.zip }];
+          } catch {
+            // API error — fall back to bulk-list data for this contact
+            return [c.clientId, { phone: c.phone || null, address: c.address || null, city: c.city, state: c.state, zip: c.zip }];
+          }
         })
       );
-      saOnlyProcessed.push(...batchResults);
+      for (const [id, detail] of batchResults) saDetailById.set(id, detail); // Store null phone/addr to mark "fetched"
     }
   } catch (err) {
-    logger.warn('CardDAV: SA phone fetch failed, falling back to no-phone contacts', { err: err.message });
-    saOnlyProcessed.push(...saOnlyToFetch.map(c => ({ ...c, phone: null })));
-  }
-  // Aggressive dedup before serving to iPhone:
-  // - drop SA contacts that share a phone number with any QBO/vendor contact
-  // - drop SA contacts with neither phone nor address (no useful info in a dialer)
-  const saOnlyDeduped = saOnlyProcessed.filter(c => {
-    if (!c.phone && !c.address) return false;
-    if (c.phone) {
-      const n = normalizePhone(c.phone);
-      if (n.length >= 7 && qboPhones.has(n)) return false;
+    logger.warn('CardDAV: SA detail fetch failed, using bulk-list data only', { err: err.message });
+    // Preserve any API-fetched entries; add bulk data only for unfetched accounts.
+    for (const c of saOnlyForPhones) {
+      if (!saDetailById.has(c.clientId)) {
+        saDetailById.set(c.clientId, { phone: c.phone || null, address: c.address || null, city: c.city, state: c.state, zip: c.zip });
+      }
     }
-    return true;
-  });
+  }
+
+  // All SA-only contacts, not just those within the phone-fetch cap.
+  // Within-cap: API phone+address (may be null/empty); beyond-cap: bulk-list data.
+  // API address takes priority over bulk-list address when both exist.
+  // Drop only if no phone AND no address; drop if phone duplicates a QBO contact.
+  const saOnlyDeduped = saOnlyRaw
+    .map(c => {
+      const detail = saDetailById.get(c.clientId);
+      const apiAddr = detail?.address || null;
+      return {
+        ...c,
+        phone:   detail?.phone || c.phone || null,
+        address: apiAddr || c.address || null,
+        city:    apiAddr ? detail.city : c.city,
+        state:   apiAddr ? detail.state : c.state,
+        zip:     apiAddr ? detail.zip : c.zip,
+      };
+    })
+    .filter(c => {
+      if (!c.phone && !c.address) return false;
+      if (c.phone) {
+        const n = normalizePhone(c.phone);
+        if (n.length >= 7 && qboPhones.has(n)) return false;
+      }
+      return true;
+    });
   const saOnlyVcards = saOnlyDeduped.map(saClientToVCard);
 
   // Build employee vCards: QBO active employees + SharePoint directory phone overlay
@@ -249,8 +277,9 @@ async function getContacts() {
     qboCustomers: qboVcards.length,
     vendors: vendors.length,
     saAccounts: saAccounts.length,
+    saOnlyRaw: saOnlyRaw.length,
     saOnly: saOnlyVcards.length,
-    saOnlyDropped: saOnlyProcessed.length - saOnlyDeduped.length,
+    saOnlyDropped: saOnlyRaw.length - saOnlyDeduped.length,
     employees: employeeVcards.length,
   });
   return _cache;
