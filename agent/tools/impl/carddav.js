@@ -10,7 +10,7 @@ import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getQBAccessToken } from './qb-token.js';
-import { getAllSAAccounts, getSAClientPhone } from './serviceautopilot.js';
+import { getAllSAAccounts, getSAClientDetails } from './serviceautopilot.js';
 import { fetchEmployeeDirectory } from './m365.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
@@ -200,40 +200,54 @@ async function getContacts() {
   const PHONE_FETCH_CAP = 150;
   const PHONE_CONCURRENCY = 5;
   const saOnlyForPhones = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
-  // saPhoneById tracks every account that was attempted (including null result) so the outer
-  // map can distinguish "API returned no phone" from "account was never fetched" and apply
-  // the bulk-list fallback only to beyond-cap accounts.
-  const saPhoneById = new Map();
+  // saDetailById tracks every account that was attempted via GetClientInfo so the outer map
+  // can distinguish "API returned no data" from "account was never fetched" and apply
+  // bulk-list fallbacks only to beyond-cap accounts.
+  // GetClientInfo returns both phone AND address in one call — no extra API cost.
+  const saDetailById = new Map();
   try {
     for (let i = 0; i < saOnlyForPhones.length; i += PHONE_CONCURRENCY) {
       const batch = saOnlyForPhones.slice(i, i + PHONE_CONCURRENCY);
       const batchResults = await Promise.all(
         batch.map(async c => {
           try {
-            const ph = await getSAClientPhone(c.clientId);
-            return [c.clientId, ph || null];          // API result is authoritative; null if empty
-          } catch { return [c.clientId, c.phone || null]; } // Bulk fallback on API call error
+            const detail = await getSAClientDetails(c.clientId);
+            return [c.clientId, { phone: detail.phone || null, address: detail.address || null, city: detail.city, state: detail.state, zip: detail.zip }];
+          } catch {
+            // API error — fall back to bulk-list data for this contact
+            return [c.clientId, { phone: c.phone || null, address: c.address || null, city: c.city, state: c.state, zip: c.zip }];
+          }
         })
       );
-      for (const [id, ph] of batchResults) saPhoneById.set(id, ph); // Store null to mark "fetched"
+      for (const [id, detail] of batchResults) saDetailById.set(id, detail); // Store null phone/addr to mark "fetched"
     }
   } catch (err) {
-    logger.warn('CardDAV: SA phone fetch failed, using bulk-list phones only', { err: err.message });
-    // Preserve any API-fetched entries already in the map; add bulk phones only for unfetched accounts.
-    for (const c of saOnlyForPhones) if (!saPhoneById.has(c.clientId) && c.phone) saPhoneById.set(c.clientId, c.phone);
+    logger.warn('CardDAV: SA detail fetch failed, using bulk-list data only', { err: err.message });
+    // Preserve any API-fetched entries; add bulk data only for unfetched accounts.
+    for (const c of saOnlyForPhones) {
+      if (!saDetailById.has(c.clientId)) {
+        saDetailById.set(c.clientId, { phone: c.phone || null, address: c.address || null, city: c.city, state: c.state, zip: c.zip });
+      }
+    }
   }
 
   // All SA-only contacts, not just those within the phone-fetch cap.
-  // Fetched accounts use their API result (may be null); beyond-cap accounts fall back to
-  // the bulk-list phone (often absent per SA docs) or appear address-only.
+  // Within-cap: API phone+address (may be null/empty); beyond-cap: bulk-list data.
+  // API address takes priority over bulk-list address when both exist.
   // Drop only if no phone AND no address; drop if phone duplicates a QBO contact.
   const saOnlyDeduped = saOnlyRaw
-    .map(c => ({
-      ...c,
-      phone: saPhoneById.has(c.clientId)
-        ? saPhoneById.get(c.clientId)   // API result for within-cap accounts
-        : (c.phone || null),             // Bulk-list fallback for beyond-cap accounts
-    }))
+    .map(c => {
+      const detail = saDetailById.get(c.clientId);
+      const apiAddr = detail?.address || null;
+      return {
+        ...c,
+        phone:   detail?.phone || c.phone || null,
+        address: apiAddr || c.address || null,
+        city:    apiAddr ? detail.city : c.city,
+        state:   apiAddr ? detail.state : c.state,
+        zip:     apiAddr ? detail.zip : c.zip,
+      };
+    })
     .filter(c => {
       if (!c.phone && !c.address) return false;
       if (c.phone) {
