@@ -828,6 +828,28 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
       if (failed.length > 0) throw new Error(`AME steps failed: ${failed.join(', ')}`);
     },
   },
+  {
+    // 6 AM on the 1st of Jan/Apr/Jul/Oct — first payroll following quarter end.
+    // node-cron's month field natively fires only in these 4 months, so no extra
+    // in-code quarter check is needed. Reports on the quarter that JUST ended.
+    schedule: '0 6 1 1,4,7,10 *',
+    name: 'pm_commission_report',
+    run: async () => {
+      try {
+        const { previousQuarter } = await import('../tools/impl/commission-engine.js');
+        const { generateAndSendCommissionReport } = await import('../tools/impl/commission-report.js');
+        const result = await generateAndSendCommissionReport({ quarter: previousQuarter() });
+        logger.info('pm_commission_report: done', result);
+      } catch (err) {
+        logger.error('pm_commission_report: FAILED', { err: err.message });
+        try {
+          await sendProactiveMessage(`PM Commission Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('pm_commission_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
 ];
 
 // â”€â”€ Dev task detection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
