@@ -9,13 +9,26 @@
 //     project value
 // Subcontracted work earns the same rate but is capped at 20% of GP/markup on
 // subs — since no system reliably captures actual sub cost today, qualifying
-// jobs are matched against QBO vendor bills as CANDIDATES ONLY and flagged for
-// manual confirmation. The cap is never auto-applied; see "subcontractor
-// withholding" below for how this stays safe in the meantime.
+// LINE ITEMS (not whole invoices — see "line-item splitting" below) are
+// matched against QBO vendor bills as CANDIDATES ONLY and flagged for manual
+// confirmation. The cap is never auto-applied; see "subcontractor withholding"
+// for how this stays safe in the meantime.
 //
-// PM attribution comes from pm_job_assignments (manual — see that table's
-// comment for why: no SA or FieldOps field reliably identifies "who sent this
-// estimate" today).
+// PM attribution comes from pm_job_assignments (manual, or scraped from the
+// client's original accepted estimate — see resolvePM).
+//
+// ── Line-item splitting (2026-07-28) ──────────────────────────────────────
+// A single invoice (or one of a contract's constituent invoices) can mix
+// self-performed and subcontracted line items. commission_ledger_lines holds
+// one row per QBO invoice line (fetched from qb_invoices.raw_data.Line, no
+// live API call needed — already synced). Each candidate vendor-bill match is
+// best-effort attributed to the invoice line whose description most closely
+// matches the bill line's description; when no confident attribution exists,
+// its dollars count toward the job's unconfirmed_subcontracted_fraction
+// without being pinned to a specific line. When a job's underlying invoice(s)
+// have no resolvable QBO link, no line rows are written and the job falls
+// back to whole-invoice treatment (fraction is 0 or 1, same as pre-line-item
+// behavior).
 //
 // ── Accrual vs payable, and why two different "amount paid so far" numbers exist ──
 // accrued_commission is the FULL commission for a job, recognized once — in the
@@ -28,16 +41,17 @@
 // run — computed against commissioned_through_amount, not paid_amount:
 //   - paid_amount is the real cumulative cash the client has paid (informational).
 //   - commissioned_through_amount is the cumulative cash that has actually had
-//     commission paid out against it. It only advances to paid_amount when the
-//     job is NOT withheld. While withheld (a pending renewal, or unconfirmed
-//     subcontractor involvement), it stays frozen — so once the hold clears,
-//     the full backlog becomes payable in one catch-up run instead of the cash
-//     collected during the hold being silently skipped forever.
+//     commission paid out against it. It only advances by the CONFIRMED
+//     fraction of newly-collected cash — the unconfirmed_subcontracted_fraction
+//     of each increment stays frozen in the gap between paid_amount and
+//     commissioned_through_amount, so once a line is confirmed the backlog
+//     becomes payable in one catch-up run instead of being silently skipped.
 // Renewal-pending zeroes BOTH accrued and payable (a confirmed renewal earns
-// nothing at all). Subcontractor-pending only withholds payable — accrued still
-// books the full uncapped rate as a conservative liability estimate, since some
-// non-zero amount will definitely be owed once the 20% cap is confirmed, and
-// overstating a liability is the safe direction for the accountant's books.
+// nothing at all). Subcontractor-pending only withholds the affected FRACTION
+// of payable — accrued still books the full uncapped rate as a conservative
+// liability estimate, since some non-zero amount will definitely be owed once
+// the 20% cap is confirmed, and overstating a liability is the safe direction
+// for the accountant's books.
 
 import { createClient } from '@supabase/supabase-js';
 import { getVendorBillsForPeriod, matchBillsToJob } from './quickbooks.js';
@@ -106,6 +120,53 @@ function annualizeContractValue(invoiceTotal, frequency) {
   const key = (frequency || '').toLowerCase().replace(/[^a-z]/g, '');
   const mult = FREQUENCY_MULTIPLIER[key];
   return mult ? invoiceTotal * mult : invoiceTotal; // unknown frequency: conservative — treat as its own annual value
+}
+
+function normalizeWords(s) {
+  return (s ?? '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 2);
+}
+
+// Best-effort match of a bill line's description to one of a job's invoice
+// lines, by shared-word count. Returns null (no confident attribution) rather
+// than guessing when nothing overlaps — the caller falls back to a whole-job
+// fractional withhold in that case.
+function bestLineMatch(billLineDescription, lines) {
+  const billWords = normalizeWords(billLineDescription);
+  if (!billWords.length) return null;
+  let best = null, bestScore = 0;
+  for (const line of lines) {
+    const lineWords = normalizeWords(`${line.description} ${line.itemName}`);
+    const shared = billWords.filter(w => lineWords.includes(w)).length;
+    if (shared > bestScore) { bestScore = shared; best = line; }
+  }
+  return best;
+}
+
+// ── Line items (per QBO invoice, via already-synced qb_invoices.raw_data) ──
+async function fetchLineItemsForInvoice(saInvoiceSaId, qboId) {
+  if (!qboId) return [];
+  const { data, error } = await fleetops
+    .from('qb_invoices')
+    .select('raw_data')
+    .eq('qb_id', qboId)
+    .maybeSingle();
+  if (error) { logger.warn('fetchLineItemsForInvoice query failed', { err: error.message, qboId }); return []; }
+  const lines = data?.raw_data?.Line ?? [];
+  return lines
+    .filter(l => l.DetailType === 'SalesItemLineDetail')
+    .map(l => ({
+      saInvoiceSaId,
+      description: l.Description ?? '',
+      itemName: l.SalesItemLineDetail?.ItemRef?.name ?? '',
+      // Rounded immediately, once, here — every downstream key/comparison
+      // (confirmation carry-forward, dollar sums) uses this same rounded
+      // value, so floating-point drift can never cause a key mismatch.
+      amount: round2(Number(l.Amount ?? 0)),
+    }));
+}
+
+function lineKeyOf(line) {
+  return `${line.saInvoiceSaId}|${line.description}|${line.amount}`;
 }
 
 // ── PM attribution ─────────────────────────────────────────────
@@ -201,7 +262,7 @@ async function assembleMaintenanceSnowJobs() {
   const lookbackDate = dateStr(LOOKBACK_DAYS);
   const { data: rows, error } = await fleetops
     .from('sa_invoices')
-    .select('sa_id, client, customer_id, contract_id, invoice_total, invoice_balance, frequency, date')
+    .select('sa_id, client, customer_id, contract_id, invoice_total, invoice_balance, frequency, date, qbo_id')
     .eq('is_contract', true)
     .eq('deleted', false)
     .gte('date', lookbackDate)
@@ -241,6 +302,7 @@ async function assembleMaintenanceSnowJobs() {
       dateStart: earliest.date,
       dateEnd: latest.date,
       earliestDate: earliest.date,
+      underlyingInvoices: contractRows.map(r => ({ saId: r.sa_id, qboId: r.qbo_id })),
     });
   }
   return jobs;
@@ -250,7 +312,7 @@ async function assembleSelfPerformedJobs() {
   const lookbackDate = dateStr(LOOKBACK_DAYS);
   const { data: rows, error } = await fleetops
     .from('sa_invoices')
-    .select('sa_id, client, customer_id, invoice_total, invoice_balance, date')
+    .select('sa_id, client, customer_id, invoice_total, invoice_balance, date, qbo_id')
     .eq('is_contract', false)
     .eq('deleted', false)
     .gte('date', lookbackDate)
@@ -273,6 +335,7 @@ async function assembleSelfPerformedJobs() {
     dateStart: daysBefore(row.date, SELF_PERFORMED_BILL_WINDOW_DAYS),
     dateEnd: daysAfter(row.date, SELF_PERFORMED_BILL_WINDOW_DAYS),
     earliestDate: row.date,
+    underlyingInvoices: [{ saId: row.sa_id, qboId: row.qbo_id }],
   }));
 }
 
@@ -336,8 +399,8 @@ export async function runCommissionEngine({ quarter } = {}) {
     const paidPct = job.invoicedAmount > 0 ? job.paidAmount / job.invoicedAmount : 0;
 
     // Fetch every prior ledger row for this job across all quarters — used for
-    // renewal stickiness, the quarter-chronology baseline, and detecting
-    // still-unconfirmed subcontractor flags from an earlier quarter's row.
+    // renewal stickiness, the quarter-chronology baseline, and carrying forward
+    // per-line confirmation status (see below).
     const { data: priorRows, error: priorError } = await fleetops
       .from('commission_ledger')
       .select('id, quarter, paid_amount, commissioned_through_amount, renewal_confirmed, accrued_commission, status')
@@ -357,6 +420,20 @@ export async function runCommissionEngine({ quarter } = {}) {
     const earliestKeyOnRecord = rows.length ? Math.min(...rows.map(r => quarterSortKey(r.quarter))) : targetKey;
     const isEarliestQuarter = targetKey <= earliestKeyOnRecord;
 
+    // Backtesting an earlier quarter after a later one already ran means the
+    // later row wrongly claimed the accrual as if IT were earliest — correct
+    // it here so summing accrued_commission across rows stays double-count-safe.
+    if (isEarliestQuarter) {
+      const wronglyAccruedRows = rows.filter(r => quarterSortKey(r.quarter) > targetKey && Number(r.accrued_commission) > 0);
+      if (wronglyAccruedRows.length) {
+        const { error: fixupError } = await fleetops.from('commission_ledger')
+          .update({ accrued_commission: 0 })
+          .in('id', wronglyAccruedRows.map(r => r.id));
+        if (fixupError) logger.warn('accrual fixup for out-of-order backtest failed', { err: fixupError.message, saReference: job.saReference });
+        else logger.info('Corrected a later quarter\'s accrual after an earlier quarter was backtested', { saReference: job.saReference, correctedIds: wronglyAccruedRows.map(r => r.id) });
+      }
+    }
+
     // Renewal confirmation is sticky once a human has set it — the heuristic's
     // date window drifts forward every quarter as old invoices age out of the
     // rolling lookback, so re-deriving it every run could silently flip a
@@ -371,33 +448,130 @@ export async function runCommissionEngine({ quarter } = {}) {
     }
     const isExcludedRenewal = renewalFlag && renewalConfirmed !== false;
 
-    // Subcontractor-cost candidate matching, computed BEFORE the upsert so
-    // involvement is known upfront rather than requiring a second write.
+    // ── Line-item assembly + subcontractor attribution ──────────────────
+    const lineItems = (await Promise.all(
+      job.underlyingInvoices.map(inv => fetchLineItemsForInvoice(inv.saId, inv.qboId))
+    )).flat();
+
     const candidateMatches = matchBillsToJob(
       { clientName: job.clientName, dateStart: job.dateStart, dateEnd: job.dateEnd },
       vendorBills
     );
-    const freshlyInvolvesSubcontractor = candidateMatches.length > 0;
 
-    // A prior quarter's still-unconfirmed flag also withholds pay, even if this
-    // run's fuzzy match doesn't re-find the same bill (sub_bill_flags are tied
-    // to that quarter's ledger_id, so they don't automatically carry forward).
-    let hasUnconfirmedPriorFlag = false;
+    // Carry forward confirmation status for lines matching a prior quarter's
+    // row for this SAME job — commission_ledger_lines rows are per-quarter, so
+    // without this a human's earlier confirmation would silently reset.
+    const priorLineConfirmedByKey = new Map();
     if (rows.length) {
-      const { data: openFlags, error: flagsError } = await fleetops
-        .from('commission_sub_bill_flags')
-        .select('id')
+      const { data: priorLines, error: priorLinesError } = await fleetops
+        .from('commission_ledger_lines')
+        .select('sa_invoice_sa_id, qbo_line_description, line_amount, confirmed')
         .in('ledger_id', rows.map(r => r.id))
-        .eq('confirmed', false)
-        .limit(1);
-      if (flagsError) logger.warn('prior sub-bill-flag lookup failed', { err: flagsError.message, saReference: job.saReference });
-      hasUnconfirmedPriorFlag = (openFlags ?? []).length > 0;
+        .eq('category', 'subcontracted_candidate');
+      if (priorLinesError) logger.warn('prior ledger lines lookup failed', { err: priorLinesError.message, saReference: job.saReference });
+      for (const pl of priorLines ?? []) {
+        priorLineConfirmedByKey.set(`${pl.sa_invoice_sa_id}|${pl.qbo_line_description}|${pl.line_amount}`, pl.confirmed);
+      }
     }
-    const involvesSubcontractor = freshlyInvolvesSubcontractor || hasUnconfirmedPriorFlag;
-    const isSubCapPending = involvesSubcontractor; // withholds payable only — see header comment
+    const currentLineKeys = new Set(lineItems.map(lineKeyOf));
+
+    // Attribute each candidate bill match to its best-matching invoice line;
+    // matches that can't be confidently pinned to a line (either no line
+    // items exist for this job, or the best line was already claimed by an
+    // earlier match) are tracked as unattributed IN THIS SAME PASS — not
+    // recomputed later, which previously let an already-claimed match's
+    // dollars count toward the fraction while getting neither a
+    // commission_ledger_lines row nor a commission_sub_bill_flags row.
+    const attributedLineKeys = new Set();
+    const lineRecords = []; // rows to persist in commission_ledger_lines
+    const unattributedMatches = [];
+    let unattributedCandidateDollars = 0;
+
+    for (const match of candidateMatches) {
+      const line = lineItems.length ? bestLineMatch(match.billLineDescription, lineItems) : null;
+      const lineKey = line ? lineKeyOf(line) : null;
+      if (line && !attributedLineKeys.has(lineKey)) {
+        attributedLineKeys.add(lineKey);
+        lineRecords.push({
+          sa_invoice_sa_id: line.saInvoiceSaId,
+          qbo_line_description: line.description,
+          qbo_item_name: line.itemName,
+          line_amount: line.amount, // already rounded at extraction
+          category: 'subcontracted_candidate',
+          // Line-attribution confidence is a DIFFERENT question than "is this
+          // bill really this client's" (match.matchConfidence) — bestLineMatch
+          // has no confidence gradation of its own, so never claim 'high' for
+          // the line question even when the underlying bill match was 'high'.
+          match_confidence: match.matchConfidence === 'high' ? 'medium' : match.matchConfidence,
+          confirmed: priorLineConfirmedByKey.get(lineKey) ?? false,
+          vendor_name: match.vendorName,
+          bill_qbo_id: match.qboBillId,
+          bill_amount: round2(match.billAmount),
+          bill_date: match.billDate,
+        });
+      } else {
+        unattributedMatches.push(match);
+        unattributedCandidateDollars += Number(match.billAmount || 0);
+      }
+    }
+    // Remaining lines default to self-performed — UNLESS this exact line was
+    // already flagged pending in a prior quarter and still isn't confirmed,
+    // in which case it stays a pending candidate (carried forward with no
+    // fresh bill match this run) so it doesn't silently vanish from the
+    // review report while its cash is still being withheld.
+    for (const line of lineItems) {
+      const lineKey = lineKeyOf(line);
+      if (attributedLineKeys.has(lineKey)) continue;
+      const priorConfirmed = priorLineConfirmedByKey.get(lineKey);
+      if (priorConfirmed === false) {
+        lineRecords.push({
+          sa_invoice_sa_id: line.saInvoiceSaId,
+          qbo_line_description: line.description,
+          qbo_item_name: line.itemName,
+          line_amount: line.amount,
+          category: 'subcontracted_candidate',
+          match_confidence: 'low', // no fresh bill match this run — carried forward from an earlier flag only
+          confirmed: false,
+          vendor_name: null, bill_qbo_id: null, bill_amount: null, bill_date: null,
+        });
+      } else {
+        lineRecords.push({
+          sa_invoice_sa_id: line.saInvoiceSaId,
+          qbo_line_description: line.description,
+          qbo_item_name: line.itemName,
+          line_amount: line.amount,
+          category: 'self_performed',
+          confirmed: false,
+        });
+      }
+    }
+
+    const attributedUnconfirmedDollars = lineRecords
+      .filter(l => l.category === 'subcontracted_candidate' && !l.confirmed)
+      .reduce((s, l) => s + Number(l.line_amount), 0);
+    // A prior quarter's still-unconfirmed line that has genuinely disappeared
+    // from this run's line items (not just unmatched — actually gone, e.g. the
+    // invoice was edited) still gets honored here so its hold isn't dropped.
+    // Lines still present get a fresh lineRecord above and are already counted
+    // via attributedUnconfirmedDollars — this must exclude those to avoid
+    // double-counting the same dollars in both buckets.
+    const staleUnconfirmedDollars = [...priorLineConfirmedByKey.entries()]
+      .filter(([key, confirmed]) => !confirmed && !currentLineKeys.has(key))
+      .reduce((s, [key]) => {
+        const amt = Number(key.split('|').pop());
+        return s + (Number.isFinite(amt) ? amt : 0);
+      }, 0);
+
+    const unconfirmedFraction = job.invoicedAmount > 0
+      ? Math.min(1, (attributedUnconfirmedDollars + staleUnconfirmedDollars + unattributedCandidateDollars) / job.invoicedAmount)
+      : 0;
+    const involvesSubcontractor = unconfirmedFraction > 0 || lineRecords.some(l => l.category === 'subcontracted_candidate');
+    const pendingCount = lineRecords.filter(l => l.category === 'subcontracted_candidate' && !l.confirmed).length + unattributedMatches.length;
+    results.subBillFlags += pendingCount;
 
     const priorCommissionedThrough = priorQuarterRow ? Number(priorQuarterRow.commissioned_through_amount) : 0;
     const incrementalPaid = Math.max(0, job.paidAmount - priorCommissionedThrough);
+    const confirmedIncrementalPaid = incrementalPaid * (1 - unconfirmedFraction);
 
     // Accrued: full amount, booked once in the row for the earliest quarter on
     // record. A same-quarter re-run recomputes it (confirmation status may have
@@ -406,13 +580,14 @@ export async function runCommissionEngine({ quarter } = {}) {
       ? (isExcludedRenewal ? 0 : round2(rate * job.contractOrFirstYearValue))
       : Number(existingThisQuarterRow?.accrued_commission ?? 0);
 
-    // Payable: commission on cash newly attributed this run. Withheld (frozen
-    // baseline, $0 payable) while a renewal is unresolved OR subcontractor
-    // involvement is unconfirmed — resolving either later pays the full
-    // backlog in one run rather than losing it.
-    const isWithheld = isExcludedRenewal || isSubCapPending;
-    const payableCommission = isWithheld ? 0 : round2(rate * incrementalPaid);
-    const commissionedThroughAmount = isWithheld ? priorCommissionedThrough : round2(job.paidAmount);
+    // Payable: commission on the CONFIRMED fraction of cash newly attributed
+    // this run. Zeroed entirely while a renewal is unresolved; reduced by
+    // unconfirmedFraction while any subcontractor involvement is unconfirmed —
+    // resolving either later pays the full backlog in one run (see file header).
+    const payableCommission = isExcludedRenewal ? 0 : round2(rate * confirmedIncrementalPaid);
+    const commissionedThroughAmount = isExcludedRenewal
+      ? priorCommissionedThrough
+      : round2(priorCommissionedThrough + confirmedIncrementalPaid);
 
     // Never regress a status a human has already advanced past 'flagged' by
     // re-running the same quarter (e.g. to pick up a late invoice).
@@ -437,6 +612,7 @@ export async function runCommissionEngine({ quarter } = {}) {
         accrued_commission: accruedCommission,
         payable_commission: payableCommission,
         involves_subcontractor: involvesSubcontractor,
+        unconfirmed_subcontracted_fraction: Number(unconfirmedFraction.toFixed(4)),
         renewal_flag: renewalFlag,
         renewal_confirmed: renewalConfirmed,
         status,
@@ -448,21 +624,36 @@ export async function runCommissionEngine({ quarter } = {}) {
     if (upsertError) { logger.warn('commission_ledger upsert failed', { err: upsertError.message, saReference: job.saReference }); continue; }
     results.written++;
 
-    if (freshlyInvolvesSubcontractor) {
-      const flagRows = candidateMatches.map(match => ({
+    // Lines are regenerated fresh every run (rebuilt above from the current
+    // line items + carried-forward confirmations) — delete the old set for
+    // this ledger row first so re-running the same quarter (the monthly cron
+    // re-fires the in-progress quarter every month; a change-request reply
+    // also triggers a full re-run) never accumulates duplicate rows.
+    const { error: deleteLinesError } = await fleetops.from('commission_ledger_lines').delete().eq('ledger_id', ledgerRow.id);
+    if (deleteLinesError) logger.warn('commission_ledger_lines delete-before-insert failed', { err: deleteLinesError.message, saReference: job.saReference });
+    if (lineRecords.length) {
+      const { error: linesError } = await fleetops
+        .from('commission_ledger_lines')
+        .insert(lineRecords.map(l => ({ ...l, ledger_id: ledgerRow.id })));
+      if (linesError) logger.warn('commission_ledger_lines insert failed', { err: linesError.message, saReference: job.saReference });
+    }
+
+    // Whole-invoice subcontractor-bill flags for matches that couldn't be
+    // pinned to a specific line (tracked in the single attribution pass above,
+    // not recomputed here) — same safety net as before line-item splitting existed.
+    if (unattributedMatches.length) {
+      const flagRows = unattributedMatches.map(match => ({
         ledger_id: ledgerRow.id,
         qbo_bill_id: match.qboBillId,
         vendor_name: match.vendorName,
-        bill_amount: match.billAmount,
+        bill_amount: round2(match.billAmount),
         bill_date: match.billDate,
         match_confidence: match.matchConfidence,
       }));
-      const { error: flagError, data: flagData } = await fleetops
+      const { error: flagError } = await fleetops
         .from('commission_sub_bill_flags')
-        .upsert(flagRows, { onConflict: 'ledger_id,qbo_bill_id', ignoreDuplicates: true })
-        .select('id');
+        .upsert(flagRows, { onConflict: 'ledger_id,qbo_bill_id', ignoreDuplicates: true });
       if (flagError) logger.warn('commission_sub_bill_flags upsert failed', { err: flagError.message });
-      else results.subBillFlags += flagData?.length ?? 0;
     }
   }
 

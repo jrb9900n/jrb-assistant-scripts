@@ -407,6 +407,32 @@ const SCHEDULED_TASKS = [
           logger.warn('Email poller: feedback capture error (non-fatal)', { err: err.message });
         }
 
+        // ── Commission report draft reply (checked before dev/CRM/general routing) ──
+        // Lookup and handling are separate try/catches on purpose: a transient
+        // failure just checking whether this thread has an open draft should
+        // fall through to normal routing below, not drop an unrelated email
+        // entirely — but once we know for certain this IS a commission-report
+        // reply (openDraft found), a failure handling it should alert and stop,
+        // since falling through to CRM/general routing on it would be wrong.
+        let openDraft = null;
+        try {
+          const { findOpenDraftForThread } = await import('../tools/impl/commission-report-reply.js');
+          openDraft = await findOpenDraftForThread(full.thread_id);
+        } catch (err) {
+          logger.warn('Email poller: commission draft lookup failed, falling through to normal routing', { err: err.message, subject: email.subject });
+        }
+        if (openDraft) {
+          try {
+            const { handleCommissionReportReply } = await import('../tools/impl/commission-report-reply.js');
+            logger.info('Email poller: routing to commission report reply handler', { quarter: openDraft.quarter, threadId: full.thread_id });
+            await handleCommissionReportReply({ ...full, body }, openDraft);
+          } catch (err) {
+            logger.error('Email poller: commission report reply handling failed', { err: err.message, subject: email.subject });
+            sendProactiveMessage(`⚠️ Commission report reply from Michael failed to process.\nSubject: "${email.subject}"\nError: ${err.message}`).catch(() => {});
+          }
+          continue;
+        }
+
         // ── Dev task detection ──────────────────────────────────────────────────
         const isExplicitDev = isExplicitDevTask(fullText);
         const isAmbiguousDev = !isExplicitDev && isAmbiguousDevTask(fullText);
@@ -838,16 +864,18 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
     // Every other month — snapshot the quarter still IN PROGRESS (isFinal:
     // false), so payable reflects quarter-to-date cash collected, not a final
     // payout number.
+    // Every run (monthly and quarterly) goes out as a DRAFT first — see
+    // commission-report-reply.js for the reply-driven approval loop.
     schedule: '0 6 1 * *',
     name: 'pm_commission_report',
     run: async () => {
       try {
         const { previousQuarter, currentQuarter } = await import('../tools/impl/commission-engine.js');
-        const { generateAndSendCommissionReport } = await import('../tools/impl/commission-report.js');
+        const { sendDraftForApproval } = await import('../tools/impl/commission-report.js');
         const isQuarterEndMonth = [0, 3, 6, 9].includes(new Date().getUTCMonth()); // Jan/Apr/Jul/Oct
         const quarter = isQuarterEndMonth ? previousQuarter() : currentQuarter();
-        const result = await generateAndSendCommissionReport({ quarter, isFinal: isQuarterEndMonth });
-        logger.info('pm_commission_report: done', result);
+        const result = await sendDraftForApproval({ quarter, isFinal: isQuarterEndMonth });
+        logger.info('pm_commission_report: draft sent', result);
       } catch (err) {
         logger.error('pm_commission_report: FAILED', { err: err.message });
         try {

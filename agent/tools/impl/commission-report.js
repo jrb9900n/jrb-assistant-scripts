@@ -18,8 +18,9 @@
 // for the final one.
 
 import { createClient } from '@supabase/supabase-js';
-import { sendEmail } from './m365.js';
+import { sendEmail, draftEmail, getEmail, createReplyDraft, sendDraft } from './m365.js';
 import { runCommissionEngine, currentQuarter } from './commission-engine.js';
+import { sendProactiveMessage } from '../teams/notify.js';
 import { logger } from '../../core/logger.js';
 
 const fleetops = createClient(
@@ -71,7 +72,7 @@ function reviewList(items) {
   return `<ul style="margin:0 0 14px;padding-left:18px;">${items.map(i => `<li style="font-size:13px;color:#533f03;margin-bottom:4px;">${i}</li>`).join('')}</ul>`;
 }
 
-export async function generateCommissionReport({ quarter, engineResult, isFinal = true } = {}) {
+export async function generateCommissionReport({ quarter, engineResult, isFinal = true, isDraft = false } = {}) {
   const targetQuarter = quarter || currentQuarter();
   const result = engineResult || await runCommissionEngine({ quarter: targetQuarter });
 
@@ -97,13 +98,18 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const renewalPending = renewalPendingResult.data ?? [];
   const quarterLedger = quarterLedgerIdsResult.data ?? [];
 
-  const unconfirmedFlagsResult = quarterLedger.length
-    ? await fleetops.from('commission_sub_bill_flags').select('*').in('ledger_id', quarterLedger.map(r => r.id)).eq('confirmed', false)
-    : { data: [] };
+  const [unconfirmedFlagsResult, unconfirmedLinesResult] = quarterLedger.length
+    ? await Promise.all([
+        fleetops.from('commission_sub_bill_flags').select('*').in('ledger_id', quarterLedger.map(r => r.id)).eq('confirmed', false),
+        fleetops.from('commission_ledger_lines').select('*').in('ledger_id', quarterLedger.map(r => r.id)).eq('category', 'subcontracted_candidate').eq('confirmed', false),
+      ])
+    : [{ data: [] }, { data: [] }];
   if (unconfirmedFlagsResult.error) throw new Error(`generateCommissionReport unconfirmedFlags query failed: ${unconfirmedFlagsResult.error.message}`);
+  if (unconfirmedLinesResult.error) throw new Error(`generateCommissionReport unconfirmedLines query failed: ${unconfirmedLinesResult.error.message}`);
 
   const ledgerById = new Map(quarterLedger.map(r => [r.id, r]));
   const relevantFlags = unconfirmedFlagsResult.data ?? [];
+  const unconfirmedLines = unconfirmedLinesResult.data ?? [];
 
   const payableTotal = payableRows.reduce((s, r) => s + Number(r.payable_commission || 0), 0);
   const accruedTotal = accruedRows.reduce((s, r) => s + Number(r.accrued_commission || 0), 0);
@@ -114,6 +120,10 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
       const ledger = ledgerById.get(f.ledger_id);
       return `${ledger?.client_name ?? '—'} (${ledger?.employee_name ?? '—'}) — candidate subcontractor bill: ${f.vendor_name ?? 'unknown vendor'}, ${f$(f.bill_amount)} on ${f.bill_date} (${f.match_confidence} confidence) — confirm before applying the 20% GP cap`;
     }),
+    ...unconfirmedLines.map(l => {
+      const ledger = ledgerById.get(l.ledger_id);
+      return `${ledger?.client_name ?? '—'} (${ledger?.employee_name ?? '—'}) — line item "${l.qbo_line_description || l.qbo_item_name}" (${f$(l.line_amount)}) matched vendor ${l.vendor_name ?? 'unknown'} — confirm this specific line as subcontracted before the cap applies to it`;
+    }),
     ...result.unassignedJobs.map(j => `${j.clientName ?? j.saReference} (${j.category === 'maintenance_snow' ? 'Maintenance/Snow' : 'Self-Performed'}, ${f$(j.value)}) — no PM assigned in pm_job_assignments`),
     ...result.unplannedJobs.map(j => `${j.clientName ?? j.saReference} — assigned to ${j.employeeName}, but no active commission plan covers this job's date`),
     ...(result.processingErrors ?? []).map(e => `${e.clientName ?? e.saReference} — SKIPPED this run due to a query error (${e.error}); needs a re-run`),
@@ -121,10 +131,11 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
 
   const today = new Date().toISOString().split('T')[0];
   const reportLabel = isFinal ? 'Quarter-End Report' : 'Quarter-to-Date Tracking';
+  const titlePrefix = isDraft ? 'DRAFT — ' : '';
 
   let html = `<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>PM Commission ${reportLabel} ${targetQuarter}</title></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>${titlePrefix}PM Commission ${reportLabel} ${targetQuarter}</title></head>
 <body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f4;">
 <tr><td align="center" style="padding:24px 16px;">
@@ -133,12 +144,13 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
 <!-- HEADER -->
 <tr><td style="background-color:#1a1a2e;padding:24px 32px;">
   <p style="margin:0;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:0.5px;">J.R. Boehlke, LLC</p>
-  <p style="margin:4px 0 0;color:#aaaacc;font-size:13px;">PM Commission ${reportLabel} &nbsp;|&nbsp; ${targetQuarter}</p>
+  <p style="margin:4px 0 0;color:#aaaacc;font-size:13px;">${titlePrefix}PM Commission ${reportLabel} &nbsp;|&nbsp; ${targetQuarter}</p>
 </td></tr>
 
 <!-- BODY -->
 <tr><td style="padding:28px 32px;">
 
+${isDraft ? alertBox('#fff3cd', '#e6a817', 'This Is A Draft', `<p style="margin:0;font-size:13px;color:#533f03;">Reply to this email with any corrections (e.g. "move Sterling Pharma to Nicole" or "confirm the Celia Shaughnessy line as subcontracted") and a revised draft will come back in this same thread. Reply "approved" (or similar) once it looks right, and the final version goes out to you${process.env.ACCOUNTANT_EMAIL ? ' and the accountant' : ''}.</p>`) : ''}
 ${!isFinal ? alertBox('#f0f4ff', '#1a1a2e', 'Quarter Still In Progress', `<p style="margin:0;font-size:13px;color:#1a1a2e;">This is a mid-quarter snapshot for tracking and accrual purposes — not the final payout. Payable reflects cash collected on ${targetQuarter} so far; the actual quarterly payment runs the first payroll after ${targetQuarter} closes.</p>`) : ''}
 
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f4ff;border-radius:4px;margin-bottom:20px;">
@@ -185,26 +197,164 @@ ${!isFinal ? alertBox('#f0f4ff', '#1a1a2e', 'Quarter Still In Progress', `<p sty
 </table></td></tr></table>
 </body></html>`;
 
-  const subject = `PM Commission ${reportLabel} — ${targetQuarter} — ${f$(payableTotal)} payable`;
+  const subject = `${titlePrefix}PM Commission ${reportLabel} — ${targetQuarter} — ${f$(payableTotal)} payable`;
 
+  // Drafts and revisions never go to the accountant, regardless of ACCOUNTANT_EMAIL —
+  // only the version Michael has explicitly approved does (per his answer, 2026-07-28).
   const recipients = ['michael@jrboehlke.com'];
-  if (process.env.ACCOUNTANT_EMAIL) {
+  if (isDraft) {
+    // no-op — Michael only
+  } else if (process.env.ACCOUNTANT_EMAIL) {
     recipients.push(process.env.ACCOUNTANT_EMAIL);
   } else {
     logger.warn('ACCOUNTANT_EMAIL not configured — commission report sent to Michael only');
   }
 
-  return { quarter: targetQuarter, isFinal, subject, body: html, recipients, payableTotal, accruedTotal, reviewCount: reviewItems.length };
+  return { quarter: targetQuarter, isFinal, isDraft, subject, body: html, recipients, payableTotal, accruedTotal, reviewCount: reviewItems.length };
 }
 
 // Builds the report (see generateCommissionReport) and sends it. Split out so the
 // report body can be generated and inspected independently of actually emailing it.
+// Kept for direct/manual use (e.g. backtesting) — the live cron path goes through
+// sendDraftForApproval below instead.
 export async function generateAndSendCommissionReport(opts) {
   const report = await generateCommissionReport(opts);
   await sendEmail({ to: report.recipients, subject: report.subject, body: report.body });
   logger.info('Commission report sent', {
     quarter: report.quarter, recipients: report.recipients,
     payableTotal: report.payableTotal, accruedTotal: report.accruedTotal, reviewCount: report.reviewCount,
+  });
+  return report;
+}
+
+// ── Draft → feedback → approval workflow ──────────────────────
+// Every run (monthly and quarterly per Michael's answer, 2026-07-28) goes out
+// as a draft first. commission-report-reply.js handles the incoming replies;
+// these two functions handle the outgoing side of the same conversation.
+
+async function findOpenDraft(quarter, isFinal) {
+  const { data, error } = await fleetops
+    .from('commission_report_drafts')
+    .select('*')
+    .eq('quarter', quarter)
+    .eq('is_final', isFinal)
+    .eq('status', 'draft')
+    .maybeSingle();
+  if (error) throw new Error(`findOpenDraft query failed: ${error.message}`);
+  return data;
+}
+
+// Sends a draft (or, if one is already open for this quarter/is_final, a
+// revision reply in the same thread) and upserts the tracking row.
+//
+// replyToEmailId: Graph's createReply only works on a RECEIVED message, never
+// on one you sent yourself — so a revision must be based on Michael's actual
+// incoming reply (commission-report-reply.js passes email.id here), not on
+// our own previously-sent draft. Without it (e.g. the monthly cron re-firing
+// while a draft is still open and Michael hasn't replied yet), there's
+// nothing valid to reply to — skip re-sending rather than erroring, and say why.
+export async function sendDraftForApproval({ quarter, isFinal = true, engineResult, replyToEmailId } = {}) {
+  const targetQuarter = quarter || currentQuarter();
+  const existing = await findOpenDraft(targetQuarter, isFinal);
+
+  if (existing && !replyToEmailId) {
+    logger.info('sendDraftForApproval: a draft is already open with no new reply to respond to — skipping re-send', { quarter: targetQuarter, isFinal, revisionNumber: existing.revision_number });
+    return { quarter: targetQuarter, isFinal, skipped: true, reason: 'draft already open, awaiting reply' };
+  }
+
+  const report = await generateCommissionReport({ quarter: targetQuarter, isFinal, isDraft: true, engineResult });
+
+  let threadId, emailId, revisionNumber;
+  if (existing) {
+    const { draft_id } = await createReplyDraft({ email_id: replyToEmailId, body: report.body });
+    await sendDraft({ draft_id });
+    threadId = existing.thread_id;
+    emailId = draft_id;
+    revisionNumber = existing.revision_number + 1;
+  } else {
+    const { draft_id } = await draftEmail({ to: report.recipients, subject: report.subject, body: report.body });
+    const sentMeta = await getEmail({ email_id: draft_id }); // conversationId is assigned at draft-creation time
+    threadId = sentMeta.thread_id;
+    emailId = draft_id;
+    revisionNumber = 1;
+    await sendDraft({ draft_id });
+  }
+
+  const snapshot = { payableTotal: report.payableTotal, accruedTotal: report.accruedTotal, reviewCount: report.reviewCount };
+  // Explicit update-or-insert rather than .upsert(onConflict:...) — the
+  // uniqueness guarantee here is a PARTIAL index (only while status='draft'),
+  // which the Supabase JS client's onConflict option can't target; `existing`
+  // (already looked up above) tells us which path applies.
+  const { error: writeError } = existing
+    ? await fleetops.from('commission_report_drafts').update({
+        status: 'draft', revision_number: revisionNumber, thread_id: threadId, last_email_id: emailId,
+        engine_snapshot: snapshot, updated_at: new Date().toISOString(),
+      }).eq('id', existing.id)
+    : await fleetops.from('commission_report_drafts').insert({
+        quarter: targetQuarter, is_final: isFinal, status: 'draft',
+        revision_number: revisionNumber, thread_id: threadId, last_email_id: emailId,
+        engine_snapshot: snapshot,
+      });
+  if (writeError) {
+    // The email already went out — a failure here only desyncs tracking, but
+    // that desync means future replies/cron runs get permanently confused, so
+    // this needs a human's attention, not just a log line.
+    logger.warn('commission_report_drafts write failed', { err: writeError.message, quarter: targetQuarter, isFinal });
+    sendProactiveMessage(`⚠️ A commission report draft for ${targetQuarter} was sent, but its tracking row failed to save (${writeError.message}). Replies to it may not route correctly — check commission_report_drafts manually.`).catch(() => {});
+  }
+
+  logger.info('Commission draft sent', { quarter: targetQuarter, isFinal, revisionNumber, threadId });
+  return { ...report, threadId, revisionNumber };
+}
+
+// Sends the final (non-draft, full-recipient) version in reply to the same
+// thread and closes out the tracking row. Called once a reply is classified
+// as an approval — see commission-report-reply.js. replyToEmailId must be
+// Michael's approval reply's own id (see sendDraftForApproval's comment on why).
+export async function sendFinalReport({ quarter, isFinal, engineResult, replyToEmailId }) {
+  const existing = await findOpenDraft(quarter, isFinal);
+  if (!existing) throw new Error(`sendFinalReport: no open draft found for ${quarter} (isFinal=${isFinal}) — nothing to finalize`);
+  if (!replyToEmailId) throw new Error('sendFinalReport: replyToEmailId is required — Graph can only reply to a received message');
+
+  // Atomically claim the draft before doing any work — guards against two
+  // near-simultaneous approval replies both sending the final report (which
+  // would double-email the accountant). Only one caller's conditional update
+  // (status must still be 'draft') can succeed.
+  const { data: claimed, error: claimError } = await fleetops.from('commission_report_drafts')
+    .update({ status: 'sent', updated_at: new Date().toISOString() })
+    .eq('id', existing.id)
+    .eq('status', 'draft')
+    .select('id');
+  if (claimError) throw new Error(`sendFinalReport: failed to claim draft: ${claimError.message}`);
+  if (!claimed?.length) {
+    logger.info('sendFinalReport: another process already claimed/sent this draft — skipping', { quarter, isFinal });
+    return { quarter, isFinal, skipped: true, reason: 'already sent by a concurrent approval' };
+  }
+
+  let report, draft_id;
+  try {
+    report = await generateCommissionReport({ quarter, isFinal, isDraft: false, engineResult });
+    ({ draft_id } = await createReplyDraft({ email_id: replyToEmailId, body: report.body }));
+    await sendDraft({ draft_id });
+  } catch (err) {
+    // Revert the claim so a retry (e.g. Michael replying "approved" again)
+    // isn't permanently blocked by a status='sent' row for a report that
+    // never actually went out.
+    await fleetops.from('commission_report_drafts').update({ status: 'draft' }).eq('id', existing.id).then(() => {}, () => {});
+    sendProactiveMessage(`⚠️ Final commission report for ${quarter} FAILED to send: ${err.message}. Reverted to draft status — reply "approved" again to retry.`).catch(() => {});
+    throw err;
+  }
+
+  const { error: updateError } = await fleetops.from('commission_report_drafts')
+    .update({ last_email_id: draft_id, updated_at: new Date().toISOString() })
+    .eq('id', existing.id);
+  if (updateError) {
+    logger.warn('commission_report_drafts final last_email_id update failed', { err: updateError.message, id: existing.id });
+    sendProactiveMessage(`⚠️ Final commission report for ${quarter} sent successfully, but its tracking row failed a minor update (${updateError.message}). No action needed unless you notice something odd.`).catch(() => {});
+  }
+
+  logger.info('Commission final report sent', {
+    quarter, isFinal, recipients: report.recipients, payableTotal: report.payableTotal,
   });
   return report;
 }

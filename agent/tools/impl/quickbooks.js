@@ -360,7 +360,7 @@ function normalizeForMatch(s) {
  *
  * @param {{ clientName: string, dateStart: string, dateEnd: string }} job
  * @param {Array} bills - output of getVendorBillsForPeriod
- * @returns {Array<{ qboBillId, vendorName, billAmount, billDate, matchConfidence }>}
+ * @returns {Array<{ qboBillId, vendorName, billAmount, billDate, matchConfidence, billLineDescription }>}
  */
 export function matchBillsToJob(job, bills) {
   const jobNameNorm = normalizeForMatch(job.clientName);
@@ -390,6 +390,10 @@ export function matchBillsToJob(job, bills) {
           billAmount: line.amount || bill.amount,
           billDate: bill.date,
           matchConfidence: confidence,
+          // The matched bill line's own description — used to best-effort
+          // attribute this subcontractor cost to a specific invoice line
+          // (invoice lines carry no direct FK to a bill line).
+          billLineDescription: line.description,
         });
       }
     }
