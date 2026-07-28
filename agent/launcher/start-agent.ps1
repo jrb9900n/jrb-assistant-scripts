@@ -69,10 +69,11 @@ function Validate-Email {
 
 $accountantEmail = Get-Secret "ACCOUNTANT_EMAIL"
 if (-not (Validate-Email -Value $accountantEmail -SecretName "ACCOUNTANT_EMAIL")) {
-    # Abort startup — a missing/malformed accountant email will silently mis-route
-    # commission reports. Surface the failure now rather than at send time.
-    Write-Error "ACCOUNTANT_EMAIL secret is missing or invalid. Resolve in Credential Manager and retry."
-    exit 1
+    # ACCOUNTANT_EMAIL is optional — commission-report.js already falls back to
+    # sending Michael-only plus a log warning when it's unset. This launcher runs
+    # every mode (teams/scheduler/cli), so it must not abort startup over one
+    # optional downstream feature's secret; just don't inject an invalid value.
+    $accountantEmail = $null
 }
 
 $secrets = @{
