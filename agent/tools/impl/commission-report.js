@@ -20,7 +20,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { sendEmail, draftEmail, getEmail, createReplyDraft, sendDraft } from './m365.js';
 import { runCommissionEngine, currentQuarter } from './commission-engine.js';
-import { sendProactiveMessage } from '../teams/notify.js';
+import { sendProactiveMessage } from '../../teams/notify.js';
 import { logger } from '../../core/logger.js';
 
 const fleetops = createClient(
@@ -114,6 +114,24 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const payableTotal = payableRows.reduce((s, r) => s + Number(r.payable_commission || 0), 0);
   const accruedTotal = accruedRows.reduce((s, r) => s + Number(r.accrued_commission || 0), 0);
 
+  // unplannedJobs/unassignedJobs come from a company-wide engine run, not just
+  // this quarter's commission-eligible PMs — at real volume that's thousands
+  // of jobs assigned to employees who simply aren't commission-eligible PMs
+  // (expected, not actionable per-job). Summarize both rather than listing
+  // every job, or the review section becomes an unusable multi-thousand-line
+  // email (confirmed: a real run produced a 525KB email with 3,112 bullets).
+  const UNASSIGNED_PREVIEW_LIMIT = 20;
+  const unassignedPreview = result.unassignedJobs.slice(0, UNASSIGNED_PREVIEW_LIMIT);
+  const unassignedRemainder = result.unassignedJobs.slice(UNASSIGNED_PREVIEW_LIMIT);
+
+  const unplannedByEmployee = new Map();
+  for (const j of result.unplannedJobs) {
+    if (!unplannedByEmployee.has(j.employeeName)) unplannedByEmployee.set(j.employeeName, { count: 0, total: 0 });
+    const e = unplannedByEmployee.get(j.employeeName);
+    e.count++;
+    e.total += Number(j.value || 0);
+  }
+
   const reviewItems = [
     ...renewalPending.map(r => `${r.client_name ?? r.sa_reference} (${r.employee_name}) — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
     ...relevantFlags.map(f => {
@@ -124,8 +142,12 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
       const ledger = ledgerById.get(l.ledger_id);
       return `${ledger?.client_name ?? '—'} (${ledger?.employee_name ?? '—'}) — line item "${l.qbo_line_description || l.qbo_item_name}" (${f$(l.line_amount)}) matched vendor ${l.vendor_name ?? 'unknown'} — confirm this specific line as subcontracted before the cap applies to it`;
     }),
-    ...result.unassignedJobs.map(j => `${j.clientName ?? j.saReference} (${j.category === 'maintenance_snow' ? 'Maintenance/Snow' : 'Self-Performed'}, ${f$(j.value)}) — no PM assigned in pm_job_assignments`),
-    ...result.unplannedJobs.map(j => `${j.clientName ?? j.saReference} — assigned to ${j.employeeName}, but no active commission plan covers this job's date`),
+    ...unassignedPreview.map(j => `${j.clientName ?? j.saReference} (${j.category === 'maintenance_snow' ? 'Maintenance/Snow' : 'Self-Performed'}, ${f$(j.value)}) — no PM assigned in pm_job_assignments`),
+    ...(unassignedRemainder.length
+      ? [`+ ${unassignedRemainder.length} more jobs with no PM assigned (${f$(unassignedRemainder.reduce((s, j) => s + Number(j.value || 0), 0))} total) — showing the first ${UNASSIGNED_PREVIEW_LIMIT} above`]
+      : []),
+    ...[...unplannedByEmployee.entries()].map(([emp, { count, total }]) =>
+      `${emp}: ${count} job${count !== 1 ? 's' : ''} with no active commission plan (${f$(total)} total) — expected unless ${emp} should also be earning commission`),
     ...(result.processingErrors ?? []).map(e => `${e.clientName ?? e.saReference} — SKIPPED this run due to a query error (${e.error}); needs a re-run`),
   ];
 
