@@ -1,4 +1,4 @@
-﻿# launcher/start-agent.ps1
+ï»¿# launcher/start-agent.ps1
 $AgentDir = "C:\Users\Assistant\JRBAgent\agent"
 
 Add-Type -AssemblyName System.Security
@@ -61,7 +61,7 @@ function Validate-Email {
     }
     # RFC-5321-style sanity check: one '@', non-empty local and domain parts, domain has a dot
     if ($Value -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-        Write-Warning "Secret '$SecretName' value '$Value' does not look like a valid email address — downstream email sending will fail."
+        Write-Warning "Secret '$SecretName' does not look like a valid email address — downstream email sending will fail."
         return $false
     }
     return $true
@@ -107,8 +107,7 @@ $secrets = @{
     "FIELDOPS_SUPABASE_KEY"          = Get-Secret "FIELDOPS_SUPABASE_KEY"
     "QB_WEBHOOK_VERIFIER_TOKEN"      = Get-Secret "QB_WEBHOOK_VERIFIER_TOKEN"
     "EXPENSE_PORTAL_BASE"            = "https://fieldops.jrboehlke.com/expense"
-    # PM commission report
-    "ACCOUNTANT_EMAIL"               = $accountantEmail
+    # PM commission report — only injected when a valid value was retrieved
     "TWILIO_ACCOUNT_SID"             = Get-Secret "TWILIO_ACCOUNT_SID"
     "TWILIO_AUTH_TOKEN"              = Get-Secret "TWILIO_AUTH_TOKEN"
     "TWILIO_FROM_PHONE"              = Get-Secret "TWILIO_FROM_PHONE"
@@ -132,6 +131,14 @@ $secrets = @{
     "MAX_TOKENS_SONNET"    = "4096"
     "MAX_TOKENS_HAIKU"     = "1024"
     "LOG_LEVEL"            = "info"
+}
+
+# Inject ACCOUNTANT_EMAIL only when a valid non-null value was retrieved.
+# A null here means the secret was absent or failed validation; omitting the
+# key entirely lets commission-report.js detect the missing env var and apply
+# its Michael-only fallback. Injecting an empty string would bypass that check.
+if ($null -ne $accountantEmail) {
+    $secrets["ACCOUNTANT_EMAIL"] = $accountantEmail
 }
 
 foreach ($kv in $secrets.GetEnumerator()) {
