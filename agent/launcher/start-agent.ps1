@@ -53,6 +53,28 @@ public class CredManager {
     }
 }
 
+function Validate-Email {
+    param([string]$Value, [string]$SecretName)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        Write-Warning "Secret '$SecretName' is missing or empty — downstream email sending will fail."
+        return $false
+    }
+    # RFC-5321-style sanity check: one '@', non-empty local and domain parts, domain has a dot
+    if ($Value -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+        Write-Warning "Secret '$SecretName' value '$Value' does not look like a valid email address — downstream email sending will fail."
+        return $false
+    }
+    return $true
+}
+
+$accountantEmail = Get-Secret "ACCOUNTANT_EMAIL"
+if (-not (Validate-Email -Value $accountantEmail -SecretName "ACCOUNTANT_EMAIL")) {
+    # Abort startup — a missing/malformed accountant email will silently mis-route
+    # commission reports. Surface the failure now rather than at send time.
+    Write-Error "ACCOUNTANT_EMAIL secret is missing or invalid. Resolve in Credential Manager and retry."
+    exit 1
+}
+
 $secrets = @{
     "ANTHROPIC_API_KEY"    = Get-Secret "ANTHROPIC_API_KEY"
     "SUPABASE_URL"         = "https://znpahinyplccdyoekfeo.supabase.co"
@@ -85,7 +107,7 @@ $secrets = @{
     "QB_WEBHOOK_VERIFIER_TOKEN"      = Get-Secret "QB_WEBHOOK_VERIFIER_TOKEN"
     "EXPENSE_PORTAL_BASE"            = "https://fieldops.jrboehlke.com/expense"
     # PM commission report
-    "ACCOUNTANT_EMAIL"               = Get-Secret "ACCOUNTANT_EMAIL"
+    "ACCOUNTANT_EMAIL"               = $accountantEmail
     "TWILIO_ACCOUNT_SID"             = Get-Secret "TWILIO_ACCOUNT_SID"
     "TWILIO_AUTH_TOKEN"              = Get-Secret "TWILIO_AUTH_TOKEN"
     "TWILIO_FROM_PHONE"              = Get-Secret "TWILIO_FROM_PHONE"
@@ -148,4 +170,3 @@ switch ($mode) {
     }
     default     { Write-Host "Usage: .\start-agent.ps1 [teams|scheduler|cli|pm2-teams]" }
 }
-
