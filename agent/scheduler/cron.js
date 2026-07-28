@@ -829,16 +829,24 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
     },
   },
   {
-    // 6 AM on the 1st of Jan/Apr/Jul/Oct — first payroll following quarter end.
-    // node-cron's month field natively fires only in these 4 months, so no extra
-    // in-code quarter check is needed. Reports on the quarter that JUST ended.
-    schedule: '0 6 1 1,4,7,10 *',
+    // 6 AM on the 1st of every month. Payment terms are still quarterly per the
+    // Accountability Agreement — this cadence is for visibility only, so Michael
+    // can see how things are tracking and the accountant can accrue more
+    // granularly than once a quarter.
+    // Jan/Apr/Jul/Oct 1 — "first payroll following quarter end" — finalize the
+    // quarter that JUST ended (isFinal: true, same as before).
+    // Every other month — snapshot the quarter still IN PROGRESS (isFinal:
+    // false), so payable reflects quarter-to-date cash collected, not a final
+    // payout number.
+    schedule: '0 6 1 * *',
     name: 'pm_commission_report',
     run: async () => {
       try {
-        const { previousQuarter } = await import('../tools/impl/commission-engine.js');
+        const { previousQuarter, currentQuarter } = await import('../tools/impl/commission-engine.js');
         const { generateAndSendCommissionReport } = await import('../tools/impl/commission-report.js');
-        const result = await generateAndSendCommissionReport({ quarter: previousQuarter() });
+        const isQuarterEndMonth = [0, 3, 6, 9].includes(new Date().getUTCMonth()); // Jan/Apr/Jul/Oct
+        const quarter = isQuarterEndMonth ? previousQuarter() : currentQuarter();
+        const result = await generateAndSendCommissionReport({ quarter, isFinal: isQuarterEndMonth });
         logger.info('pm_commission_report: done', result);
       } catch (err) {
         logger.error('pm_commission_report: FAILED', { err: err.message });

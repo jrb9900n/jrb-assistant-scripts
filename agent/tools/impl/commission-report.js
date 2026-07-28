@@ -1,4 +1,4 @@
-// tools/impl/commission-report.js — Quarterly PM commission email report
+// tools/impl/commission-report.js — PM commission email report
 //
 // Runs the commission engine, then emails Michael (and the accountant, once
 // ACCOUNTANT_EMAIL is configured — see CLAUDE.md) a report with three sections:
@@ -10,6 +10,12 @@
 // See commission-engine.js for the accrual/payable/renewal/subcontractor-hold
 // semantics this report assumes. HTML template matches weekly-finance-report.js
 // (Michael's confirmed preferred format — navy #1a1a2e header, Arial, dark total rows).
+//
+// Runs monthly (see cron.js) even though payment stays quarterly per the
+// Accountability Agreement — the `isFinal` flag distinguishes the quarter-end
+// close (Jan/Apr/Jul/Oct, the actual payout figure) from the other 8 months'
+// quarter-to-date tracking snapshots, so nobody mistakes a mid-quarter number
+// for the final one.
 
 import { createClient } from '@supabase/supabase-js';
 import { sendEmail } from './m365.js';
@@ -65,7 +71,7 @@ function reviewList(items) {
   return `<ul style="margin:0 0 14px;padding-left:18px;">${items.map(i => `<li style="font-size:13px;color:#533f03;margin-bottom:4px;">${i}</li>`).join('')}</ul>`;
 }
 
-export async function generateCommissionReport({ quarter, engineResult } = {}) {
+export async function generateCommissionReport({ quarter, engineResult, isFinal = true } = {}) {
   const targetQuarter = quarter || currentQuarter();
   const result = engineResult || await runCommissionEngine({ quarter: targetQuarter });
 
@@ -114,10 +120,11 @@ export async function generateCommissionReport({ quarter, engineResult } = {}) {
   ];
 
   const today = new Date().toISOString().split('T')[0];
+  const reportLabel = isFinal ? 'Quarter-End Report' : 'Quarter-to-Date Tracking';
 
   let html = `<!DOCTYPE html>
 <html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>PM Commission Report ${targetQuarter}</title></head>
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>PM Commission ${reportLabel} ${targetQuarter}</title></head>
 <body style="margin:0;padding:0;background-color:#f4f4f4;font-family:Arial,Helvetica,sans-serif;">
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f4;">
 <tr><td align="center" style="padding:24px 16px;">
@@ -126,17 +133,19 @@ export async function generateCommissionReport({ quarter, engineResult } = {}) {
 <!-- HEADER -->
 <tr><td style="background-color:#1a1a2e;padding:24px 32px;">
   <p style="margin:0;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:0.5px;">J.R. Boehlke, LLC</p>
-  <p style="margin:4px 0 0;color:#aaaacc;font-size:13px;">PM Commission Report &nbsp;|&nbsp; ${targetQuarter}</p>
+  <p style="margin:4px 0 0;color:#aaaacc;font-size:13px;">PM Commission ${reportLabel} &nbsp;|&nbsp; ${targetQuarter}</p>
 </td></tr>
 
 <!-- BODY -->
 <tr><td style="padding:28px 32px;">
 
+${!isFinal ? alertBox('#f0f4ff', '#1a1a2e', 'Quarter Still In Progress', `<p style="margin:0;font-size:13px;color:#1a1a2e;">This is a mid-quarter snapshot for tracking and accrual purposes — not the final payout. Payable reflects cash collected on ${targetQuarter} so far; the actual quarterly payment runs the first payroll after ${targetQuarter} closes.</p>`) : ''}
+
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f0f4ff;border-radius:4px;margin-bottom:20px;">
 <tr>
   <td style="padding:14px 16px;text-align:center;border-right:1px solid #d8e0f0;">
     <p style="margin:0;font-size:20px;font-weight:bold;color:#1a6e1a;">${f$(payableTotal)}</p>
-    <p style="margin:2px 0 0;font-size:11px;color:#555577;text-transform:uppercase;letter-spacing:0.6px;">Payable</p>
+    <p style="margin:2px 0 0;font-size:11px;color:#555577;text-transform:uppercase;letter-spacing:0.6px;">${isFinal ? 'Payable' : 'Payable Quarter-to-Date'}</p>
   </td>
   <td style="padding:14px 16px;text-align:center;border-right:1px solid #d8e0f0;">
     <p style="margin:0;font-size:20px;font-weight:bold;color:#1a1a2e;">${f$(accruedTotal)}</p>
@@ -176,7 +185,7 @@ export async function generateCommissionReport({ quarter, engineResult } = {}) {
 </table></td></tr></table>
 </body></html>`;
 
-  const subject = `PM Commission Report — ${targetQuarter} — ${f$(payableTotal)} payable`;
+  const subject = `PM Commission ${reportLabel} — ${targetQuarter} — ${f$(payableTotal)} payable`;
 
   const recipients = ['michael@jrboehlke.com'];
   if (process.env.ACCOUNTANT_EMAIL) {
@@ -185,7 +194,7 @@ export async function generateCommissionReport({ quarter, engineResult } = {}) {
     logger.warn('ACCOUNTANT_EMAIL not configured — commission report sent to Michael only');
   }
 
-  return { quarter: targetQuarter, subject, body: html, recipients, payableTotal, accruedTotal, reviewCount: reviewItems.length };
+  return { quarter: targetQuarter, isFinal, subject, body: html, recipients, payableTotal, accruedTotal, reviewCount: reviewItems.length };
 }
 
 // Builds the report (see generateCommissionReport) and sends it. Split out so the

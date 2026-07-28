@@ -109,9 +109,12 @@ function annualizeContractValue(invoiceTotal, frequency) {
 }
 
 // ── PM attribution ─────────────────────────────────────────────
-// Priority: assignment tied to this specific invoice > this contract > this client.
-// Ordered by assigned_at desc so a reassignment (a second row, not an edit to
-// the first — the table is append-only by design) resolves to the latest one.
+// Priority: assignment tied to this specific invoice > this contract > this
+// client > scraped from the client's original accepted estimate. Ordered by
+// assigned_at desc within the manual tiers so a reassignment (a second row,
+// not an edit to the first — the table is append-only by design) resolves to
+// the latest one; a later manual row always outranks a scraped one since the
+// scraped fallback only runs when no assignment row exists yet at all.
 async function resolvePM({ saClientId, contractId, invoiceSaId }) {
   const attempts = [
     invoiceSaId && ['sa_invoice_sa_id', invoiceSaId],
@@ -129,6 +132,41 @@ async function resolvePM({ saClientId, contractId, invoiceSaId }) {
       .maybeSingle();
     if (error) { logger.warn('resolvePM query failed', { col, err: error.message }); continue; }
     if (data?.employee_name) return data.employee_name;
+  }
+
+  // No manual assignment exists for this client at all — scrape the rep off
+  // the client's original accepted estimate. sa_accepted_estimates is synced
+  // daily by the existing overnight_sa_report cron and already carries a
+  // resolved employee name (not a raw SA rep GUID) in sales_rep. Picks the
+  // most recent accepted estimate for the client as the best guess at who
+  // originated this job. Known limitation: a client with multiple jobs handled
+  // by different PMs over time will attribute ALL of them to whoever's
+  // reflected on their most recent won estimate — a later manual correction
+  // (a new 'manual' row) always overrides this, since this fallback only
+  // fires when no assignment row exists yet.
+  if (saClientId) {
+    const { data: estRow, error: estError } = await fleetops
+      .from('sa_accepted_estimates')
+      .select('sales_rep, estimate_id')
+      .eq('client_id', saClientId)
+      .not('sales_rep', 'is', null)
+      .neq('sales_rep', '—')
+      .order('quote_date', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (estError) { logger.warn('resolvePM sa_accepted_estimates lookup failed', { err: estError.message }); return null; }
+    if (estRow?.sales_rep) {
+      const { error: insertError } = await fleetops.from('pm_job_assignments').insert({
+        sa_client_id: saClientId,
+        employee_name: estRow.sales_rep,
+        source: 'sa_signal',
+        notes: `Scraped from accepted estimate ${estRow.estimate_id}`,
+      });
+      // Duplicate-insert races (two jobs for the same brand-new client resolving
+      // concurrently) are harmless — both attribute the same employee_name either way.
+      if (insertError) logger.warn('pm_job_assignments sa_signal insert failed', { err: insertError.message });
+      return estRow.sales_rep;
+    }
   }
   return null;
 }
