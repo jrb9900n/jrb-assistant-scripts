@@ -67,7 +67,15 @@ function Validate-Email {
     return $true
 }
 
+# Strip a leading BOM (U+FEFF isn't whitespace to .NET's Trim(), so it survives a
+# plain Trim() and would otherwise pass the regex above hidden inside the local
+# part) plus ordinary whitespace — this project has hit an identical BOM-in-secret
+# failure mode before (a FieldOps CI secret).
 $accountantEmail = Get-Secret "ACCOUNTANT_EMAIL"
+if ($accountantEmail) {
+    if ($accountantEmail[0] -eq [char]0xFEFF) { $accountantEmail = $accountantEmail.Substring(1) }
+    $accountantEmail = $accountantEmail.Trim()
+}
 if (-not (Validate-Email -Value $accountantEmail -SecretName "ACCOUNTANT_EMAIL")) {
     # ACCOUNTANT_EMAIL is optional — commission-report.js already falls back to
     # sending Michael-only plus a log warning when it's unset. This launcher runs

@@ -446,7 +446,17 @@ export async function runCommissionEngine({ quarter } = {}) {
       continue;
     }
 
-    const jobDetails = await fetchJobDetails(job);
+    let jobDetails;
+    try {
+      jobDetails = await fetchJobDetails(job);
+    } catch (err) {
+      // fetchJobDetails' internal queries log+swallow their own {error} results;
+      // this catches a harder failure (e.g. a rejected network call) so one job's
+      // transient failure doesn't abort the rest of the quarter's loop.
+      logger.warn('fetchJobDetails failed — job skipped this run', { err: err.message, saReference: job.saReference });
+      results.processingErrors.push({ saReference: job.saReference, clientName: job.clientName, error: err.message });
+      continue;
+    }
 
     const rate = job.category === 'maintenance_snow' ? plan.maintenance_rate : plan.self_performed_rate;
     const paidPct = job.invoicedAmount > 0 ? job.paidAmount / job.invoicedAmount : 0;
@@ -715,6 +725,14 @@ export async function runCommissionEngine({ quarter } = {}) {
     }
   }
 
-  logger.info('Commission engine run complete', { quarter: targetQuarter, ...results });
+  // Log counts, not the full unassignedJobs/unplannedJobs arrays — those can run
+  // to thousands of entries across a company-wide scan (only a handful of jobs
+  // are ever commission-eligible), and nothing reads the per-job detail from logs.
+  logger.info('Commission engine run complete', {
+    quarter: targetQuarter, written: results.written, skippedNoPM: results.skippedNoPM,
+    skippedNoPlan: results.skippedNoPlan, renewalFlags: results.renewalFlags, subBillFlags: results.subBillFlags,
+    unassignedJobCount: results.unassignedJobs.length, unplannedJobCount: results.unplannedJobs.length,
+    processingErrorCount: results.processingErrors.length,
+  });
   return { quarter: targetQuarter, ...results };
 }

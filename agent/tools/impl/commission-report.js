@@ -29,7 +29,15 @@ const fleetops = createClient(
 );
 
 const f$ = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-const fD = d => d ? new Date(d + 'T12:00:00Z').toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+function fD(d) {
+  if (!d) return '—';
+  // Some SA-sourced date fields are synced as free-form text and can carry a time
+  // suffix (e.g. "7/15/2026 12:00:00 AM") rather than a clean YYYY-MM-DD — guard
+  // against rendering the literal string "Invalid Date" in the email.
+  const parsed = new Date(d + 'T12:00:00Z');
+  if (Number.isNaN(parsed.getTime())) return '—';
+  return parsed.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
+}
 
 // Exact terms from the Accountability Agreement's Salary/Commission Structure
 // section, not the internal category enum, so the commission basis is obvious.
@@ -54,6 +62,11 @@ function alertBox(color, borderColor, title, rows) {
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${color};border-left:4px solid ${borderColor};border-radius:4px;margin-bottom:16px;"><tr><td style="padding:12px 16px;"><p style="margin:0 0 8px 0;font-size:12px;font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;color:${borderColor};">${title}</p>${rows}</td></tr></table>`;
 }
 
+// No PM/employee column — Jarrett is currently the only employee with an active
+// commission plan, so every row is his and a repeated name is just noise (per
+// Michael, 2026-07-28: "No other employees earn commissions"). Revisit this if
+// a second commissioned PM is ever added — rows for different employees would
+// otherwise interleave in the same table with no way to tell them apart.
 const LEDGER_COLUMNS = [
   { label: 'Client', render: r => r.client_name ?? '—' },
   { label: 'Service Name', render: r => r.service_names ?? '—' },
@@ -101,7 +114,7 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
     // Every ledger row for this quarter, regardless of dollar amount — a row can
     // legitimately be $0/$0 (already accrued earlier, no new cash this run) and
     // still have a real unconfirmed subcontractor flag that needs surfacing.
-    fleetops.from('commission_ledger').select('id, client_name, employee_name').eq('quarter', targetQuarter),
+    fleetops.from('commission_ledger').select('id, client_name, employee_name, service_names').eq('quarter', targetQuarter),
   ]);
 
   for (const [label, r] of [
@@ -138,15 +151,20 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   // confirmed 2026-07-28: "no other employees earn commissions", he doesn't
   // want this listed or summarized). Deliberately not surfaced here at all —
   // if a second PM is ever added, revisit whether this needs to come back.
+  // Includes the service name when known — a client with two concurrent jobs
+  // this quarter (e.g. two maintenance contracts) would otherwise be ambiguous
+  // about which ledger row a review item refers to.
+  const clientLabel = row => row?.service_names ? `${row.client_name ?? '—'} (${row.service_names})` : (row?.client_name ?? '—');
+
   const reviewItems = [
-    ...renewalPending.map(r => `${r.client_name ?? r.sa_reference} — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
+    ...renewalPending.map(r => `${clientLabel(r) ?? r.sa_reference} — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
     ...relevantFlags.map(f => {
       const ledger = ledgerById.get(f.ledger_id);
-      return `${ledger?.client_name ?? '—'} — candidate subcontractor bill: ${f.vendor_name ?? 'unknown vendor'}, ${f$(f.bill_amount)} on ${f.bill_date} (${f.match_confidence} confidence) — confirm before applying the 20% GP cap`;
+      return `${clientLabel(ledger)} — candidate subcontractor bill: ${f.vendor_name ?? 'unknown vendor'}, ${f$(f.bill_amount)} on ${f.bill_date} (${f.match_confidence} confidence) — confirm before applying the 20% GP cap`;
     }),
     ...unconfirmedLines.map(l => {
       const ledger = ledgerById.get(l.ledger_id);
-      return `${ledger?.client_name ?? '—'} — line item "${l.qbo_line_description || l.qbo_item_name}" (${f$(l.line_amount)}) matched vendor ${l.vendor_name ?? 'unknown'} — confirm this specific line as subcontracted before the cap applies to it`;
+      return `${clientLabel(ledger)} — line item "${l.qbo_line_description || l.qbo_item_name}" (${f$(l.line_amount)}) matched vendor ${l.vendor_name ?? 'unknown'} — confirm this specific line as subcontracted before the cap applies to it`;
     }),
     ...(result.processingErrors ?? []).map(e => `${e.clientName ?? e.saReference} — SKIPPED this run due to a query error (${e.error}); needs a re-run`),
   ];
