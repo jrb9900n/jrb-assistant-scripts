@@ -84,6 +84,8 @@ $secrets = @{
     "FIELDOPS_SUPABASE_KEY"          = Get-Secret "FIELDOPS_SUPABASE_KEY"
     "QB_WEBHOOK_VERIFIER_TOKEN"      = Get-Secret "QB_WEBHOOK_VERIFIER_TOKEN"
     "EXPENSE_PORTAL_BASE"            = "https://fieldops.jrboehlke.com/expense"
+    # PM commission report
+    "ACCOUNTANT_EMAIL"               = Get-Secret "ACCOUNTANT_EMAIL"
     "TWILIO_ACCOUNT_SID"             = Get-Secret "TWILIO_ACCOUNT_SID"
     "TWILIO_AUTH_TOKEN"              = Get-Secret "TWILIO_AUTH_TOKEN"
     "TWILIO_FROM_PHONE"              = Get-Secret "TWILIO_FROM_PHONE"
