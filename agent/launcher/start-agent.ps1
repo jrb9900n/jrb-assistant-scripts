@@ -1,4 +1,4 @@
-ï»¿# launcher/start-agent.ps1
+# launcher/start-agent.ps1
 $AgentDir = "C:\Users\Assistant\JRBAgent\agent"
 
 Add-Type -AssemblyName System.Security
