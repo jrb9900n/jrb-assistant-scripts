@@ -169,6 +169,57 @@ function lineKeyOf(line) {
   return `${line.saInvoiceSaId}|${line.description}|${line.amount}`;
 }
 
+// ── Job detail (service, estimate, dates) for report readability ───────────
+// Only called for jobs that have already cleared PM + plan resolution (i.e.
+// commission-eligible jobs — a small subset of the company-wide scan), so
+// this doesn't add meaningful N+1 cost across the full job list.
+async function fetchJobDetails(job) {
+  const invoiceIds = job.underlyingInvoices.map(inv => inv.saId);
+
+  const [jobsResult, estimateResult, paymentAppsResult] = await Promise.all([
+    fleetops.from('sa_jobs').select('service, date_completed').in('invoice_id', invoiceIds),
+    // No direct FK from an invoice to its originating estimate — best-effort:
+    // the client's accepted estimate closest to (and no later than) this job's
+    // earliest date. Same limitation as resolvePM's scraping fallback.
+    fleetops.from('sa_accepted_estimates')
+      .select('estimate_number, quote_date')
+      .eq('client_id', job.saClientId)
+      .lte('quote_date', job.earliestDate)
+      .order('quote_date', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    fleetops.from('sa_payment_applications').select('payment_sa_id').in('invoice_sa_id', invoiceIds),
+  ]);
+
+  if (jobsResult.error) logger.warn('fetchJobDetails sa_jobs query failed', { err: jobsResult.error.message, saReference: job.saReference });
+  if (estimateResult.error) logger.warn('fetchJobDetails sa_accepted_estimates query failed', { err: estimateResult.error.message, saReference: job.saReference });
+  if (paymentAppsResult.error) logger.warn('fetchJobDetails sa_payment_applications query failed', { err: paymentAppsResult.error.message, saReference: job.saReference });
+
+  const jobRows = jobsResult.data ?? [];
+  const serviceNames = [...new Set(jobRows.map(r => r.service).filter(Boolean))].join(', ') || null;
+  const dateCompleted = jobRows.map(r => r.date_completed).filter(Boolean).sort().at(-1) ?? null;
+
+  let datePaid = null;
+  const paymentSaIds = [...new Set((paymentAppsResult.data ?? []).map(r => r.payment_sa_id).filter(Boolean))];
+  if (paymentSaIds.length) {
+    const { data: payments, error: paymentsError } = await fleetops
+      .from('sa_payments').select('payment_date').in('sa_id', paymentSaIds);
+    if (paymentsError) logger.warn('fetchJobDetails sa_payments query failed', { err: paymentsError.message, saReference: job.saReference });
+    // payment_date is stored as text — sorting lexicographically works only
+    // because SA's sync writes it as YYYY-MM-DD; if that ever changes this
+    // would need real date parsing.
+    datePaid = (payments ?? []).map(p => p.payment_date).filter(Boolean).sort().at(-1) ?? null;
+  }
+
+  return {
+    serviceNames,
+    estimateNumber: estimateResult.data?.estimate_number ?? null,
+    estimateDate: estimateResult.data?.quote_date ?? null,
+    dateCompleted,
+    datePaid,
+  };
+}
+
 // ── PM attribution ─────────────────────────────────────────────
 // Priority: assignment tied to this specific invoice > this contract > this
 // client > scraped from the client's original accepted estimate. Ordered by
@@ -395,6 +446,8 @@ export async function runCommissionEngine({ quarter } = {}) {
       continue;
     }
 
+    const jobDetails = await fetchJobDetails(job);
+
     const rate = job.category === 'maintenance_snow' ? plan.maintenance_rate : plan.self_performed_rate;
     const paidPct = job.invoicedAmount > 0 ? job.paidAmount / job.invoicedAmount : 0;
 
@@ -613,6 +666,11 @@ export async function runCommissionEngine({ quarter } = {}) {
         payable_commission: payableCommission,
         involves_subcontractor: involvesSubcontractor,
         unconfirmed_subcontracted_fraction: Number(unconfirmedFraction.toFixed(4)),
+        service_names: jobDetails.serviceNames,
+        estimate_number: jobDetails.estimateNumber,
+        estimate_date: jobDetails.estimateDate,
+        date_completed: jobDetails.dateCompleted,
+        date_paid: jobDetails.datePaid,
         renewal_flag: renewalFlag,
         renewal_confirmed: renewalConfirmed,
         status,

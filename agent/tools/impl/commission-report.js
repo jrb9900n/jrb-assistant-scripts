@@ -5,8 +5,8 @@
 //   - Payable this quarter (cash-basis — ready for payroll, EXCEPT rows marked
 //     with a subcontractor asterisk — see note below)
 //   - Accrued this quarter (GAAP basis — for the accountant's books)
-//   - Needs review (renewal candidates, unconfirmed subcontractor bill matches,
-//     jobs with no PM assignment or no active commission plan, processing errors)
+//   - Needs review (renewal candidates, unconfirmed subcontractor bill/line
+//     matches, processing errors)
 // See commission-engine.js for the accrual/payable/renewal/subcontractor-hold
 // semantics this report assumes. HTML template matches weekly-finance-report.js
 // (Michael's confirmed preferred format — navy #1a1a2e header, Arial, dark total rows).
@@ -29,6 +29,19 @@ const fleetops = createClient(
 );
 
 const f$ = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fD = d => d ? new Date(d + 'T12:00:00Z').toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' }) : '—';
+
+// Exact terms from the Accountability Agreement's Salary/Commission Structure
+// section, not the internal category enum, so the commission basis is obvious.
+const CATEGORY_LABEL = {
+  maintenance_snow: 'Landscape Maintenance & Snow Removal Contract',
+  self_performed: 'Self-Performed Asphalt, Concrete, or Landscape Project',
+};
+
+function subcontractorLabel(r) {
+  if (!r.involves_subcontractor) return 'No';
+  return Number(r.unconfirmed_subcontracted_fraction) > 0 ? 'Yes — pending review' : 'Yes — confirmed';
+}
 
 function sectionHeader(title, count) {
   const badge = count != null
@@ -41,30 +54,35 @@ function alertBox(color, borderColor, title, rows) {
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${color};border-left:4px solid ${borderColor};border-radius:4px;margin-bottom:16px;"><tr><td style="padding:12px 16px;"><p style="margin:0 0 8px 0;font-size:12px;font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;color:${borderColor};">${title}</p>${rows}</td></tr></table>`;
 }
 
+const LEDGER_COLUMNS = [
+  { label: 'Client', render: r => r.client_name ?? '—' },
+  { label: 'Service Name', render: r => r.service_names ?? '—' },
+  { label: 'Commission Category', render: r => CATEGORY_LABEL[r.category] ?? r.category },
+  { label: 'Estimate #', render: r => r.estimate_number ?? '—' },
+  { label: 'Estimate Date', render: r => fD(r.estimate_date) },
+  { label: 'Date Completed', render: r => fD(r.date_completed) },
+  { label: 'Date Paid', render: r => fD(r.date_paid) },
+  { label: 'Subcontractor?', render: r => subcontractorLabel(r) },
+];
+
 function ledgerTable(rows, amountKey) {
   if (!rows.length) return `<p style="margin:0 0 10px;font-size:13px;color:#888888;font-style:italic;">None this run.</p>`;
-  const body = rows.map((r, i) => `
-    <tr style="background-color:${i % 2 ? '#f8f8f8' : '#ffffff'};">
-      <td style="padding:5px 8px;font-size:13px;color:#333333;">${r.employee_name}</td>
-      <td style="padding:5px 8px;font-size:13px;color:#333333;">${r.client_name ?? '—'}${r.involves_subcontractor ? ' <span style="color:#b35900;">*</span>' : ''}</td>
-      <td style="padding:5px 8px;font-size:12px;color:#888888;">${r.category === 'maintenance_snow' ? 'Maintenance/Snow' : 'Self-Performed'}</td>
-      <td style="padding:5px 8px;font-size:13px;color:#1a1a2e;font-weight:bold;text-align:right;white-space:nowrap;">${f$(r[amountKey])}</td>
-    </tr>`).join('');
+  const headerCells = LEDGER_COLUMNS.map(c => `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">${c.label}</td>`).join('')
+    + `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;text-align:right;">Amount</td>`;
+  const body = rows.map((r, i) => {
+    const cells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:13px;color:#333333;">${c.render(r)}</td>`).join('');
+    return `<tr style="background-color:${i % 2 ? '#f8f8f8' : '#ffffff'};">${cells}<td style="padding:5px 8px;font-size:13px;color:#1a1a2e;font-weight:bold;text-align:right;white-space:nowrap;">${f$(r[amountKey])}</td></tr>`;
+  }).join('');
   const total = rows.reduce((s, r) => s + Number(r[amountKey] || 0), 0);
-  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:6px;">
-    <tr>
-      <td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">PM</td>
-      <td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Client</td>
-      <td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Category</td>
-      <td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;text-align:right;">Amount</td>
-    </tr>
+  return `<div style="overflow-x:auto;"><table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:6px;border-collapse:collapse;white-space:nowrap;">
+    <tr>${headerCells}</tr>
     ${body}
     <tr style="background-color:#1a1a2e;">
-      <td colspan="3" style="padding:8px;font-size:13px;color:#aaaacc;">Total</td>
+      <td colspan="${LEDGER_COLUMNS.length}" style="padding:8px;font-size:13px;color:#aaaacc;">Total</td>
       <td style="padding:8px;font-size:15px;color:#ffffff;font-weight:bold;text-align:right;">${f$(total)}</td>
     </tr>
-  </table>
-  <p style="margin:2px 0 14px;font-size:11px;color:#888888;">* involves a subcontractor — see flagged bill matches below before treating as final</p>`;
+  </table></div>
+  <p style="margin:2px 0 14px;font-size:11px;color:#888888;">Estimate #/Date are a best-effort match (no direct link exists from invoice to estimate) — flag if one looks wrong. Service Name/Date Completed/Date Paid can show "—" when the underlying job or payment record hasn't synced from Service Autopilot yet, even though the commission itself is correct. "Subcontractor?" reflects what's been auto-flagged from QBO vendor bills so far; reply to confirm, reject, or add one I missed.</p>`;
 }
 
 function reviewList(items) {
@@ -114,40 +132,22 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const payableTotal = payableRows.reduce((s, r) => s + Number(r.payable_commission || 0), 0);
   const accruedTotal = accruedRows.reduce((s, r) => s + Number(r.accrued_commission || 0), 0);
 
-  // unplannedJobs/unassignedJobs come from a company-wide engine run, not just
-  // this quarter's commission-eligible PMs — at real volume that's thousands
-  // of jobs assigned to employees who simply aren't commission-eligible PMs
-  // (expected, not actionable per-job). Summarize both rather than listing
-  // every job, or the review section becomes an unusable multi-thousand-line
-  // email (confirmed: a real run produced a 525KB email with 3,112 bullets).
-  const UNASSIGNED_PREVIEW_LIMIT = 20;
-  const unassignedPreview = result.unassignedJobs.slice(0, UNASSIGNED_PREVIEW_LIMIT);
-  const unassignedRemainder = result.unassignedJobs.slice(UNASSIGNED_PREVIEW_LIMIT);
-
-  const unplannedByEmployee = new Map();
-  for (const j of result.unplannedJobs) {
-    if (!unplannedByEmployee.has(j.employeeName)) unplannedByEmployee.set(j.employeeName, { count: 0, total: 0 });
-    const e = unplannedByEmployee.get(j.employeeName);
-    e.count++;
-    e.total += Number(j.value || 0);
-  }
-
+  // unplannedJobs/unassignedJobs come from a company-wide engine run across
+  // every employee, not just commission-eligible PMs — since only Jarrett has
+  // a commission plan right now, that's every other job in the company (Michael
+  // confirmed 2026-07-28: "no other employees earn commissions", he doesn't
+  // want this listed or summarized). Deliberately not surfaced here at all —
+  // if a second PM is ever added, revisit whether this needs to come back.
   const reviewItems = [
-    ...renewalPending.map(r => `${r.client_name ?? r.sa_reference} (${r.employee_name}) — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
+    ...renewalPending.map(r => `${r.client_name ?? r.sa_reference} — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
     ...relevantFlags.map(f => {
       const ledger = ledgerById.get(f.ledger_id);
-      return `${ledger?.client_name ?? '—'} (${ledger?.employee_name ?? '—'}) — candidate subcontractor bill: ${f.vendor_name ?? 'unknown vendor'}, ${f$(f.bill_amount)} on ${f.bill_date} (${f.match_confidence} confidence) — confirm before applying the 20% GP cap`;
+      return `${ledger?.client_name ?? '—'} — candidate subcontractor bill: ${f.vendor_name ?? 'unknown vendor'}, ${f$(f.bill_amount)} on ${f.bill_date} (${f.match_confidence} confidence) — confirm before applying the 20% GP cap`;
     }),
     ...unconfirmedLines.map(l => {
       const ledger = ledgerById.get(l.ledger_id);
-      return `${ledger?.client_name ?? '—'} (${ledger?.employee_name ?? '—'}) — line item "${l.qbo_line_description || l.qbo_item_name}" (${f$(l.line_amount)}) matched vendor ${l.vendor_name ?? 'unknown'} — confirm this specific line as subcontracted before the cap applies to it`;
+      return `${ledger?.client_name ?? '—'} — line item "${l.qbo_line_description || l.qbo_item_name}" (${f$(l.line_amount)}) matched vendor ${l.vendor_name ?? 'unknown'} — confirm this specific line as subcontracted before the cap applies to it`;
     }),
-    ...unassignedPreview.map(j => `${j.clientName ?? j.saReference} (${j.category === 'maintenance_snow' ? 'Maintenance/Snow' : 'Self-Performed'}, ${f$(j.value)}) — no PM assigned in pm_job_assignments`),
-    ...(unassignedRemainder.length
-      ? [`+ ${unassignedRemainder.length} more jobs with no PM assigned (${f$(unassignedRemainder.reduce((s, j) => s + Number(j.value || 0), 0))} total) — showing the first ${UNASSIGNED_PREVIEW_LIMIT} above`]
-      : []),
-    ...[...unplannedByEmployee.entries()].map(([emp, { count, total }]) =>
-      `${emp}: ${count} job${count !== 1 ? 's' : ''} with no active commission plan (${f$(total)} total) — expected unless ${emp} should also be earning commission`),
     ...(result.processingErrors ?? []).map(e => `${e.clientName ?? e.saReference} — SKIPPED this run due to a query error (${e.error}); needs a re-run`),
   ];
 
