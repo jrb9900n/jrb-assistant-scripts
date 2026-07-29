@@ -215,6 +215,27 @@ const SCHEDULED_TASKS = [
       logger.info('overnight_sa_report: sent', { subject: report.subject });
     },
   },
+  {
+    // 8 AM daily — warn if QB refresh token is within 14 days of its 101-day expiry
+    schedule: '0 8 * * *',
+    name: 'qb_reauth_reminder',
+    run: async () => {
+      const { getQBTokenMeta, QB_TOKEN_TTL_DAYS } = await import('../tools/impl/qb-token.js');
+      const meta = getQBTokenMeta();
+      if (!meta?.lastRotatedAt) return; // no timestamp yet — nothing to warn about
+      const msPerDay = 86_400_000;
+      const daysSince = (Date.now() - new Date(meta.lastRotatedAt).getTime()) / msPerDay;
+      const daysRemaining = Math.floor(QB_TOKEN_TTL_DAYS - daysSince);
+      if (daysRemaining > 14) return;
+      const secret = process.env.CLAUDE_EXECUTE_SECRET || '';
+      const url = `https://agent.jrboehlke.com/qb-reauth?secret=${secret}`;
+      const msg = daysRemaining > 0
+        ? `QuickBooks token expires in **${daysRemaining} day${daysRemaining === 1 ? '' : 's'}**. Tap to reconnect: ${url}`
+        : `QuickBooks token has **expired** (${Math.abs(daysRemaining)} days ago). Tap to reconnect: ${url}`;
+      await sendProactiveMessage(msg);
+      logger.info('qb_reauth_reminder: sent', { daysRemaining });
+    },
+  },
   // DISABLED — inbox processor, followup scanner, morning briefing
   // Re-enable when inbox processing behavior is ready.
   // {
@@ -405,6 +426,32 @@ const SCHEDULED_TASKS = [
           }
         } catch (err) {
           logger.warn('Email poller: feedback capture error (non-fatal)', { err: err.message });
+        }
+
+        // ── Commission report draft reply (checked before dev/CRM/general routing) ──
+        // Lookup and handling are separate try/catches on purpose: a transient
+        // failure just checking whether this thread has an open draft should
+        // fall through to normal routing below, not drop an unrelated email
+        // entirely — but once we know for certain this IS a commission-report
+        // reply (openDraft found), a failure handling it should alert and stop,
+        // since falling through to CRM/general routing on it would be wrong.
+        let openDraft = null;
+        try {
+          const { findOpenDraftForThread } = await import('../tools/impl/commission-report-reply.js');
+          openDraft = await findOpenDraftForThread(full.thread_id);
+        } catch (err) {
+          logger.warn('Email poller: commission draft lookup failed, falling through to normal routing', { err: err.message, subject: email.subject });
+        }
+        if (openDraft) {
+          try {
+            const { handleCommissionReportReply } = await import('../tools/impl/commission-report-reply.js');
+            logger.info('Email poller: routing to commission report reply handler', { quarter: openDraft.quarter, threadId: full.thread_id });
+            await handleCommissionReportReply({ ...full, body }, openDraft);
+          } catch (err) {
+            logger.error('Email poller: commission report reply handling failed', { err: err.message, subject: email.subject });
+            sendProactiveMessage(`⚠️ Commission report reply from Michael failed to process.\nSubject: "${email.subject}"\nError: ${err.message}`).catch(() => {});
+          }
+          continue;
         }
 
         // ── Dev task detection ──────────────────────────────────────────────────
@@ -826,6 +873,38 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
       }
 
       if (failed.length > 0) throw new Error(`AME steps failed: ${failed.join(', ')}`);
+    },
+  },
+  {
+    // 6 AM on the 1st of every month. Payment terms are still quarterly per the
+    // Accountability Agreement — this cadence is for visibility only, so Michael
+    // can see how things are tracking and the accountant can accrue more
+    // granularly than once a quarter.
+    // Jan/Apr/Jul/Oct 1 — "first payroll following quarter end" — finalize the
+    // quarter that JUST ended (isFinal: true, same as before).
+    // Every other month — snapshot the quarter still IN PROGRESS (isFinal:
+    // false), so payable reflects quarter-to-date cash collected, not a final
+    // payout number.
+    // Every run (monthly and quarterly) goes out as a DRAFT first — see
+    // commission-report-reply.js for the reply-driven approval loop.
+    schedule: '0 6 1 * *',
+    name: 'pm_commission_report',
+    run: async () => {
+      try {
+        const { previousQuarter, currentQuarter } = await import('../tools/impl/commission-engine.js');
+        const { sendDraftForApproval } = await import('../tools/impl/commission-report.js');
+        const isQuarterEndMonth = [0, 3, 6, 9].includes(new Date().getUTCMonth()); // Jan/Apr/Jul/Oct
+        const quarter = isQuarterEndMonth ? previousQuarter() : currentQuarter();
+        const result = await sendDraftForApproval({ quarter, isFinal: isQuarterEndMonth });
+        logger.info('pm_commission_report: draft sent', result);
+      } catch (err) {
+        logger.error('pm_commission_report: FAILED', { err: err.message });
+        try {
+          await sendProactiveMessage(`PM Commission Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('pm_commission_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
     },
   },
 ];
