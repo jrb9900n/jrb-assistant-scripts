@@ -75,13 +75,22 @@ const LEDGER_COLUMNS = [
   { label: 'Estimate Date', render: r => fD(r.estimate_date) },
   { label: 'Date Completed', render: r => fD(r.date_completed) },
   { label: 'Date Paid', render: r => fD(r.date_paid) },
+  { label: 'Invoice Value', render: r => f$(r.invoiced_amount) },
+  // The commission engine's payable/paid trigger comes from invoiced_amount
+  // minus sa_invoices.invoice_balance (reliable, QBO-synced) -- NOT from
+  // Date Paid (which comes from a separate, sparser sa_payment_applications/
+  // sa_payments join, see fetchJobDetails in commission-engine.js). A row can
+  // legitimately show real dollars here with "—" for Date Paid: that's a data-
+  // linkage gap in what populates the date, not a sign commission is being
+  // paid on unpaid work. This column is the actual proof cash was collected.
+  { label: 'Paid to Date', render: r => f$(r.paid_amount) },
   { label: 'Subcontractor?', render: r => subcontractorLabel(r) },
 ];
 
 function ledgerTable(rows, amountKey) {
   if (!rows.length) return `<p style="margin:0 0 10px;font-size:13px;color:#888888;font-style:italic;">None this run.</p>`;
   const headerCells = LEDGER_COLUMNS.map(c => `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">${c.label}</td>`).join('')
-    + `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;text-align:right;">Amount</td>`;
+    + `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;text-align:right;">Commission</td>`;
   const body = rows.map((r, i) => {
     const cells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:13px;color:#333333;">${c.render(r)}</td>`).join('');
     return `<tr style="background-color:${i % 2 ? '#f8f8f8' : '#ffffff'};">${cells}<td style="padding:5px 8px;font-size:13px;color:#1a1a2e;font-weight:bold;text-align:right;white-space:nowrap;">${f$(r[amountKey])}</td></tr>`;
@@ -95,7 +104,7 @@ function ledgerTable(rows, amountKey) {
       <td style="padding:8px;font-size:15px;color:#ffffff;font-weight:bold;text-align:right;">${f$(total)}</td>
     </tr>
   </table></div>
-  <p style="margin:2px 0 14px;font-size:11px;color:#888888;">Estimate #/Date are a best-effort match (no direct link exists from invoice to estimate) — flag if one looks wrong. Service Name/Date Completed/Date Paid can show "—" when the underlying job or payment record hasn't synced from Service Autopilot yet, even though the commission itself is correct. "Subcontractor?" reflects what's been auto-flagged from QBO vendor bills so far; reply to confirm, reject, or add one I missed.</p>`;
+  <p style="margin:2px 0 14px;font-size:11px;color:#888888;">Estimate #/Date are a best-effort match (no direct link exists from invoice to estimate) — flag if one looks wrong. Service Name/Date Completed/Date Paid can show "—" when the underlying job or payment record hasn't synced from Service Autopilot yet — that's a display gap only; "Paid to Date" is the actual amount collected against the invoice and is what determines whether a row is payable. "Subcontractor?" reflects what's been auto-flagged from QBO vendor bills so far; reply to confirm, reject, or add one I missed.</p>`;
 }
 
 function reviewList(items) {
