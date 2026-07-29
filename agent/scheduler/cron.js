@@ -215,6 +215,27 @@ const SCHEDULED_TASKS = [
       logger.info('overnight_sa_report: sent', { subject: report.subject });
     },
   },
+  {
+    // 8 AM daily — warn if QB refresh token is within 14 days of its 101-day expiry
+    schedule: '0 8 * * *',
+    name: 'qb_reauth_reminder',
+    run: async () => {
+      const { getQBTokenMeta, QB_TOKEN_TTL_DAYS } = await import('../tools/impl/qb-token.js');
+      const meta = getQBTokenMeta();
+      if (!meta?.lastRotatedAt) return; // no timestamp yet — nothing to warn about
+      const msPerDay = 86_400_000;
+      const daysSince = (Date.now() - new Date(meta.lastRotatedAt).getTime()) / msPerDay;
+      const daysRemaining = Math.floor(QB_TOKEN_TTL_DAYS - daysSince);
+      if (daysRemaining > 14) return;
+      const secret = process.env.CLAUDE_EXECUTE_SECRET || '';
+      const url = `https://agent.jrboehlke.com/qb-reauth?secret=${secret}`;
+      const msg = daysRemaining > 0
+        ? `QuickBooks token expires in **${daysRemaining} day${daysRemaining === 1 ? '' : 's'}**. Tap to reconnect: ${url}`
+        : `QuickBooks token has **expired** (${Math.abs(daysRemaining)} days ago). Tap to reconnect: ${url}`;
+      await sendProactiveMessage(msg);
+      logger.info('qb_reauth_reminder: sent', { daysRemaining });
+    },
+  },
   // DISABLED — inbox processor, followup scanner, morning briefing
   // Re-enable when inbox processing behavior is ready.
   // {
