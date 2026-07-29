@@ -674,11 +674,12 @@ const SA_TOOLS = [
   },
   {
     name: 'sa_set_crackfill',
-    description: 'Read the Pavement Size custom field for an SA client, calculate Lbs of Crackfill (= Pavement Size × 0.015, rounded), and write it back to the custom field. Returns { clientId, pavementSf, lbsCrackfill } or { skipped, reason } if Pavement Size is empty/invalid.',
+    description: 'Calculate Lbs of Crackfill (= Pavement Size × 0.015, rounded) and write it to the SA custom field. If pavementSf is provided, also writes it to the Pavement Size field — use this at client intake when you have the value. If omitted, reads Pavement Size from SA. Call after sa_set_billing_defaults whenever pavementSf is known. Returns { clientId, pavementSf, lbsCrackfill, savedViaApi } or { skipped, reason } if Pavement Size is missing/invalid.',
     input_schema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string', description: 'SA client GUID' },
+        clientId:   { type: 'string', description: 'SA client GUID' },
+        pavementSf: { type: 'number', description: 'Pavement area in sq ft. If supplied, writes this value to the Pavement Size field and calculates crackfill. If omitted, reads Pavement Size from SA.' },
       },
       required: ['clientId'],
     },

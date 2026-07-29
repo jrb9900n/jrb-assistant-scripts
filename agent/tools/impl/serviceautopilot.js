@@ -1283,7 +1283,7 @@ export async function fetchClientPavementSf(clientId) {
  * that overwrites all custom fields atomically. Confirmed via reverse-engineering SA's Knockout
  * overlay save (probe-cf-saveclicked.mjs, 2026-07-21).
  */
-export async function setClientCrackfill({ clientId }) {
+export async function setClientCrackfill({ clientId, pavementSf: pavementSfArg }) {
   // 1. Get custom field list (IDs + current values)
   const gcflRes = await post('/webservices/ClientEditOverlayWs.asmx/GetCustomFieldList',
     { ClientID: clientId }, 'Clients.aspx');
@@ -1300,9 +1300,11 @@ export async function setClientCrackfill({ clientId }) {
     throw new Error(`SA setClientCrackfill: custom field(s) not found: ${missing.join(', ')}`);
   }
 
-  const pavementSf = parseFloat(pavementField.CustomFieldValue);
-  if (!pavementField.CustomFieldValue || isNaN(pavementSf) || pavementSf <= 0) {
-    return { clientId, skipped: true, reason: `Pavement Size "${pavementField.CustomFieldValue}" is not a valid positive number` };
+  // Use caller-supplied value (intake path) or read from SA (reconciliation path)
+  const pavementRaw = pavementSfArg != null ? String(pavementSfArg) : (pavementField.CustomFieldValue || '');
+  const pavementSf  = parseFloat(pavementRaw);
+  if (!pavementRaw || isNaN(pavementSf) || pavementSf <= 0) {
+    return { clientId, skipped: true, reason: `Pavement Size "${pavementRaw}" is not a valid positive number` };
   }
 
   const lbsCrackfill = Math.round(pavementSf * 0.015);
@@ -1332,12 +1334,14 @@ export async function setClientCrackfill({ clientId }) {
     return { Month: dt.getMonth() + 1, Day: dt.getDate(), Year: dt.getFullYear() };
   }
 
-  // 3. Build CustomFields array — all fields preserved, crackfill updated
-  const customFields = fields.map(f => ({
-    CustomFieldValue: f.CustomFieldName === 'Lbs of Crackfill' ? String(lbsCrackfill) : (f.CustomFieldValue || ''),
-    CustomFieldDate:  null,
-    CustomFieldID:    f.CustomFieldID,
-  }));
+  // 3. Build CustomFields array — crackfill updated; pavement size written if caller supplied it
+  const customFields = fields.map(f => {
+    if (f.CustomFieldName === 'Lbs of Crackfill')
+      return { CustomFieldValue: String(lbsCrackfill), CustomFieldDate: null, CustomFieldID: f.CustomFieldID };
+    if (f.CustomFieldName === 'Pavement Size' && pavementSfArg != null)
+      return { CustomFieldValue: String(pavementSfArg), CustomFieldDate: null, CustomFieldID: f.CustomFieldID };
+    return { CustomFieldValue: f.CustomFieldValue || '', CustomFieldDate: null, CustomFieldID: f.CustomFieldID };
+  });
 
   // 4. Build SaveClient info — preserve all existing client values, only add CustomFields
   const info = {
