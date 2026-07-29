@@ -227,7 +227,7 @@ async function fetchJobDetails(job) {
 // not an edit to the first — the table is append-only by design) resolves to
 // the latest one; a later manual row always outranks a scraped one since the
 // scraped fallback only runs when no assignment row exists yet at all.
-async function resolvePM({ saClientId, contractId, invoiceSaId }) {
+async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate }) {
   const attempts = [
     invoiceSaId && ['sa_invoice_sa_id', invoiceSaId],
     contractId  && ['sa_contract_id', contractId],
@@ -246,30 +246,40 @@ async function resolvePM({ saClientId, contractId, invoiceSaId }) {
     if (data?.employee_name) return data.employee_name;
   }
 
-  // No manual assignment exists for this client at all — scrape the rep off
-  // the client's original accepted estimate. sa_accepted_estimates is synced
-  // daily by the existing overnight_sa_report cron and already carries a
-  // resolved employee name (not a raw SA rep GUID) in sales_rep. Picks the
-  // most recent accepted estimate for the client as the best guess at who
-  // originated this job. Known limitation: a client with multiple jobs handled
-  // by different PMs over time will attribute ALL of them to whoever's
-  // reflected on their most recent won estimate — a later manual correction
-  // (a new 'manual' row) always overrides this, since this fallback only
-  // fires when no assignment row exists yet.
-  if (saClientId) {
+  // No manual assignment exists for this specific job yet — scrape the rep off
+  // the estimate that actually preceded (and could plausibly have won) THIS
+  // job, not just "whichever estimate is most recent for the client overall."
+  // Fixed 2026-07-29 after a real misattribution: Sterling Pharma's March 2026
+  // maintenance contract (won by Michael Reardon, per estimate #4975) got
+  // attributed to Jarrett Bruce because a LATER, unrelated May estimate
+  // (#5325, actually his) was the client's most-recent accepted estimate at
+  // scrape time — the old query had no upper bound on quote_date at all.
+  // sa_accepted_estimates is synced daily by the existing overnight_sa_report
+  // cron and already carries a resolved employee name (not a raw SA rep GUID)
+  // in sales_rep.
+  if (saClientId && earliestDate) {
     const { data: estRow, error: estError } = await fleetops
       .from('sa_accepted_estimates')
       .select('sales_rep, estimate_id')
       .eq('client_id', saClientId)
       .not('sales_rep', 'is', null)
       .neq('sales_rep', '—')
+      .lte('quote_date', earliestDate)
       .order('quote_date', { ascending: false })
       .limit(1)
       .maybeSingle();
     if (estError) { logger.warn('resolvePM sa_accepted_estimates lookup failed', { err: estError.message }); return null; }
     if (estRow?.sales_rep) {
+      // Scoped to the most specific identifier available (contract/invoice),
+      // NOT sa_client_id — a client-wide row would incorrectly apply this same
+      // attribution to any OTHER job/contract for the same client later on,
+      // exactly the bug being fixed here. Only falls back to client-wide
+      // scoping if no more specific identifier exists for this job at all.
+      const scopeCols = (contractId || invoiceSaId)
+        ? { sa_contract_id: contractId ?? null, sa_invoice_sa_id: invoiceSaId ?? null }
+        : { sa_client_id: saClientId };
       const { error: insertError } = await fleetops.from('pm_job_assignments').insert({
-        sa_client_id: saClientId,
+        ...scopeCols,
         employee_name: estRow.sales_rep,
         source: 'sa_signal',
         notes: `Scraped from accepted estimate ${estRow.estimate_id}`,
@@ -426,6 +436,7 @@ export async function runCommissionEngine({ quarter } = {}) {
       saClientId: job.saClientId,
       contractId: job.contractId,
       invoiceSaId: job.invoiceSaId,
+      earliestDate: job.earliestDate,
     });
     if (!employeeName) {
       results.skippedNoPM++;
