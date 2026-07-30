@@ -307,32 +307,57 @@ async function findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate, fuzz
   return null;
 }
 
+// Fetches the whole table once per run instead of up to 3 queries PER JOB —
+// confirmed a real, unbounded-with-run-length memory growth (a run crashed
+// faster when given a smaller --max-old-space-size ceiling, the signature of
+// genuine accumulation rather than incidental system memory pressure): the
+// manual-assignment lookup alone ran unconditionally for every job in a
+// company-wide scan of ~3,000 jobs, up to 3 requests each. Both tables are
+// small (927 / 2,828 rows as of 2026-07-30) — cheap to hold in memory for a
+// single run.
+async function buildAttributionIndexes() {
+  const { data: allAssignments, error: assignError } = await fleetops
+    .from('pm_job_assignments')
+    .select('sa_invoice_sa_id, sa_contract_id, sa_client_id, employee_name, assigned_at')
+    .order('assigned_at', { ascending: true }); // ascending: later rows overwrite earlier ones below, matching "most recent wins"
+  if (assignError) throw new Error(`pm_job_assignments prefetch failed: ${assignError.message}`);
+
+  const assignmentIndex = { byInvoice: new Map(), byContract: new Map(), byClient: new Map() };
+  for (const row of allAssignments ?? []) {
+    if (row.sa_invoice_sa_id) assignmentIndex.byInvoice.set(row.sa_invoice_sa_id, row.employee_name);
+    if (row.sa_contract_id) assignmentIndex.byContract.set(row.sa_contract_id, row.employee_name);
+    if (row.sa_client_id) assignmentIndex.byClient.set(row.sa_client_id, row.employee_name);
+  }
+
+  const { data: allEstimates, error: estError } = await fleetops
+    .from('sa_accepted_estimates')
+    .select('client_id, sales_rep, estimate_id, quote_date')
+    .not('sales_rep', 'is', null)
+    .neq('sales_rep', '—')
+    .order('quote_date', { ascending: true }); // ascending: lets resolvePM scan and stop at the first one past earliestDate
+  if (estError) throw new Error(`sa_accepted_estimates prefetch failed: ${estError.message}`);
+
+  const estimatesByClient = new Map();
+  for (const row of allEstimates ?? []) {
+    if (!estimatesByClient.has(row.client_id)) estimatesByClient.set(row.client_id, []);
+    estimatesByClient.get(row.client_id).push(row);
+  }
+
+  return { assignmentIndex, estimatesByClient };
+}
+
 // ── PM attribution ─────────────────────────────────────────────
 // Priority: assignment tied to this specific invoice > this contract > this
 // client > job-level SalesRep (self_performed only, see findJobLevelSalesRep)
-// > scraped from the client's original accepted estimate. Ordered by
-// assigned_at desc within the manual tiers so a reassignment (a second row,
-// not an edit to the first — the table is append-only by design) resolves to
-// the latest one; a later manual row always outranks an auto-detected one
-// since both auto-detect paths only run when no assignment row exists yet.
-async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, isContractJob, fuzzyCandidateCache }) {
-  const attempts = [
-    invoiceSaId && ['sa_invoice_sa_id', invoiceSaId],
-    contractId  && ['sa_contract_id', contractId],
-    saClientId  && ['sa_client_id', saClientId],
-  ].filter(Boolean);
-
-  for (const [col, val] of attempts) {
-    const { data, error } = await fleetops
-      .from('pm_job_assignments')
-      .select('employee_name')
-      .eq(col, val)
-      .order('assigned_at', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (error) { logger.warn('resolvePM query failed', { col, err: error.message }); continue; }
-    if (data?.employee_name) return data.employee_name;
-  }
+// > scraped from the client's original accepted estimate. The manual tiers
+// and the estimate scrape both read from indexes prefetched once for the
+// whole run (see buildAttributionIndexes) rather than querying per job.
+async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, isContractJob, fuzzyCandidateCache, assignmentIndex, estimatesByClient }) {
+  const manualMatch =
+    (invoiceSaId && assignmentIndex.byInvoice.get(invoiceSaId)) ||
+    (contractId && assignmentIndex.byContract.get(contractId)) ||
+    (saClientId && assignmentIndex.byClient.get(saClientId));
+  if (manualMatch) return manualMatch;
 
   // No manual assignment exists yet — try real job-level data before falling
   // back to guessing off an estimate. Contract jobs skip this entirely (no
@@ -363,17 +388,14 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
   // cron and already carries a resolved employee name (not a raw SA rep GUID)
   // in sales_rep.
   if (saClientId && earliestDate) {
-    const { data: estRow, error: estError } = await fleetops
-      .from('sa_accepted_estimates')
-      .select('sales_rep, estimate_id')
-      .eq('client_id', saClientId)
-      .not('sales_rep', 'is', null)
-      .neq('sales_rep', '—')
-      .lte('quote_date', earliestDate)
-      .order('quote_date', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (estError) { logger.warn('resolvePM sa_accepted_estimates lookup failed', { err: estError.message }); return null; }
+    // estimatesByClient's per-client array is sorted ascending by quote_date
+    // (see buildAttributionIndexes) — scan forward and keep the last row still
+    // <= earliestDate, i.e. the closest-but-not-after match.
+    let estRow = null;
+    for (const row of (estimatesByClient.get(saClientId) ?? [])) {
+      if (row.quote_date > earliestDate) break;
+      estRow = row;
+    }
     if (estRow?.sales_rep) {
       // Scoped to the most specific identifier available (contract/invoice),
       // NOT sa_client_id — a client-wide row would incorrectly apply this same
@@ -539,6 +561,7 @@ export async function runCommissionEngine({ quarter } = {}) {
   // One sa_jobs fetch per customer for the whole run, not per invoice — see
   // findJobLevelSalesRep.
   const fuzzyCandidateCache = new Map();
+  const { assignmentIndex, estimatesByClient } = await buildAttributionIndexes();
 
   for (const job of allJobs) {
     const employeeName = await resolvePM({
@@ -548,6 +571,8 @@ export async function runCommissionEngine({ quarter } = {}) {
       earliestDate: job.earliestDate,
       isContractJob: job.category === 'maintenance_snow',
       fuzzyCandidateCache,
+      assignmentIndex,
+      estimatesByClient,
     });
     if (!employeeName) {
       results.skippedNoPM++;
