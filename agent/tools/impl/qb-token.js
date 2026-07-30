@@ -8,12 +8,15 @@
 // from here instead of implementing their own token refresh.
 
 import axios from 'axios';
-import { execFileSync } from 'child_process';
+import { execFileSync, execFile } from 'child_process';
+import { promisify } from 'util';
 import { writeFileSync, unlinkSync, mkdirSync, readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { logger } from '../../core/logger.js';
+
+const execFileAsync = promisify(execFile);
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const QB_TOKEN_META_FILE = join(__dirname, '../../data/qb-token-meta.json');
@@ -56,6 +59,49 @@ function currentRefreshToken() {
   return _refreshToken;
 }
 
+// Re-read QB_REFRESH_TOKEN directly from Credential Manager, bypassing both
+// process.env and the in-memory cache. Each long-lived process (bot, scheduler)
+// only reads process.env once at startup — if a *different* process rotates the
+// token (e.g. a manual /qb-reauth handled by the bot process) the scheduler
+// process's in-memory copy goes stale until it restarts. This lets a failing
+// refresh self-heal by picking up a same-machine rotation without a restart.
+// Async (not execFileSync) — this fires on every failed refresh during an
+// outage, potentially from the Teams bot process while it's handling live
+// webhook traffic. A blocking call here would stall unrelated requests on
+// that same process for up to the full timeout on each attempt.
+async function readCredManagerRefreshToken() {
+  try {
+    const { stdout } = await execFileAsync('powershell.exe', [
+      '-NoProfile', '-NonInteractive', '-Command',
+      `Add-Type -ErrorAction SilentlyContinue @"
+using System; using System.Runtime.InteropServices;
+public class QbTokenCredRdr {
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
+  public struct CREDENTIAL {
+    public uint Flags; public uint Type; public string TargetName; public string Comment;
+    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
+    public uint CredentialBlobSize; public IntPtr CredentialBlob; public uint Persist;
+    public uint AttributeCount; public IntPtr Attributes; public string TargetAlias; public string UserName;
+  }
+  [DllImport("advapi32.dll", SetLastError=true, CharSet=CharSet.Unicode)]
+  public static extern bool CredRead(string target, uint type, uint flags, out IntPtr credential);
+  [DllImport("advapi32.dll")] public static extern void CredFree(IntPtr buf);
+}
+"@
+$ptr = [IntPtr]::Zero
+if ([QbTokenCredRdr]::CredRead("JRBAgent:QB_REFRESH_TOKEN", 1, 0, [ref]$ptr)) {
+  $c = [Runtime.InteropServices.Marshal]::PtrToStructure($ptr, [type][QbTokenCredRdr+CREDENTIAL])
+  [Runtime.InteropServices.Marshal]::PtrToStringUni($c.CredentialBlob, [int]$c.CredentialBlobSize / 2)
+  [QbTokenCredRdr]::CredFree($ptr)
+}`,
+    ], { encoding: 'utf8', timeout: 10_000 });
+    return stdout.trim() || null;
+  } catch (err) {
+    logger.warn('QB: readCredManagerRefreshToken failed', { err: err.message });
+    return null;
+  }
+}
+
 // ── Access token (auto-refresh + rotation) ───────────────────
 
 export async function getQBAccessToken() {
@@ -70,10 +116,7 @@ export async function getQBAccessToken() {
   return _refreshPromise;
 }
 
-async function _doRefresh() {
-  const rt = currentRefreshToken();
-  if (!rt) throw new Error('QB_REFRESH_TOKEN not set — run QB re-auth at /qb-reauth');
-
+async function _attemptRefresh(rt) {
   const creds = Buffer.from(`${process.env.QB_CLIENT_ID}:${process.env.QB_CLIENT_SECRET}`).toString('base64');
   const res = await axios.post(
     'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
@@ -97,6 +140,28 @@ async function _doRefresh() {
   saveTokenTimestamp();
 
   return _accessToken;
+}
+
+async function _doRefresh() {
+  const rt = currentRefreshToken();
+  if (!rt) throw new Error('QB_REFRESH_TOKEN not set — run QB re-auth at /qb-reauth');
+
+  try {
+    return await _attemptRefresh(rt);
+  } catch (err) {
+    // invalid_grant on a 400 usually means this token was already rotated —
+    // possibly by a sibling process (bot vs scheduler each hold their own
+    // in-memory copy). Re-read Credential Manager once before giving up.
+    if (err.response?.status === 400) {
+      const fresh = await readCredManagerRefreshToken();
+      if (fresh && fresh !== rt) {
+        logger.warn('QB: refresh failed with stale in-memory token — retrying with Credential Manager value');
+        _refreshToken = fresh;
+        return await _attemptRefresh(fresh);
+      }
+    }
+    throw err;
+  }
 }
 
 // ── OAuth code exchange (initial auth + re-auth) ──────────────
