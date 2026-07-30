@@ -215,6 +215,49 @@ const SCHEDULED_TASKS = [
       logger.info('overnight_sa_report: sent', { subject: report.subject });
     },
   },
+  {
+    // 6:30 AM nightly — reconcile Lbs of Crackfill for PMM clients with Pavement Size set.
+    // Runs after overnight_sa_report (6 AM) which wakes the SA session.
+    schedule: '30 6 * * *',
+    name: 'crackfill_reconciliation',
+    run: async () => {
+      if (!acquireRunLock('crackfill_reconciliation', 30 * 60_000)) {
+        logger.debug('crackfill_reconciliation: skipped (another instance running)');
+        return;
+      }
+      try {
+        const { createClient } = await import('@supabase/supabase-js');
+        const { setClientCrackfill } = await import('../tools/impl/serviceautopilot.js');
+        const sb = createClient(process.env.FLEETOPS_SUPABASE_URL, process.env.FLEETOPS_SUPABASE_SERVICE_KEY);
+
+        const { data: rows, error } = await sb
+          .from('sa_waiting_list')
+          .select('client_id')
+          .ilike('service_code', 'PMM%')
+          .not('client_id', 'is', null)
+          .not('pavement_sf', 'is', null);
+        if (error) throw new Error(`crackfill_reconciliation query: ${error.message}`);
+
+        const clientIds = [...new Set((rows || []).map(r => r.client_id).filter(Boolean))];
+        logger.info('crackfill_reconciliation: starting', { total: clientIds.length });
+
+        let updated = 0; let skipped = 0; let failed = 0;
+        for (const clientId of clientIds) {
+          try {
+            const result = await setClientCrackfill({ clientId });
+            result.skipped ? skipped++ : updated++;
+          } catch (err) {
+            logger.warn('crackfill_reconciliation: failed for client', { clientId, err: err.message });
+            failed++;
+          }
+          await new Promise(r => setTimeout(r, 300));
+        }
+        logger.info('crackfill_reconciliation: complete', { updated, skipped, failed, total: clientIds.length });
+      } finally {
+        releaseRunLock('crackfill_reconciliation');
+      }
+    },
+  },
   // DISABLED — inbox processor, followup scanner, morning briefing
   // Re-enable when inbox processing behavior is ready.
   // {
