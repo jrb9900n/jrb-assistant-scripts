@@ -398,9 +398,9 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // 2:30 AM nightly — reconcile Lbs of Crackfill for PMM clients with Pavement Size set.
-    // Runs after sa_waiting_list_sync so pavement_sf column is fresh.
-    schedule: '30 2 * * *',
+    // 6:30 AM nightly — reconcile Lbs of Crackfill for PMM clients with Pavement Size set.
+    // Runs after overnight_sa_report (6 AM) which wakes the SA browser session.
+    schedule: '30 6 * * *',
     name: 'crackfill_reconciliation',
     run: async () => {
       if (!acquireRunLock('crackfill_reconciliation', 30 * 60_000)) {
