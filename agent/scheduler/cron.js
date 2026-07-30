@@ -40,6 +40,7 @@ function releaseRunLock(taskName) {
 }
 
 let saWasDown = false;
+let qbWasDown = false;
 
 const SCHEDULED_TASKS = [
   {
@@ -169,35 +170,168 @@ const SCHEDULED_TASKS = [
     }),
   },
   {
-    // Monday 4 AM — QB weekly revenue pull to Supabase (prior ISO week)
+    // Monday 4 AM — QB weekly revenue pull to Supabase (prior ISO week).
+    // Holds the 'qb_weekly_sync' run lock for its whole lifetime (not just the
+    // dedup TTL acquireRunLock normally provides) so bta_qb_revenue_report below
+    // can wait for it to finish before also touching QB — both spawn separate
+    // BTA Reporting scripts that independently refresh/rotate the same
+    // Credential-Manager-stored QB refresh token, and running them concurrently
+    // risks one process rotating the token out from under the other mid-refresh.
     schedule: '0 4 * * 1',
     name: 'qb_weekly_sync',
-    run: () => new Promise((resolve, reject) => {
-      const prev = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-      const jan1 = new Date(prev.getFullYear(), 0, 1);
-      const wn = Math.ceil((((prev - jan1) / 86400000) + jan1.getDay() + 1) / 7);
-      const prevWeek = `${prev.getFullYear()}-W${String(wn).padStart(2, '0')}`;
-      const child = spawn(process.execPath, ['qb-sync.js', `--week=${prevWeek}`], {
-        cwd: 'C:\\Users\\Assistant\\BTA Reporting',
-        env: {
-          ...process.env,
-          SUPABASE_URL: process.env.FLEETOPS_SUPABASE_URL,
-          SUPABASE_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 300_000,
-      });
-      let out = '';
-      let err = '';
-      child.stdout.on('data', d => { out += d; });
-      child.stderr.on('data', d => { err += d; });
-      child.on('close', code => {
-        logger.info('qb_weekly_sync complete', { code, week: prevWeek, output: out.slice(-2000) });
-        if (err) logger.warn('qb_weekly_sync stderr', { stderr: err.slice(-1000) });
-        code === 0 ? resolve() : reject(new Error(`qb-sync.js exited ${code}`));
-      });
-      child.on('error', reject);
-    }),
+    run: () => {
+      acquireRunLock('qb_weekly_sync', 6 * 60_000);
+      return new Promise((resolve, reject) => {
+        const prev = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const jan1 = new Date(prev.getFullYear(), 0, 1);
+        const wn = Math.ceil((((prev - jan1) / 86400000) + jan1.getDay() + 1) / 7);
+        const prevWeek = `${prev.getFullYear()}-W${String(wn).padStart(2, '0')}`;
+        const child = spawn(process.execPath, ['qb-sync.js', `--week=${prevWeek}`], {
+          cwd: 'C:\\Users\\Assistant\\BTA Reporting',
+          env: {
+            ...process.env,
+            SUPABASE_URL: process.env.FLEETOPS_SUPABASE_URL,
+            SUPABASE_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+          },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 300_000,
+        });
+        let out = '';
+        let err = '';
+        child.stdout.on('data', d => { out += d; });
+        child.stderr.on('data', d => { err += d; });
+        child.on('close', code => {
+          logger.info('qb_weekly_sync complete', { code, week: prevWeek, output: out.slice(-2000) });
+          if (err) logger.warn('qb_weekly_sync stderr', { stderr: err.slice(-1000) });
+          code === 0 ? resolve() : reject(new Error(`qb-sync.js exited ${code}`));
+        });
+        child.on('error', reject);
+      }).finally(() => releaseRunLock('qb_weekly_sync'));
+    },
+  },
+  {
+    // Monday 4:15 AM — BTA weekly revenue package (weekly-rp-*.csv, budget-summary).
+    // Runs after sa_weekly_sync (3 AM) so division matching against SA won estimates
+    // uses fresh data. Was previously only defined in an orphaned, never-deployed
+    // copy of this file — it had not run on a schedule since 2026-06-24. Treated as
+    // critical: a stale QB revenue package went unnoticed for over a month, so
+    // failure here alerts via both Teams and email, not Teams alone.
+    schedule: '15 4 * * 1',
+    name: 'bta_qb_revenue_report',
+    run: async () => {
+      try {
+        // qb_weekly_sync (4:00 AM) independently refreshes/rotates the same
+        // Credential-Manager QB refresh token — wait for its lock to clear
+        // (up to 6 min, matching the lock TTL) before also touching QB.
+        const qbSyncLock = join(tmpdir(), 'jrb-scheduler-qb_weekly_sync.lock');
+        const waitStart = Date.now();
+        while (existsSync(qbSyncLock) && Date.now() - waitStart < 6 * 60_000) {
+          await new Promise(r => setTimeout(r, 5000));
+        }
+        await new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, ['rp-formatter.js'], {
+            cwd: 'C:\\Users\\Assistant\\BTA Reporting',
+            env: { ...process.env },
+            stdio: ['ignore', 'pipe', 'pipe'],
+            timeout: 600_000,
+          });
+          let out = '';
+          let err = '';
+          child.stdout.on('data', d => { out += d; });
+          child.stderr.on('data', d => { err += d; });
+          child.on('close', code => {
+            logger.info('bta_qb_revenue_report complete', { code, output: out.slice(-2000) });
+            if (err) logger.warn('bta_qb_revenue_report stderr', { stderr: err.slice(-1000) });
+            code === 0 ? resolve() : reject(new Error(`rp-formatter.js exited ${code}: ${err.slice(-500)}`));
+          });
+          child.on('error', reject);
+        });
+      } catch (err) {
+        logger.error('bta_qb_revenue_report: FAILED', { err: err.message });
+        const { sendEmail } = await import('../tools/impl/m365.js');
+        await Promise.allSettled([
+          sendProactiveMessage(`BTA QB Revenue Report FAILED — rp-formatter.js: ${err.message}`),
+          sendEmail({
+            to: ['michael@jrboehlke.com'],
+            subject: 'BTA Weekly Report FAILED — QB Revenue Package',
+            body: `<p style="font-family:Arial,sans-serif;">rp-formatter.js failed during the scheduled Monday BTA report run — revenue CSVs were NOT refreshed this week.</p><p style="font-family:Arial,sans-serif;color:#c00;"><strong>Error:</strong> ${err.message}</p>`,
+          }),
+        ]);
+      }
+    },
+  },
+  {
+    // Monday 4:30 AM — BTA SP funnel CSVs from SA data. Non-fatal: the underlying
+    // SA data isn't at risk, only this formatted view of it.
+    schedule: '30 4 * * 1',
+    name: 'bta_sp_funnel_report',
+    run: async () => {
+      try {
+        await new Promise((resolve, reject) => {
+          const child = spawn(process.execPath, ['sheets-formatter.js'], {
+            cwd: 'C:\\Users\\Assistant\\BTA Reporting',
+            env: { ...process.env },
+            stdio: ['ignore', 'pipe', 'pipe'],
+            timeout: 180_000,
+          });
+          let out = '';
+          let err = '';
+          child.stdout.on('data', d => { out += d; });
+          child.stderr.on('data', d => { err += d; });
+          child.on('close', code => {
+            logger.info('bta_sp_funnel_report complete', { code, output: out.slice(-2000) });
+            if (err) logger.warn('bta_sp_funnel_report stderr', { stderr: err.slice(-1000) });
+            code === 0 ? resolve() : reject(new Error(`sheets-formatter.js exited ${code}: ${err.slice(-500)}`));
+          });
+          child.on('error', reject);
+        });
+      } catch (err) {
+        logger.warn('bta_sp_funnel_report: FAILED (non-fatal)', { err: err.message });
+        await sendProactiveMessage(`BTA SP Funnel Report WARNING — sheets-formatter.js: ${err.message}`).catch(() => {});
+      }
+    },
+  },
+  {
+    // Every 4 hours — QB connectivity health check. Catches ANY auth failure
+    // (wrong-app/client mismatch, revoked access, expired token) within a few
+    // hours instead of relying only on the calendar-day expiry estimate below,
+    // which would have missed the 2026-07-29 "reauthorized against the wrong
+    // Intuit app" failure entirely — that broke every QB-dependent feature for
+    // a full day before anyone noticed. Alerts once on failure and once on
+    // recovery, not on every check, via both Teams and email.
+    schedule: '0 */4 * * *',
+    name: 'qb_health_check',
+    run: async () => {
+      try {
+        const { getQBAccessToken } = await import('../tools/impl/qb-token.js');
+        const axios = (await import('axios')).default;
+        const token = await getQBAccessToken();
+        await axios.get(
+          `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}/companyinfo/${process.env.QB_REALM_ID}`,
+          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+        );
+        if (qbWasDown) {
+          qbWasDown = false;
+          await sendProactiveMessage('✅ QuickBooks connectivity restored.').catch(() => {});
+        }
+      } catch (err) {
+        logger.warn('qb_health_check: QB unreachable', { err: err.message, status: err.response?.status });
+        if (!qbWasDown) {
+          qbWasDown = true;
+          const { sendEmail } = await import('../tools/impl/m365.js');
+          const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+          const msg = `QuickBooks connection is failing (status ${err.response?.status ?? 'n/a'}). All QB-dependent features (BTA reports, CardDAV, finance report, audit engine) will be affected until reauthorized.\n\nDetail: ${detail}\n\nTo fix: developer.intuit.com/app/developer/playground -> get authorization code (scope com.intuit.quickbooks.accounting) -> authorize as J.R. Boehlke -> get tokens -> save refresh_token via Set-JRBSecret. Confirm the realm ID matches ${process.env.QB_REALM_ID} before saving.`;
+          await Promise.allSettled([
+            sendProactiveMessage(`⚠️ ${msg}`),
+            sendEmail({
+              to: ['michael@jrboehlke.com'],
+              subject: '⚠️ QuickBooks Connection Failing',
+              body: `<p style="font-family:Arial,sans-serif;color:#c00;font-weight:bold;">QuickBooks connection is failing (status ${err.response?.status ?? 'n/a'}).</p><p style="font-family:Arial,sans-serif;">${msg.split('\n\n').join('</p><p style="font-family:Arial,sans-serif;">')}</p>`,
+            }),
+          ]);
+        }
+      }
+    },
   },
   {
     // 6 AM daily — overnight SA activity report emailed to Michael
