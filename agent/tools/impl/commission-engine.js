@@ -66,6 +66,8 @@ const LOOKBACK_DAYS = 400;          // covers a first-year maintenance/snow cont
 const RENEWAL_LOOKBACK_START = 800; // window (days ago) to search for a plausible prior-year contract
 const RENEWAL_LOOKBACK_END = 300;
 const SELF_PERFORMED_BILL_WINDOW_DAYS = 45; // sub bills usually arrive well before the job is invoiced
+const JOB_MATCH_WINDOW_DAYS = 45; // sa_jobs.invoice_id is often still the placeholder for recently-completed jobs; a job completed within this many days of the invoice is treated as its likely source
+const SA_EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
 
 const FREQUENCY_MULTIPLIER = {
   weekly: 52,
@@ -220,14 +222,81 @@ async function fetchJobDetails(job) {
   };
 }
 
+// SA raw payloads use M/D/YYYY (no leading zeros) rather than ISO — e.g. sa_jobs.raw_json.EndDate.
+function parseSaDate(mdy) {
+  if (!mdy) return null;
+  const [m, d, y] = mdy.split('/').map(Number);
+  if (!m || !d || !y) return null;
+  return new Date(Date.UTC(y, m - 1, d));
+}
+
+// ── Job-level PM attribution (2026-07-30) ───────────────────────────────────
+// sa_jobs carries a real, per-job SalesRep in raw_json (the flattened
+// sales_rep COLUMN isn't populated by the current sync — a separate mapping
+// gap, worth fixing in the sync script itself) reflecting who actually
+// owns/sold that specific service ticket. This is ground truth where it
+// exists, unlike the estimate-date heuristic below, which has now been caught
+// picking the wrong estimate twice (Celia Shaughnessy, Lori Pegelow) when a
+// client has multiple people quoting different work over time — a multi-line
+// estimate invoiced incrementally over months, or a second estimate for
+// unrelated work, both defeat pure date-proximity matching. Confirmed this
+// field is NEVER populated for jobs generated under a signed recurring
+// contract (0 of 155 real job records on an active maintenance contract) —
+// nobody "sells" each individual recurring visit — so this only applies to
+// self_performed (non-contract) jobs; contract jobs still rely on the
+// estimate scrape, since no per-visit signal exists there at all.
+async function findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate }) {
+  // Exact match: sa_jobs.invoice_id already backfilled to this specific invoice.
+  const { data: exactRows, error: exactError } = await fleetops
+    .from('sa_jobs')
+    .select('raw_json')
+    .eq('invoice_id', invoiceSaId);
+  if (exactError) { logger.warn('findJobLevelSalesRep exact lookup failed', { err: exactError.message }); return null; }
+  const exactReps = [...new Set((exactRows ?? []).map(r => r.raw_json?.SalesRep).filter(Boolean))];
+  if (exactReps.length === 1) return { employeeName: exactReps[0], confidence: 'job_confirmed' };
+  if (exactReps.length > 1) {
+    logger.warn('findJobLevelSalesRep: exact invoice match has conflicting sales reps — not guessing', { invoiceSaId, exactReps });
+    return null;
+  }
+
+  // sa_jobs.invoice_id is frequently still SA's null-GUID placeholder for
+  // recently-completed jobs — captured by the sync before SA backfills the
+  // real invoice link (see the sa_jobs staleness note elsewhere in this
+  // codebase). Fall back to the same customer's placeholder-invoice jobs
+  // within a tight window of the invoice date.
+  if (!saClientId || !invoiceDate) return null;
+  const { data: candidateRows, error: candidateError } = await fleetops
+    .from('sa_jobs')
+    .select('raw_json')
+    .eq('customer_id', saClientId)
+    .eq('invoice_id', SA_EMPTY_GUID);
+  if (candidateError) { logger.warn('findJobLevelSalesRep fuzzy lookup failed', { err: candidateError.message }); return null; }
+
+  const invoiceDateMs = new Date(invoiceDate + 'T00:00:00Z').getTime();
+  const windowMs = JOB_MATCH_WINDOW_DAYS * 86400000;
+  const nearbyReps = [...new Set(
+    (candidateRows ?? [])
+      .map(r => r.raw_json)
+      .filter(j => j?.SalesRep)
+      .map(j => ({ salesRep: j.SalesRep, endDate: parseSaDate(j.EndDate) }))
+      .filter(j => j.endDate && Math.abs(invoiceDateMs - j.endDate.getTime()) <= windowMs)
+      .map(j => j.salesRep)
+  )];
+  if (nearbyReps.length === 1) return { employeeName: nearbyReps[0], confidence: 'job_fuzzy_matched' };
+  // Zero or multiple distinct reps nearby — no coverage, or genuinely ambiguous.
+  // Either way, don't guess; fall through to the (lower-confidence) estimate scrape.
+  return null;
+}
+
 // ── PM attribution ─────────────────────────────────────────────
 // Priority: assignment tied to this specific invoice > this contract > this
-// client > scraped from the client's original accepted estimate. Ordered by
+// client > job-level SalesRep (self_performed only, see findJobLevelSalesRep)
+// > scraped from the client's original accepted estimate. Ordered by
 // assigned_at desc within the manual tiers so a reassignment (a second row,
 // not an edit to the first — the table is append-only by design) resolves to
-// the latest one; a later manual row always outranks a scraped one since the
-// scraped fallback only runs when no assignment row exists yet at all.
-async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate }) {
+// the latest one; a later manual row always outranks an auto-detected one
+// since both auto-detect paths only run when no assignment row exists yet.
+async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, isContractJob }) {
   const attempts = [
     invoiceSaId && ['sa_invoice_sa_id', invoiceSaId],
     contractId  && ['sa_contract_id', contractId],
@@ -246,9 +315,26 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate }) 
     if (data?.employee_name) return data.employee_name;
   }
 
-  // No manual assignment exists for this specific job yet — scrape the rep off
-  // the estimate that actually preceded (and could plausibly have won) THIS
-  // job, not just "whichever estimate is most recent for the client overall."
+  // No manual assignment exists yet — try real job-level data before falling
+  // back to guessing off an estimate. Contract jobs skip this entirely (no
+  // per-visit signal exists there — see findJobLevelSalesRep).
+  if (!isContractJob && invoiceSaId) {
+    const jobLevel = await findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate: earliestDate });
+    if (jobLevel?.employeeName) {
+      const { error: insertError } = await fleetops.from('pm_job_assignments').insert({
+        sa_invoice_sa_id: invoiceSaId,
+        employee_name: jobLevel.employeeName,
+        source: 'sa_signal',
+        notes: `Matched from sa_jobs.raw_json.SalesRep (${jobLevel.confidence})`,
+      });
+      if (insertError) logger.warn('pm_job_assignments job-level insert failed', { err: insertError.message });
+      return jobLevel.employeeName;
+    }
+  }
+
+  // No job-level signal either — scrape the rep off the estimate that
+  // actually preceded (and could plausibly have won) THIS job, not just
+  // "whichever estimate is most recent for the client overall."
   // Fixed 2026-07-29 after a real misattribution: Sterling Pharma's March 2026
   // maintenance contract (won by Michael Reardon, per estimate #4975) got
   // attributed to Jarrett Bruce because a LATER, unrelated May estimate
@@ -437,6 +523,7 @@ export async function runCommissionEngine({ quarter } = {}) {
       contractId: job.contractId,
       invoiceSaId: job.invoiceSaId,
       earliestDate: job.earliestDate,
+      isContractJob: job.category === 'maintenance_snow',
     });
     if (!employeeName) {
       results.skippedNoPM++;
