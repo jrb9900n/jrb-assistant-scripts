@@ -245,14 +245,23 @@ function parseSaDate(mdy) {
 // nobody "sells" each individual recurring visit — so this only applies to
 // self_performed (non-contract) jobs; contract jobs still rely on the
 // estimate scrape, since no per-visit signal exists there at all.
-async function findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate }) {
+// fuzzyCandidateCache: Map<saClientId, Array<{salesRep, endDate}>>, one query
+// per customer per run instead of one per invoice — a company-wide scan calls
+// this for every self_performed job, and without caching, a customer with
+// several invoices this quarter re-fetched and re-parsed the same full job
+// history once per invoice (confirmed a real memory/latency cost, not just
+// theoretical, on a run that OOM'd — this codebase already runs on a
+// memory-constrained shared machine). Also select only the two jsonb fields
+// actually used instead of the whole raw_json blob (which carries dozens of
+// unused fields per job), cutting transferred/retained payload further.
+async function findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate, fuzzyCandidateCache }) {
   // Exact match: sa_jobs.invoice_id already backfilled to this specific invoice.
   const { data: exactRows, error: exactError } = await fleetops
     .from('sa_jobs')
-    .select('raw_json')
+    .select('sales_rep:raw_json->>SalesRep')
     .eq('invoice_id', invoiceSaId);
   if (exactError) { logger.warn('findJobLevelSalesRep exact lookup failed', { err: exactError.message }); return null; }
-  const exactReps = [...new Set((exactRows ?? []).map(r => r.raw_json?.SalesRep).filter(Boolean))];
+  const exactReps = [...new Set((exactRows ?? []).map(r => r.sales_rep).filter(Boolean))];
   if (exactReps.length === 1) return { employeeName: exactReps[0], confidence: 'job_confirmed' };
   if (exactReps.length > 1) {
     logger.warn('findJobLevelSalesRep: exact invoice match has conflicting sales reps — not guessing', { invoiceSaId, exactReps });
@@ -265,21 +274,31 @@ async function findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate }) {
   // codebase). Fall back to the same customer's placeholder-invoice jobs
   // within a tight window of the invoice date.
   if (!saClientId || !invoiceDate) return null;
-  const { data: candidateRows, error: candidateError } = await fleetops
-    .from('sa_jobs')
-    .select('raw_json')
-    .eq('customer_id', saClientId)
-    .eq('invoice_id', SA_EMPTY_GUID);
-  if (candidateError) { logger.warn('findJobLevelSalesRep fuzzy lookup failed', { err: candidateError.message }); return null; }
+
+  let candidates = fuzzyCandidateCache?.get(saClientId);
+  if (candidates === undefined) {
+    const { data: candidateRows, error: candidateError } = await fleetops
+      .from('sa_jobs')
+      .select('sales_rep:raw_json->>SalesRep, end_date:raw_json->>EndDate')
+      .eq('customer_id', saClientId)
+      .eq('invoice_id', SA_EMPTY_GUID);
+    if (candidateError) {
+      logger.warn('findJobLevelSalesRep fuzzy lookup failed', { err: candidateError.message });
+      candidates = [];
+    } else {
+      candidates = (candidateRows ?? [])
+        .filter(r => r.sales_rep)
+        .map(r => ({ salesRep: r.sales_rep, endDate: parseSaDate(r.end_date) }))
+        .filter(r => r.endDate);
+    }
+    fuzzyCandidateCache?.set(saClientId, candidates);
+  }
 
   const invoiceDateMs = new Date(invoiceDate + 'T00:00:00Z').getTime();
   const windowMs = JOB_MATCH_WINDOW_DAYS * 86400000;
   const nearbyReps = [...new Set(
-    (candidateRows ?? [])
-      .map(r => r.raw_json)
-      .filter(j => j?.SalesRep)
-      .map(j => ({ salesRep: j.SalesRep, endDate: parseSaDate(j.EndDate) }))
-      .filter(j => j.endDate && Math.abs(invoiceDateMs - j.endDate.getTime()) <= windowMs)
+    candidates
+      .filter(j => Math.abs(invoiceDateMs - j.endDate.getTime()) <= windowMs)
       .map(j => j.salesRep)
   )];
   if (nearbyReps.length === 1) return { employeeName: nearbyReps[0], confidence: 'job_fuzzy_matched' };
@@ -296,7 +315,7 @@ async function findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate }) {
 // not an edit to the first — the table is append-only by design) resolves to
 // the latest one; a later manual row always outranks an auto-detected one
 // since both auto-detect paths only run when no assignment row exists yet.
-async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, isContractJob }) {
+async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, isContractJob, fuzzyCandidateCache }) {
   const attempts = [
     invoiceSaId && ['sa_invoice_sa_id', invoiceSaId],
     contractId  && ['sa_contract_id', contractId],
@@ -319,7 +338,7 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
   // back to guessing off an estimate. Contract jobs skip this entirely (no
   // per-visit signal exists there — see findJobLevelSalesRep).
   if (!isContractJob && invoiceSaId) {
-    const jobLevel = await findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate: earliestDate });
+    const jobLevel = await findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate: earliestDate, fuzzyCandidateCache });
     if (jobLevel?.employeeName) {
       const { error: insertError } = await fleetops.from('pm_job_assignments').insert({
         sa_invoice_sa_id: invoiceSaId,
@@ -517,6 +536,10 @@ export async function runCommissionEngine({ quarter } = {}) {
     unassignedJobs: [], unplannedJobs: [], processingErrors: [],
   };
 
+  // One sa_jobs fetch per customer for the whole run, not per invoice — see
+  // findJobLevelSalesRep.
+  const fuzzyCandidateCache = new Map();
+
   for (const job of allJobs) {
     const employeeName = await resolvePM({
       saClientId: job.saClientId,
@@ -524,6 +547,7 @@ export async function runCommissionEngine({ quarter } = {}) {
       invoiceSaId: job.invoiceSaId,
       earliestDate: job.earliestDate,
       isContractJob: job.category === 'maintenance_snow',
+      fuzzyCandidateCache,
     });
     if (!employeeName) {
       results.skippedNoPM++;
