@@ -506,6 +506,58 @@ function extractPlaceholders(text) {
   return [...new Set(matches || [])];
 }
 
+// SA's ScheduledWork response gives StartDate/EndDate/DateCompleted as "M/D/YYYY" strings
+function parseSaMdy(s) {
+  if (!s) return null;
+  const [m, d, y] = String(s).split('/').map(Number);
+  if (!m || !d || !y) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+// Maps a raw ScheduledWorkWs.asmx/Query item to the sa_jobs table schema (fleetops Supabase)
+function mapScheduledWorkItem(item) {
+  const now = new Date().toISOString();
+  return {
+    id: item.ID,
+    start_date: parseSaMdy(item.StartDate),
+    customer_id: item.CustomerID || null,
+    invoice_id: item.InvoiceID || null,
+    client: item.Client || '',
+    address: item.Address || null,
+    city: item.City || null,
+    state: item.State || null,
+    zip: item.Zip || null,
+    service: item.Service || null,
+    assigned: item.Assigned || null,
+    assigned_resource_id: item.AssignedResourceID || null,
+    sales_rep: item.SalesRep || null,
+    end_date: parseSaMdy(item.EndDate),
+    start_time: item.StartTime || null,
+    end_time: item.EndTime || null,
+    date_completed: parseSaMdy(item.DateCompleted),
+    completed_username: item.CompletedUsername || null,
+    status: item.Status ?? null,
+    sub_status: item.SubStatus || null,
+    priority: item.Priority ?? null,
+    schedule_type: item.ScheduleType || null,
+    is_rescheduled: !!item.IsRescheduled,
+    amount: item.Amount ?? null,
+    rate: item.Rate ?? null,
+    hours: item.Hours ?? null,
+    total_man_hours: item.TotalManHours ?? null,
+    budgeted_hours: item.BudgetedHours ?? null,
+    latitude: item.Latitude ?? null,
+    longitude: item.Longitude ?? null,
+    internal_scheduling_notes: item.InternalSchedulingNotes || null,
+    has_route_sheet_notes: !!item.HasRouteSheetNotes,
+    has_comments: !!item.HasComments,
+    job_comments: item.JobComments || [],
+    raw_json: item,
+    first_seen_at: now,
+    last_synced_at: now,
+  };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /** Returns the epoch ms timestamp when the Incapsula backoff clears (0 if not active). */
@@ -1663,6 +1715,83 @@ export async function syncWaitingList() {
   else logger.info('SA syncWaitingList complete', { returned: items.length, upserted, pruned: pruned ?? 0 });
 
   return { synced: upserted, pruned: pruned ?? 0, extractedAt: today.toISOString() };
+}
+
+/**
+ * Pull the SA dispatch board's ScheduledWork for a date range and upsert to sa_jobs
+ * (fleetops Supabase). Unlike syncWaitingList, this never prunes — sa_jobs is a
+ * historical record (invoiced/completed jobs must persist), not a live snapshot.
+ */
+export async function syncScheduledWork({ startDate, endDate }) {
+  // Date-only strings ("2026-07-01") parse as UTC midnight — normalize to local noon first
+  // so a Central-time host doesn't read the range back as shifted a day earlier.
+  const normalizeDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? new Date(`${d}T12:00:00`) : d;
+  const start = toSaBrowserDate(normalizeDate(startDate));
+  const end   = toSaBrowserDate(normalizeDate(endDate));
+  const isMulti = !(start.Month === end.Month && start.Day === end.Day && start.Year === end.Year);
+
+  const body = {
+    OnNewDispatchBoard: true,
+    QueryData: {
+      IsWaitingList: false,
+      StartDate: start, EndDate: end,
+      ServiceIDs: [], CrewIDs: [], CustomFields: [], Divisions: [],
+      Tags: [], TicketTypes: [], DOW: -1,
+      DispatchID: EMPTY_GUID, DispatchedOnly: false, FilterProximity: false,
+      IncludeUnassignedWork: false, IsCloseOutDay: false, IsSnow: false,
+      LoadAppointmentTimes: false, MapCode: '', MapCodeOperator: '0', MultiDay: isMulti,
+      Priority: '0', ProximityAddress: '', ProximityMiles: '5.00',
+      ResourceID: 1, ResourceTags: '', ScheduleStatus: '0',
+      ScreenViewID: EMPTY_GUID, ShowProductTotals: true, UseMinDays: true,
+      Address: '', City: '', Client: '', Zip: '',
+    },
+  };
+
+  const res = await post('/WebServices/ScheduledWorkWs.asmx/Query', body, 'DispatchBoard.aspx');
+  const items = res.data?.d?.ScheduledItems || res.data?.ScheduledItems || [];
+  logger.info('SA syncScheduledWork: fetched from SA', { count: items.length, startDate, endDate });
+
+  if (items.length === 0) return { synced: 0 };
+
+  // start_date is half of the upsert's dedup key (id, start_date) — a null here means
+  // re-syncing the same item creates a duplicate row instead of updating it.
+  const skipped = items.filter(item => !parseSaMdy(item.StartDate)).length;
+  if (skipped > 0) logger.warn('SA syncScheduledWork: dropping items with unparseable StartDate', { skipped });
+  const records = items.filter(item => parseSaMdy(item.StartDate)).map(mapScheduledWorkItem);
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const db = createClient(
+    'https://mzywmgesulyalevtzudw.supabase.co',
+    process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+  );
+
+  const BATCH = 500;
+
+  // Preserve the true first_seen_at for rows that already exist — an upsert otherwise
+  // resets it to "now" on every re-sync.
+  const keys = records.map(r => `and(id.eq.${r.id},start_date.eq.${r.start_date})`);
+  const existingFirstSeen = new Map();
+  for (let i = 0; i < keys.length; i += BATCH) {
+    const { data, error } = await db
+      .from('sa_jobs')
+      .select('id, start_date, first_seen_at')
+      .or(keys.slice(i, i + BATCH).join(','));
+    if (error) throw new Error(`syncScheduledWork first_seen_at lookup: ${error.message}`);
+    for (const row of data || []) existingFirstSeen.set(`${row.id}|${row.start_date}`, row.first_seen_at);
+  }
+  for (const r of records) {
+    const existing = existingFirstSeen.get(`${r.id}|${r.start_date}`);
+    if (existing) r.first_seen_at = existing;
+  }
+
+  let upserted = 0;
+  for (let i = 0; i < records.length; i += BATCH) {
+    const { error } = await db.from('sa_jobs').upsert(records.slice(i, i + BATCH), { onConflict: 'id,start_date' });
+    if (error) throw new Error(`syncScheduledWork upsert batch ${i}: ${error.message}`);
+    upserted += Math.min(BATCH, records.length - i);
+  }
+  logger.info('SA syncScheduledWork complete', { returned: items.length, upserted, skipped });
+  return { synced: upserted, skipped };
 }
 
 /**
