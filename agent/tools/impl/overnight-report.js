@@ -100,8 +100,50 @@ function extractEstimate(e) {
 //   isn't on the waiting list or upcoming dispatch. The 45-day window prevents
 //   old completed estimates from flooding the list.
 
+// sa_accepted_estimates.resolved_at is never written anywhere else — this backlog
+// otherwise grows unbounded (2,828+ rows observed, 0 ever resolved). Considers an
+// estimate resolved once its client has a later job or waiting-list entry, proving
+// the estimate actually turned into scheduled work. Uses maps instead of a nested
+// scan since sa_jobs alone runs 25k+ rows.
+async function resolveWonEstimates(db) {
+  const { data: wlRows }  = await db.from('sa_waiting_list').select('client_id, date_added').not('client_id', 'is', null);
+  const { data: jobRows } = await db.from('sa_jobs').select('customer_id, start_date').not('customer_id', 'is', null);
+  const { data: pending } = await db.from('sa_accepted_estimates')
+    .select('estimate_id, client_id, quote_date').is('resolved_at', null);
+
+  if (!pending?.length) return;
+
+  const maxJobDateByClient = new Map();
+  for (const j of jobRows || []) {
+    const prev = maxJobDateByClient.get(j.customer_id);
+    if (!prev || j.start_date > prev) maxJobDateByClient.set(j.customer_id, j.start_date);
+  }
+  const maxWlDateByClient = new Map(); // missing date_added treated as "always qualifies" via a sentinel far-future date
+  for (const w of wlRows || []) {
+    const d = w.date_added || '9999-12-31';
+    const prev = maxWlDateByClient.get(w.client_id);
+    if (!prev || d > prev) maxWlDateByClient.set(w.client_id, d);
+  }
+
+  const toResolve = pending.filter(e => {
+    const q = e.quote_date || '0000-01-01';
+    const jobDate = maxJobDateByClient.get(e.client_id);
+    const wlDate = maxWlDateByClient.get(e.client_id);
+    return (jobDate && jobDate >= q) || (wlDate && wlDate >= q);
+  }).map(e => e.estimate_id);
+
+  if (toResolve.length > 0) {
+    const { error } = await db.from('sa_accepted_estimates')
+      .update({ resolved_at: new Date().toISOString(), resolved_reason: 'matched_job_or_wl' })
+      .in('estimate_id', toResolve);
+    if (error) { logger.warn('overnight-report: resolveWonEstimates update failed', { error: error.message }); return; }
+  }
+  logger.info('overnight-report: resolved stale estimates', { count: toResolve.length });
+}
+
 async function syncWonEstimates() {
   const db = fleetops();
+  await resolveWonEstimates(db);
 
   const raw = await getEstimateList({ dateFrom: daysAgo(365), dateTo: today(), stages: ['Won'], max: 2000 });
   // Stage filter is ignored server-side — must filter client-side on QuoteStageType
