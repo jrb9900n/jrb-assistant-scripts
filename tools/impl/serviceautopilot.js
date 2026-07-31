@@ -785,7 +785,7 @@ export async function createEstimate({ clientId, title = '', lineItems = [], val
   const queryRes = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
     InputData: { ID: quoteId },
   }, 'V3Estimate.aspx');
-  const savedItems = queryRes.data?.d?.Result?.ServiceLineItems || [];
+  const savedItems = queryRes.data?.d?.ServiceLineItems || [];
 
   const returnedItems = savedItems.map((s, i) => ({
     serviceId:     s.Service?.ID || s.ID,
@@ -870,7 +870,7 @@ export async function getEstimateLineItems(quoteId) {
   const res = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
     InputData: { ID: quoteId },
   }, 'V3Estimate.aspx');
-  const items = res.data?.d?.Result?.ServiceLineItems || [];
+  const items = res.data?.d?.ServiceLineItems || [];
   return items.map(item => {
     const svc = item.Service || item;
     const rate = parseFloat(svc.Rate || 0);
@@ -897,7 +897,7 @@ export async function createJob({ clientId, quoteId, serviceIds, startDate, invo
     const liRes = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
       InputData: { ID: quoteId },
     }, 'V3Estimate.aspx');
-    const items = liRes.data?.d?.Result?.ServiceLineItems || [];
+    const items = liRes.data?.d?.ServiceLineItems || [];
     selectedIds = items.map(i => i.Service?.ID || i.ID).filter(Boolean);
   }
   if (selectedIds.length === 0) throw new Error('SA createJob: no service line items found on estimate');

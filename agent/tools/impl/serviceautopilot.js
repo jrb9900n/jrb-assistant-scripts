@@ -411,6 +411,58 @@ function extractPlaceholders(text) {
   return [...new Set(matches || [])];
 }
 
+// SA's ScheduledWork response gives StartDate/EndDate/DateCompleted as "M/D/YYYY" strings
+function parseSaMdy(s) {
+  if (!s) return null;
+  const [m, d, y] = String(s).split('/').map(Number);
+  if (!m || !d || !y) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+// Maps a raw ScheduledWorkWs.asmx/Query item to the sa_jobs table schema (fleetops Supabase)
+function mapScheduledWorkItem(item) {
+  const now = new Date().toISOString();
+  return {
+    id: item.ID,
+    start_date: parseSaMdy(item.StartDate),
+    customer_id: item.CustomerID || null,
+    invoice_id: item.InvoiceID || null,
+    client: item.Client || '',
+    address: item.Address || null,
+    city: item.City || null,
+    state: item.State || null,
+    zip: item.Zip || null,
+    service: item.Service || null,
+    assigned: item.Assigned || null,
+    assigned_resource_id: item.AssignedResourceID || null,
+    sales_rep: item.SalesRep || null,
+    end_date: parseSaMdy(item.EndDate),
+    start_time: item.StartTime || null,
+    end_time: item.EndTime || null,
+    date_completed: parseSaMdy(item.DateCompleted),
+    completed_username: item.CompletedUsername || null,
+    status: item.Status ?? null,
+    sub_status: item.SubStatus || null,
+    priority: item.Priority ?? null,
+    schedule_type: item.ScheduleType || null,
+    is_rescheduled: !!item.IsRescheduled,
+    amount: item.Amount ?? null,
+    rate: item.Rate ?? null,
+    hours: item.Hours ?? null,
+    total_man_hours: item.TotalManHours ?? null,
+    budgeted_hours: item.BudgetedHours ?? null,
+    latitude: item.Latitude ?? null,
+    longitude: item.Longitude ?? null,
+    internal_scheduling_notes: item.InternalSchedulingNotes || null,
+    has_route_sheet_notes: !!item.HasRouteSheetNotes,
+    has_comments: !!item.HasComments,
+    job_comments: item.JobComments || [],
+    raw_json: item,
+    first_seen_at: now,
+    last_synced_at: now,
+  };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /** Returns the epoch ms timestamp when the Incapsula backoff clears (0 if not active). */
@@ -785,7 +837,7 @@ export async function createEstimate({ clientId, title = '', lineItems = [], val
   const queryRes = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
     InputData: { ID: quoteId },
   }, 'V3Estimate.aspx');
-  const savedItems = queryRes.data?.d?.Result?.ServiceLineItems || [];
+  const savedItems = queryRes.data?.d?.ServiceLineItems || [];
 
   const returnedItems = savedItems.map((s, i) => ({
     serviceId:     s.Service?.ID || s.ID,
@@ -870,7 +922,7 @@ export async function getEstimateLineItems(quoteId) {
   const res = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
     InputData: { ID: quoteId },
   }, 'V3Estimate.aspx');
-  const items = res.data?.d?.Result?.ServiceLineItems || [];
+  const items = res.data?.d?.ServiceLineItems || [];
   return items.map(item => {
     const svc = item.Service || item;
     const rate = parseFloat(svc.Rate || 0);
@@ -897,7 +949,7 @@ export async function createJob({ clientId, quoteId, serviceIds, startDate, invo
     const liRes = await post('/WebServices/QuoteWs.asmx/QueryLineItems', {
       InputData: { ID: quoteId },
     }, 'V3Estimate.aspx');
-    const items = liRes.data?.d?.Result?.ServiceLineItems || [];
+    const items = liRes.data?.d?.ServiceLineItems || [];
     selectedIds = items.map(i => i.Service?.ID || i.ID).filter(Boolean);
   }
   if (selectedIds.length === 0) throw new Error('SA createJob: no service line items found on estimate');
@@ -1564,6 +1616,58 @@ export async function syncWaitingList() {
   else logger.info('SA syncWaitingList complete', { returned: items.length, upserted, pruned: pruned ?? 0 });
 
   return { synced: upserted, pruned: pruned ?? 0, extractedAt: today.toISOString() };
+}
+
+/**
+ * Pull the SA dispatch board's ScheduledWork for a date range and upsert to sa_jobs
+ * (fleetops Supabase). Unlike syncWaitingList, this never prunes — sa_jobs is a
+ * historical record (invoiced/completed jobs must persist), not a live snapshot.
+ */
+export async function syncScheduledWork({ startDate, endDate }) {
+  const start = toSaBrowserDate(startDate);
+  const end   = toSaBrowserDate(endDate);
+  const isMulti = !(start.Month === end.Month && start.Day === end.Day && start.Year === end.Year);
+
+  const body = {
+    OnNewDispatchBoard: true,
+    QueryData: {
+      IsWaitingList: false,
+      StartDate: start, EndDate: end,
+      ServiceIDs: [], CrewIDs: [], CustomFields: [], Divisions: [],
+      Tags: [], TicketTypes: [], DOW: -1,
+      DispatchID: EMPTY_GUID, DispatchedOnly: false, FilterProximity: false,
+      IncludeUnassignedWork: false, IsCloseOutDay: false, IsSnow: false,
+      LoadAppointmentTimes: false, MapCode: '', MapCodeOperator: '0', MultiDay: isMulti,
+      Priority: '0', ProximityAddress: '', ProximityMiles: '5.00',
+      ResourceID: 1, ResourceTags: '', ScheduleStatus: '0',
+      ScreenViewID: EMPTY_GUID, ShowProductTotals: true, UseMinDays: true,
+      Address: '', City: '', Client: '', Zip: '',
+    },
+  };
+
+  const res = await post('/WebServices/ScheduledWorkWs.asmx/Query', body, 'DispatchBoard.aspx');
+  const items = res.data?.d?.ScheduledItems || res.data?.ScheduledItems || [];
+  logger.info('SA syncScheduledWork: fetched from SA', { count: items.length, startDate, endDate });
+
+  if (items.length === 0) return { synced: 0 };
+
+  const records = items.map(mapScheduledWorkItem);
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const db = createClient(
+    'https://mzywmgesulyalevtzudw.supabase.co',
+    process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+  );
+
+  const BATCH = 500;
+  let upserted = 0;
+  for (let i = 0; i < records.length; i += BATCH) {
+    const { error } = await db.from('sa_jobs').upsert(records.slice(i, i + BATCH), { onConflict: 'id,start_date' });
+    if (error) throw new Error(`syncScheduledWork upsert batch ${i}: ${error.message}`);
+    upserted += Math.min(BATCH, records.length - i);
+  }
+  logger.info('SA syncScheduledWork complete', { returned: items.length, upserted });
+  return { synced: upserted };
 }
 
 /**
