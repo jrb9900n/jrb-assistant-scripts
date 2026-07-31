@@ -2,6 +2,7 @@
 // Reuses the refresh pattern from the existing AuditMatchingEngine project.
 
 import axios from 'axios';
+import { createHash } from 'crypto';
 import { cacheGet, cacheSet } from '../../memory/memory.js';
 import { logger } from '../../core/logger.js';
 import { getQBAccessToken } from './qb-token.js';
@@ -18,8 +19,21 @@ const getToken = getQBAccessToken;
  * @param {string} opts.query - e.g. "SELECT * FROM Invoice STARTPOSITION 1 MAXRESULTS 100"
  */
 export async function query({ query: qStr }) {
-  // Cache check — avoids re-hitting QB on every scheduler tick
-  const cacheKey = `qb:${Buffer.from(qStr).toString('base64').slice(0, 60)}`;
+  // Cache check — avoids re-hitting QB on every scheduler tick.
+  // Fixed 2026-07-31: a real bug, not just today's symptom — the old key
+  // (base64(qStr).slice(0, 60)) only captures the first ~45 bytes of the
+  // query string. Any two queries sharing that prefix collide on the same
+  // cache key, e.g. every page of a paginated query differing only in
+  // STARTPOSITION near the END of the string (STARTPOSITION for
+  // getVendorBillsForPeriod's Bill query sits ~90 characters in — the whole
+  // discriminating part was being silently dropped). This caused every
+  // "page" of that query to replay the cached page-1 result from Supabase's
+  // agent_cache (1hr TTL) for up to an hour, and the pagination loop never
+  // saw page.length < PAGE_SIZE, so it looped until the process ran out of
+  // heap concatenating the same 300 bills over and over. Hashing the whole
+  // query string (not just its first 60 base64 chars) guarantees distinct
+  // queries never share a key, regardless of where they differ.
+  const cacheKey = `qb:${createHash('sha256').update(qStr).digest('hex')}`;
   const cached = await cacheGet(cacheKey);
   if (cached) {
     logger.debug('QB cache hit', { query: qStr.slice(0, 60) });
@@ -310,8 +324,21 @@ export async function createQBCCSubAccount(employeeName, lastFour) {
  */
 export async function getVendorBillsForPeriod(startDate, endDate) {
   const PAGE_SIZE = 300;
+  // Defensive cap — this loop previously ran unbounded (crashed the process
+  // with an OOM) when a cache-key collision made every "page" replay the same
+  // cached first page forever, so page.length < PAGE_SIZE never fired. That
+  // root cause is fixed (see query()'s cache key), but this is real vendor
+  // bill volume for one company; there's no legitimate scenario needing more
+  // than this many pages, so bail loudly rather than risk the same failure
+  // mode again from some other cause.
+  const MAX_PAGES = 100;
   let bills = [];
+  let pageCount = 0;
   for (let start = 1; ; start += PAGE_SIZE) {
+    if (++pageCount > MAX_PAGES) {
+      logger.warn('getVendorBillsForPeriod: hit MAX_PAGES safety cap, stopping', { startDate, endDate, billsSoFar: bills.length });
+      break;
+    }
     const q = `SELECT * FROM Bill WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
     const res = await query({ query: q });
     const page = res?.Bill ?? [];
