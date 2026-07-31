@@ -116,7 +116,7 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const targetQuarter = quarter || currentQuarter();
   const result = engineResult || await runCommissionEngine({ quarter: targetQuarter });
 
-  const [payableResult, accruedResult, renewalPendingResult, quarterLedgerIdsResult] = await Promise.all([
+  const [payableResult, accruedResult, renewalPendingResult, quarterLedgerIdsResult, unconfirmedPmResult] = await Promise.all([
     fleetops.from('commission_ledger').select('*').eq('quarter', targetQuarter).gt('payable_commission', 0).order('employee_name'),
     fleetops.from('commission_ledger').select('*').eq('quarter', targetQuarter).gt('accrued_commission', 0).order('employee_name'),
     fleetops.from('commission_ledger').select('*').eq('quarter', targetQuarter).eq('renewal_flag', true).is('renewal_confirmed', null),
@@ -124,11 +124,16 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
     // legitimately be $0/$0 (already accrued earlier, no new cash this run) and
     // still have a real unconfirmed subcontractor flag that needs surfacing.
     fleetops.from('commission_ledger').select('id, client_name, employee_name, service_names').eq('quarter', targetQuarter),
+    // pm_attribution_confirmed=false rows have cash withheld regardless of
+    // dollar amount (same reasoning as the subcontractor flags above) — surface
+    // every one, not just rows with a nonzero payable this run.
+    fleetops.from('commission_ledger').select('*').eq('quarter', targetQuarter).eq('pm_attribution_confirmed', false),
   ]);
 
   for (const [label, r] of [
     ['payable', payableResult], ['accrued', accruedResult],
     ['renewalPending', renewalPendingResult], ['quarterLedgerIds', quarterLedgerIdsResult],
+    ['unconfirmedPm', unconfirmedPmResult],
   ]) {
     if (r.error) throw new Error(`generateCommissionReport ${label} query failed: ${r.error.message}`);
   }
@@ -137,6 +142,7 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const accruedRows = accruedResult.data ?? [];
   const renewalPending = renewalPendingResult.data ?? [];
   const quarterLedger = quarterLedgerIdsResult.data ?? [];
+  const unconfirmedPmRows = unconfirmedPmResult.data ?? [];
 
   const [unconfirmedFlagsResult, unconfirmedLinesResult] = quarterLedger.length
     ? await Promise.all([
@@ -167,6 +173,7 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
 
   const reviewItems = [
     ...renewalPending.map(r => `${clientLabel(r) ?? r.sa_reference} — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
+    ...unconfirmedPmRows.map(r => `${clientLabel(r) ?? r.sa_reference} — PM attribution is a best-effort guess (no direct job or manual record confirms ${r.employee_name} sold this) — commission is accruing but payable is withheld until confirmed`),
     ...relevantFlags.map(f => {
       const ledger = ledgerById.get(f.ledger_id);
       return `${clientLabel(ledger)} — candidate subcontractor bill: ${f.vendor_name ?? 'unknown vendor'}, ${f$(f.bill_amount)} on ${f.bill_date} (${f.match_confidence} confidence) — confirm before applying the 20% GP cap`;
