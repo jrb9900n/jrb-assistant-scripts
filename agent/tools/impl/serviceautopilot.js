@@ -1628,8 +1628,11 @@ export async function syncWaitingList() {
  * historical record (invoiced/completed jobs must persist), not a live snapshot.
  */
 export async function syncScheduledWork({ startDate, endDate }) {
-  const start = toSaBrowserDate(startDate);
-  const end   = toSaBrowserDate(endDate);
+  // Date-only strings ("2026-07-01") parse as UTC midnight — normalize to local noon first
+  // so a Central-time host doesn't read the range back as shifted a day earlier.
+  const normalizeDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? new Date(`${d}T12:00:00`) : d;
+  const start = toSaBrowserDate(normalizeDate(startDate));
+  const end   = toSaBrowserDate(normalizeDate(endDate));
   const isMulti = !(start.Month === end.Month && start.Day === end.Day && start.Year === end.Year);
 
   const body = {
@@ -1655,7 +1658,11 @@ export async function syncScheduledWork({ startDate, endDate }) {
 
   if (items.length === 0) return { synced: 0 };
 
-  const records = items.map(mapScheduledWorkItem);
+  // start_date is half of the upsert's dedup key (id, start_date) — a null here means
+  // re-syncing the same item creates a duplicate row instead of updating it.
+  const skipped = items.filter(item => !parseSaMdy(item.StartDate)).length;
+  if (skipped > 0) logger.warn('SA syncScheduledWork: dropping items with unparseable StartDate', { skipped });
+  const records = items.filter(item => parseSaMdy(item.StartDate)).map(mapScheduledWorkItem);
 
   const { createClient } = await import('@supabase/supabase-js');
   const db = createClient(
@@ -1664,14 +1671,32 @@ export async function syncScheduledWork({ startDate, endDate }) {
   );
 
   const BATCH = 500;
+
+  // Preserve the true first_seen_at for rows that already exist — an upsert otherwise
+  // resets it to "now" on every re-sync.
+  const keys = records.map(r => `and(id.eq.${r.id},start_date.eq.${r.start_date})`);
+  const existingFirstSeen = new Map();
+  for (let i = 0; i < keys.length; i += BATCH) {
+    const { data, error } = await db
+      .from('sa_jobs')
+      .select('id, start_date, first_seen_at')
+      .or(keys.slice(i, i + BATCH).join(','));
+    if (error) throw new Error(`syncScheduledWork first_seen_at lookup: ${error.message}`);
+    for (const row of data || []) existingFirstSeen.set(`${row.id}|${row.start_date}`, row.first_seen_at);
+  }
+  for (const r of records) {
+    const existing = existingFirstSeen.get(`${r.id}|${r.start_date}`);
+    if (existing) r.first_seen_at = existing;
+  }
+
   let upserted = 0;
   for (let i = 0; i < records.length; i += BATCH) {
     const { error } = await db.from('sa_jobs').upsert(records.slice(i, i + BATCH), { onConflict: 'id,start_date' });
     if (error) throw new Error(`syncScheduledWork upsert batch ${i}: ${error.message}`);
     upserted += Math.min(BATCH, records.length - i);
   }
-  logger.info('SA syncScheduledWork complete', { returned: items.length, upserted });
-  return { synced: upserted };
+  logger.info('SA syncScheduledWork complete', { returned: items.length, upserted, skipped });
+  return { synced: upserted, skipped };
 }
 
 /**
