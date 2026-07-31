@@ -3,6 +3,7 @@
 // Session cookies are cached in-process for 4 hours to avoid repeated browser launches.
 
 import fs from 'fs';
+import net from 'net';
 import { fileURLToPath } from 'url';
 import { logger } from '../../core/logger.js';
 
@@ -218,6 +219,27 @@ async function getSession(force = false) {
   return _loginPromise;
 }
 
+// Parses SA_PROXY_URL (http://user:pass@host:port) once, shared by login() (which
+// launches Chromium through it) and checkProxyHealth() (which probes it directly) —
+// so both agree on what "the proxy" means instead of drifting apart over time.
+function parseProxyUrl(proxyUrl) {
+  if (!proxyUrl) return null;
+  try {
+    const u = new URL(proxyUrl);
+    const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+    return {
+      hostname: u.hostname,
+      port,
+      server: `${u.protocol}//${u.host}`,
+      auth: u.username
+        ? { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) }
+        : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function login() {
   readSharedBackoff();
   if (Date.now() < _incapsulaBackoffUntil) {
@@ -244,22 +266,14 @@ async function login() {
 
   // Residential proxy support — set SA_PROXY_URL=http://user:pass@host:port to bypass Incapsula IP blocks
   const proxyUrl = process.env.SA_PROXY_URL || '';
-  let proxyArg  = null;
-  let proxyAuth = null;
-  if (proxyUrl) {
-    try {
-      const u = new URL(proxyUrl);
-      proxyArg  = `${u.protocol}//${u.host}`;
-      if (u.username) proxyAuth = { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) };
-      logger.info('SA: using residential proxy', { server: proxyArg });
-    } catch {
-      logger.warn('SA: SA_PROXY_URL is malformed — launching without proxy', { url: proxyUrl });
-    }
-  }
+  const proxy = parseProxyUrl(proxyUrl);
+  if (proxyUrl && !proxy) logger.warn('SA: SA_PROXY_URL is malformed — launching without proxy', { url: proxyUrl });
+  if (proxy) logger.info('SA: using residential proxy', { server: proxy.server });
+  const proxyAuth = proxy?.auth || null;
 
   puppeteerExtra.use(StealthPlugin());
   const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'];
-  if (proxyArg) launchArgs.push(`--proxy-server=${proxyArg}`);
+  if (proxy) launchArgs.push(`--proxy-server=${proxy.server}`);
   const browser = await puppeteerExtra.launch({
     executablePath,
     headless: true,
@@ -306,6 +320,87 @@ async function login() {
     await browser.close();
     throw err;
   }
+}
+
+// ── Proxy health probe ───────────────────────────────────────────────────────
+// window.fetch() inside the browser collapses every network failure — proxy
+// auth rejection, exhausted bandwidth, DNS, TLS — into the same generic
+// "Failed to fetch" TypeError, by design (the Fetch spec hides the reason
+// from page JS). That makes SA outages undiagnosable from the alert alone.
+// This probes the proxy directly via a raw CONNECT tunnel, bypassing the
+// browser, so a real proxy-layer status (e.g. 407) can be surfaced.
+//
+// Known limitation: this only confirms the CONNECT handshake succeeds, not
+// that the tunnel actually carries traffic afterward. Some proxy plans
+// (including Webshare's Static Residential fair-use policy) throttle data
+// AFTER a successful CONNECT rather than rejecting it outright — that failure
+// mode would read as "ok: true" here. Treat a healthy result as "the proxy
+// accepted the connection," not "the proxy is definitely fine end-to-end."
+export async function checkProxyHealth(timeoutMs = 15000) {
+  readSharedBackoff();
+  if (Date.now() < _incapsulaBackoffUntil) {
+    const remainingMin = Math.ceil((_incapsulaBackoffUntil - Date.now()) / 60000);
+    return { checked: false, detail: `skipped — Incapsula backoff already active (${remainingMin} min remaining)` };
+  }
+
+  const proxyUrl = process.env.SA_PROXY_URL || '';
+  if (!proxyUrl) return { checked: false, detail: 'SA_PROXY_URL not set — SA calls go direct' };
+  const proxy = parseProxyUrl(proxyUrl);
+  if (!proxy) return { checked: false, detail: 'SA_PROXY_URL is malformed' };
+  const targetHost = SA_BASE.replace(/^https?:\/\//, '');
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = '';
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { socket.destroy(); } catch {}
+      resolve(result);
+    };
+
+    const socket = net.connect({ host: proxy.hostname, port: proxy.port });
+    const timer = setTimeout(() => finish({ checked: true, ok: false, detail: 'proxy CONNECT timed out' }), timeoutMs);
+
+    socket.on('error', (err) => {
+      finish({ checked: true, ok: false, detail: `proxy connection error: ${err.message}` });
+    });
+
+    // A graceful close (no bytes ever written) doesn't raise 'error' in Node —
+    // without this, a proxy that silently drops the connection (e.g. a
+    // suspended account) would misreport as "timed out" after the full wait.
+    socket.on('close', () => {
+      finish({ checked: true, ok: false, detail: 'proxy closed the connection without responding' });
+    });
+
+    socket.on('connect', () => {
+      const authHeader = proxy.auth
+        ? `Proxy-Authorization: Basic ${Buffer.from(`${proxy.auth.username}:${proxy.auth.password}`).toString('base64')}\r\n`
+        : '';
+      socket.write(
+        `CONNECT ${targetHost}:443 HTTP/1.1\r\n` +
+        `Host: ${targetHost}:443\r\n` +
+        authHeader +
+        `Connection: close\r\n\r\n`
+      );
+    });
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      if (!buffer.includes('\r\n')) return; // status line hasn't fully arrived yet
+      const statusLine = buffer.split('\r\n')[0];
+      const match = statusLine.match(/HTTP\/\d\.\d (\d{3})/);
+      const status = match ? Number(match[1]) : null;
+      if (status === 200) {
+        finish({ checked: true, ok: true, status, detail: 'proxy accepted the connection — issue is likely SA/Incapsula, not the proxy' });
+      } else if (status === 407) {
+        finish({ checked: true, ok: false, status, detail: 'proxy rejected credentials (407) — check proxy provider account/bandwidth' });
+      } else {
+        finish({ checked: true, ok: false, status, detail: `proxy returned unexpected response: ${statusLine.trim() || '(empty)'}` });
+      }
+    });
+  });
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────

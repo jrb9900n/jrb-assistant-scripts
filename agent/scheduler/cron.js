@@ -546,7 +546,7 @@ const SCHEDULED_TASKS = [
     schedule: '*/30 * * * *',
     name: 'sa_connectivity_check',
     run: async () => {
-      const { searchClients } = await import('../tools/impl/serviceautopilot.js');
+      const { searchClients, checkProxyHealth } = await import('../tools/impl/serviceautopilot.js');
       const { sendProactiveMessage } = await import('../teams/notify.js');
       try {
         await searchClients({ name: 'APIProbe', limit: 1 });
@@ -561,7 +561,10 @@ const SCHEDULED_TASKS = [
         logger.warn('sa_connectivity_check: SA unreachable', { err: err.message });
         if (!saWasDown) {
           saWasDown = true;
-          try { await sendProactiveMessage(`⚠️ SA connectivity lost — ticket creation and CRM tools are offline.\n\nError: ${err.message.slice(0, 200)}`); } catch {}
+          const proxyHealth = await checkProxyHealth().catch(() => null);
+          const proxyNote = proxyHealth?.checked ? `\nProxy check: ${proxyHealth.detail}` : '';
+          if (proxyHealth?.checked) logger.warn('sa_connectivity_check: proxy health', proxyHealth);
+          try { await sendProactiveMessage(`⚠️ SA connectivity lost — ticket creation and CRM tools are offline.\n\nError: ${err.message.slice(0, 200)}${proxyNote}`); } catch {}
         }
       }
     },
