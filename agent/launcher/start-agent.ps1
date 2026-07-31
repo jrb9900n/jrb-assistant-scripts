@@ -84,6 +84,16 @@ if (-not (Validate-Email -Value $accountantEmail -SecretName "ACCOUNTANT_EMAIL")
     $accountantEmail = $null
 }
 
+# QB_REALM_ID was previously hardcoded here as a second source of truth
+# alongside the Credential Manager entry of the same name (they happened to
+# still agree, but a mismatch found 2026-07-30 during a QB reauth incident
+# showed this duplication is a real risk). Read from Credential Manager like
+# every other QB_* secret; keep the known-good value as a fallback only if
+# that entry is ever missing, so a Credential Manager hiccup can't silently
+# break every QB-dependent feature at startup.
+$qbRealmId = Get-Secret "QB_REALM_ID"
+if (-not $qbRealmId) { $qbRealmId = "9130357265584656" }
+
 $secrets = @{
     "ANTHROPIC_API_KEY"    = Get-Secret "ANTHROPIC_API_KEY"
     "SUPABASE_URL"         = "https://znpahinyplccdyoekfeo.supabase.co"
@@ -95,7 +105,7 @@ $secrets = @{
     "QB_CLIENT_ID"         = Get-Secret "QB_CLIENT_ID"
     "QB_CLIENT_SECRET"     = Get-Secret "QB_CLIENT_SECRET"
     "QB_REFRESH_TOKEN"     = Get-Secret "QB_REFRESH_TOKEN"
-    "QB_REALM_ID"          = "9130357265584656"
+    "QB_REALM_ID"          = $qbRealmId
     "GITHUB_TOKEN"         = Get-Secret "GITHUB_TOKEN"
     "GITHUB_USERNAME" = "jrb9900n"
     "GITHUB_REPOS"    = "jrb-assistant-scripts,FleetOps,FieldOps,AuditMatchingEngine"
