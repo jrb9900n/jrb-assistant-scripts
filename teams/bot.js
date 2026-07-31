@@ -826,6 +826,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Google Ads scheduler health check — proxy to Python webhook server ──────
+  // Reachable externally at agent.jrboehlke.com/ads-health specifically so a
+  // session-independent monitor can catch the whole local daemon stack being
+  // down (unlike the local Task Scheduler watchdogs, which require an active
+  // Windows logon and share that blind spot with the Google Ads Agent task itself).
+  if (req.method === 'GET' && url === '/ads-health') {
+    try {
+      const proxyRes = await fetch('http://localhost:8765/health');
+      const respBody = await proxyRes.arrayBuffer();
+      res.writeHead(proxyRes.status, {
+        'Content-Type': proxyRes.headers.get('content-type') || 'application/json',
+      });
+      res.end(Buffer.from(respBody));
+    } catch (err) {
+      logger.warn('Ads health proxy failed', { err: err.message });
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'unreachable', error: err.message }));
+    }
+    return;
+  }
+
   // ── Google Ads flag actions — proxy to Python webhook server on port 8765 ──
   // Handles GET (approve/reject/comment form) and POST (comment submission).
   // Exposed via the Cloudflare tunnel so buttons in email are true one-click links.

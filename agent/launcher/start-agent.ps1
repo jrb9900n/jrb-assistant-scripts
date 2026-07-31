@@ -1,4 +1,4 @@
-﻿# launcher/start-agent.ps1
+# launcher/start-agent.ps1
 $AgentDir = "C:\Users\Assistant\JRBAgent\agent"
 
 Add-Type -AssemblyName System.Security
@@ -53,6 +53,47 @@ public class CredManager {
     }
 }
 
+function Validate-Email {
+    param([string]$Value, [string]$SecretName)
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        Write-Warning "Secret '$SecretName' is missing or empty — downstream email sending will fail."
+        return $false
+    }
+    # RFC-5321-style sanity check: one '@', non-empty local and domain parts, domain has a dot
+    if ($Value -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
+        Write-Warning "Secret '$SecretName' does not look like a valid email address — downstream email sending will fail."
+        return $false
+    }
+    return $true
+}
+
+# Strip a leading BOM (U+FEFF isn't whitespace to .NET's Trim(), so it survives a
+# plain Trim() and would otherwise pass the regex above hidden inside the local
+# part) plus ordinary whitespace — this project has hit an identical BOM-in-secret
+# failure mode before (a FieldOps CI secret).
+$accountantEmail = Get-Secret "ACCOUNTANT_EMAIL"
+if ($accountantEmail) {
+    if ($accountantEmail[0] -eq [char]0xFEFF) { $accountantEmail = $accountantEmail.Substring(1) }
+    $accountantEmail = $accountantEmail.Trim()
+}
+if (-not (Validate-Email -Value $accountantEmail -SecretName "ACCOUNTANT_EMAIL")) {
+    # ACCOUNTANT_EMAIL is optional — commission-report.js already falls back to
+    # sending Michael-only plus a log warning when it's unset. This launcher runs
+    # every mode (teams/scheduler/cli), so it must not abort startup over one
+    # optional downstream feature's secret; just don't inject an invalid value.
+    $accountantEmail = $null
+}
+
+# QB_REALM_ID was previously hardcoded here as a second source of truth
+# alongside the Credential Manager entry of the same name (they happened to
+# still agree, but a mismatch found 2026-07-30 during a QB reauth incident
+# showed this duplication is a real risk). Read from Credential Manager like
+# every other QB_* secret; keep the known-good value as a fallback only if
+# that entry is ever missing, so a Credential Manager hiccup can't silently
+# break every QB-dependent feature at startup.
+$qbRealmId = Get-Secret "QB_REALM_ID"
+if (-not $qbRealmId) { $qbRealmId = "9130357265584656" }
+
 $secrets = @{
     "ANTHROPIC_API_KEY"    = Get-Secret "ANTHROPIC_API_KEY"
     "SUPABASE_URL"         = "https://znpahinyplccdyoekfeo.supabase.co"
@@ -64,7 +105,7 @@ $secrets = @{
     "QB_CLIENT_ID"         = Get-Secret "QB_CLIENT_ID"
     "QB_CLIENT_SECRET"     = Get-Secret "QB_CLIENT_SECRET"
     "QB_REFRESH_TOKEN"     = Get-Secret "QB_REFRESH_TOKEN"
-    "QB_REALM_ID"          = "9130357265584656"
+    "QB_REALM_ID"          = $qbRealmId
     "GITHUB_TOKEN"         = Get-Secret "GITHUB_TOKEN"
     "GITHUB_USERNAME" = "jrb9900n"
     "GITHUB_REPOS"    = "jrb-assistant-scripts,FleetOps,FieldOps,AuditMatchingEngine"
@@ -84,6 +125,7 @@ $secrets = @{
     "FIELDOPS_SUPABASE_KEY"          = Get-Secret "FIELDOPS_SUPABASE_KEY"
     "QB_WEBHOOK_VERIFIER_TOKEN"      = Get-Secret "QB_WEBHOOK_VERIFIER_TOKEN"
     "EXPENSE_PORTAL_BASE"            = "https://fieldops.jrboehlke.com/expense"
+    # PM commission report — only injected when a valid value was retrieved
     "TWILIO_ACCOUNT_SID"             = Get-Secret "TWILIO_ACCOUNT_SID"
     "TWILIO_AUTH_TOKEN"              = Get-Secret "TWILIO_AUTH_TOKEN"
     "TWILIO_FROM_PHONE"              = Get-Secret "TWILIO_FROM_PHONE"
@@ -107,6 +149,14 @@ $secrets = @{
     "MAX_TOKENS_SONNET"    = "4096"
     "MAX_TOKENS_HAIKU"     = "1024"
     "LOG_LEVEL"            = "info"
+}
+
+# Inject ACCOUNTANT_EMAIL only when a valid non-null value was retrieved.
+# A null here means the secret was absent or failed validation; omitting the
+# key entirely lets commission-report.js detect the missing env var and apply
+# its Michael-only fallback. Injecting an empty string would bypass that check.
+if ($null -ne $accountantEmail) {
+    $secrets["ACCOUNTANT_EMAIL"] = $accountantEmail
 }
 
 foreach ($kv in $secrets.GetEnumerator()) {
@@ -146,4 +196,3 @@ switch ($mode) {
     }
     default     { Write-Host "Usage: .\start-agent.ps1 [teams|scheduler|cli|pm2-teams]" }
 }
-

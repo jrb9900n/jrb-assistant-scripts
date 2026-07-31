@@ -10,7 +10,8 @@ import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getQBAccessToken } from './qb-token.js';
-import { getAllSAAccounts, getSAClientPhone } from './serviceautopilot.js';
+import { getAllSAAccounts, getSAClientDetails } from './serviceautopilot.js';
+import { fetchEmployeeDirectory } from './m365.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
 
@@ -88,13 +89,21 @@ async function getContacts() {
   if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
 
   logger.info('CardDAV: refreshing contact cache');
-  let customers, vendors, saAccounts;
+  let customers, vendors, saAccounts, qboEmployees, empDirectory;
   try {
-    [customers, vendors, saAccounts] = await Promise.all([
+    [customers, vendors, saAccounts, qboEmployees, empDirectory] = await Promise.all([
       fetchQBOEntities('Customer'),
       fetchQBOEntities('Vendor'),
       getAllSAAccounts().catch(err => {
         logger.warn('CardDAV: SA account fetch failed', { err: err.message });
+        return [];
+      }),
+      fetchQBOEntities('Employee').catch(err => {
+        logger.warn('CardDAV: QBO Employee fetch failed — employees will be omitted from this refresh', { err: err.message });
+        return [];
+      }),
+      fetchEmployeeDirectory().catch(err => {
+        logger.warn('CardDAV: Employee Directory fetch failed — employees will appear without directory phones', { err: err.message });
         return [];
       }),
     ]);
@@ -106,10 +115,18 @@ async function getContacts() {
     throw err;
   }
 
+  // Build name→phone lookup from SharePoint Employee Directory (authoritative phone source)
+  const dirPhoneByName = new Map();
+  for (const emp of empDirectory) {
+    const key = normalizeName(emp.name);
+    if (key && emp.phone) dirPhoneByName.set(key, emp.phone);
+  }
+
   // Build phone + email sets from all QBO entities for cross-source dedup
+  // Include employees so their personal numbers don't create duplicate SA-only entries
   const qboPhones = new Set();
   const qboEmails = new Set();
-  for (const e of [...customers, ...vendors]) {
+  for (const e of [...customers, ...vendors, ...qboEmployees]) {
     for (const num of [e.PrimaryPhone?.FreeFormNumber, e.Mobile?.FreeFormNumber, e.AlternatePhone?.FreeFormNumber]) {
       const n = normalizePhone(num);
       if (n.length >= 7) qboPhones.add(n);
@@ -176,47 +193,108 @@ async function getContacts() {
     .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)) && !c.type.toLowerCase().includes('closed'))
     .sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
 
-  // Fetch phones for SA-only contacts. Contacts without a phone are still
-  // included — they appear in the addressbook without a phone number so they
-  // can be looked up / called manually after the number is obtained.
+  // Fetch per-account phone numbers for the top N SA-only contacts (leads first).
+  // SA bulk list phone fields are often empty — GetClientInfo gives the definitive number.
+  // Contacts beyond the cap fall back to the bulk-list phone (if populated) or appear
+  // address-only. No contact is silently excluded just because it's past position N.
   const PHONE_FETCH_CAP = 150;
   const PHONE_CONCURRENCY = 5;
-  const saOnlyToFetch = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
-  const saOnlyProcessed = [];
+  const saOnlyForPhones = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
+  // saDetailById tracks every account that was attempted via GetClientInfo so the outer map
+  // can distinguish "API returned no data" from "account was never fetched" and apply
+  // bulk-list fallbacks only to beyond-cap accounts.
+  // GetClientInfo returns both phone AND address in one call — no extra API cost.
+  const saDetailById = new Map();
   try {
-    for (let i = 0; i < saOnlyToFetch.length; i += PHONE_CONCURRENCY) {
-      const batch = saOnlyToFetch.slice(i, i + PHONE_CONCURRENCY);
+    for (let i = 0; i < saOnlyForPhones.length; i += PHONE_CONCURRENCY) {
+      const batch = saOnlyForPhones.slice(i, i + PHONE_CONCURRENCY);
       const batchResults = await Promise.all(
         batch.map(async c => {
           try {
-            const phone = await getSAClientPhone(c.clientId);
-            return { ...c, phone: phone || null };
-          } catch { return { ...c, phone: null }; }
+            const detail = await getSAClientDetails(c.clientId);
+            return [c.clientId, {
+              homePhone:  detail.homePhone  || null,
+              cellPhone:  detail.cellPhone  || null,
+              workPhone:  detail.workPhone  || null,
+              otherPhone: detail.otherPhone || null,
+              address: detail.address || null, city: detail.city, state: detail.state, zip: detail.zip,
+            }];
+          } catch {
+            // API error — fall back to bulk-list data; bulk collapses to one phone so put it in homePhone
+            return [c.clientId, {
+              homePhone: c.phone || null, cellPhone: null, workPhone: null, otherPhone: null,
+              address: c.address || null, city: c.city, state: c.state, zip: c.zip,
+            }];
+          }
         })
       );
-      saOnlyProcessed.push(...batchResults);
+      for (const [id, detail] of batchResults) saDetailById.set(id, detail); // Store null phone/addr to mark "fetched"
     }
   } catch (err) {
-    logger.warn('CardDAV: SA phone fetch failed, falling back to no-phone contacts', { err: err.message });
-    saOnlyProcessed.push(...saOnlyToFetch.map(c => ({ ...c, phone: null })));
-  }
-  // Aggressive dedup before serving to iPhone:
-  // - drop SA contacts that share a phone number with any QBO/vendor contact
-  // - drop SA contacts with neither phone nor address (no useful info in a dialer)
-  const saOnlyDeduped = saOnlyProcessed.filter(c => {
-    if (!c.phone && !c.address) return false;
-    if (c.phone) {
-      const n = normalizePhone(c.phone);
-      if (n.length >= 7 && qboPhones.has(n)) return false;
+    logger.warn('CardDAV: SA detail fetch failed, using bulk-list data only', { err: err.message });
+    // Preserve any API-fetched entries; add bulk data only for unfetched accounts.
+    for (const c of saOnlyForPhones) {
+      if (!saDetailById.has(c.clientId)) {
+        saDetailById.set(c.clientId, {
+          homePhone: c.phone || null, cellPhone: null, workPhone: null, otherPhone: null,
+          address: c.address || null, city: c.city, state: c.state, zip: c.zip,
+        });
+      }
     }
-    return true;
-  });
+  }
+
+  // All SA-only contacts, not just those within the phone-fetch cap.
+  // Within-cap: API phone+address (may be null/empty); beyond-cap: bulk-list data.
+  // API address takes priority over bulk-list address when both exist.
+  // Drop only if no phone AND no address; drop if phone duplicates a QBO contact.
+  const saOnlyDeduped = saOnlyRaw
+    .map(c => {
+      const detail = saDetailById.get(c.clientId);
+      const apiAddr = detail?.address || null;
+      // API returns all four phone fields; bulk list collapses to one phone.
+      // Fall back to bulk-list phone (in homePhone slot) when API returned no phones at all —
+      // covers beyond-cap accounts (detail undefined) and accounts whose phones are only in
+      // SA's Phone1/PhoneNumber fields that GetClientInfo doesn't check.
+      const homePhone  = detail?.homePhone  || null;
+      const cellPhone  = detail?.cellPhone  || null;
+      const workPhone  = detail?.workPhone  || null;
+      const otherPhone = detail?.otherPhone || null;
+      const effectiveHomePhone = homePhone || (!(cellPhone || workPhone || otherPhone) ? (c.phone || null) : null);
+      const phone = effectiveHomePhone || cellPhone || workPhone || otherPhone || null;
+      return {
+        ...c,
+        homePhone: effectiveHomePhone, cellPhone, workPhone, otherPhone, phone,
+        address: apiAddr || c.address || null,
+        city:    apiAddr ? detail.city : c.city,
+        state:   apiAddr ? detail.state : c.state,
+        zip:     apiAddr ? detail.zip : c.zip,
+      };
+    })
+    .filter(c => {
+      if (!c.phone && !c.address) return false;
+      // Drop if any phone matches a QBO contact (same person — QBO is authoritative)
+      for (const ph of [c.homePhone, c.cellPhone, c.workPhone, c.otherPhone]) {
+        if (ph) {
+          const n = normalizePhone(ph);
+          if (n.length >= 7 && qboPhones.has(n)) return false;
+        }
+      }
+      return true;
+    });
   const saOnlyVcards = saOnlyDeduped.map(saClientToVCard);
+
+  // Build employee vCards: QBO active employees + SharePoint directory phone overlay
+  const employeeVcards = qboEmployees.map(emp => {
+    const nameKey = normalizeName([emp.GivenName, emp.FamilyName].filter(Boolean).join(' ') || emp.DisplayName || '');
+    const dirPhone = dirPhoneByName.get(nameKey) ?? null;
+    return employeeToVCard(emp, dirPhone);
+  });
 
   _cache = [
     ...qboVcards,
     ...vendors.map(v => entityToVCard(v, 'vendor', null)),
     ...saOnlyVcards,
+    ...employeeVcards,
   ];
   _cacheTime = Date.now();
   _cacheEtag = crypto.createHash('md5').update(String(_cacheTime)).digest('hex');
@@ -224,8 +302,10 @@ async function getContacts() {
     qboCustomers: qboVcards.length,
     vendors: vendors.length,
     saAccounts: saAccounts.length,
+    saOnlyRaw: saOnlyRaw.length,
     saOnly: saOnlyVcards.length,
-    saOnlyDropped: saOnlyProcessed.length - saOnlyDeduped.length,
+    saOnlyDropped: saOnlyRaw.length - saOnlyDeduped.length,
+    employees: employeeVcards.length,
   });
   return _cache;
 }
@@ -322,20 +402,77 @@ function saClientToVCard(client) {
     fn = escapeVCard(raw);
   }
 
+  const tel = (num, type) => num ? `TEL;TYPE=${type}:${escapeVCard(num)}` : null;
+  const seen = new Set();
+  const telLine = (num, type) => {
+    if (!num) return null;
+    const n = normalizePhone(num);
+    if (seen.has(n)) return null;
+    seen.add(n);
+    return tel(num, type);
+  };
+
   const lines = [
     'BEGIN:VCARD',
     'VERSION:3.0',
     `UID:${uid}`,
     `FN:${fn}`,
     `N:${familyName};${givenName};;;`,
-    client.phone ? `TEL;TYPE=WORK,VOICE:${escapeVCard(client.phone)}` : null,
+    telLine(client.homePhone,  'HOME,VOICE'),
+    telLine(client.cellPhone,  'CELL,VOICE'),
+    telLine(client.workPhone,  'WORK,VOICE'),
+    telLine(client.otherPhone, 'VOICE'),
     client.address ? `ADR;TYPE=WORK:;;${escapeVCard(client.address)};${escapeVCard(client.city ?? '')};${escapeVCard(client.state ?? '')};${escapeVCard(client.zip ?? '')};US` : null,
     'CATEGORIES:JRB Customer',
     `NOTE:${uid}`,
     'END:VCARD',
   ].filter(Boolean).join('\r\n');
 
-  const etag = crypto.createHash('md5').update(uid + fn + (client.phone ?? '') + (client.address ?? '')).digest('hex');
+  const allPhones = [client.homePhone, client.cellPhone, client.workPhone, client.otherPhone].filter(Boolean).join('|');
+  const etag = crypto.createHash('md5').update(uid + fn + allPhones + (client.address ?? '')).digest('hex');
+  return { uid, etag, vcard: lines };
+}
+
+function employeeToVCard(emp, dirPhone) {
+  const uid = `JRB-EMPLOYEE-${emp.Id}@jrboehlke.com`;
+  const givenName  = escapeVCard(emp.GivenName  ?? '');
+  const familyName = escapeVCard(emp.FamilyName ?? '');
+  const name = (givenName || familyName)
+    ? escapeVCard([emp.GivenName, emp.FamilyName].filter(Boolean).join(' '))
+    : escapeVCard(emp.DisplayName || 'Unknown');
+
+  const primaryPhone = emp.PrimaryPhone?.FreeFormNumber ?? '';
+  const mobilePhone  = emp.Mobile?.FreeFormNumber ?? '';
+  const email = emp.PrimaryEmailAddr?.Address ?? '';
+
+  const addr = emp.PrimaryAddr;
+
+  const seen = new Set();
+  function tel(number, telType) {
+    const n = (number || '').trim();
+    if (!n || seen.has(n)) return null;
+    seen.add(n);
+    return `TEL;TYPE=${telType}:${escapeVCard(n)}`;
+  }
+
+  const lines = [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    `UID:${uid}`,
+    `FN:${name}`,
+    `N:${familyName};${givenName};;;`,
+    'ORG:J.R. Boehlke',
+    tel(dirPhone, 'CELL,VOICE'),
+    tel(primaryPhone, 'WORK,VOICE'),
+    tel(mobilePhone, 'CELL,VOICE'),
+    email ? `EMAIL;TYPE=WORK:${escapeVCard(email)}` : null,
+    addr?.Line1 ? `ADR;TYPE=WORK:;;${escapeVCard(addr.Line1)};${escapeVCard(addr.City ?? '')};${escapeVCard(addr.CountrySubDivisionCode ?? '')};${escapeVCard(addr.PostalCode ?? '')};US` : null,
+    'CATEGORIES:JRB Employee',
+    `NOTE:${uid}`,
+    'END:VCARD',
+  ].filter(Boolean).join('\r\n');
+
+  const etag = crypto.createHash('md5').update(uid + name + (dirPhone ?? '') + primaryPhone + mobilePhone + email + (addr?.Line1 ?? '')).digest('hex');
   return { uid, etag, vcard: lines };
 }
 

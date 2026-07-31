@@ -300,3 +300,103 @@ export async function createQBCCSubAccount(employeeName, lastFour) {
   logger.info('QB CC sub-account created', { name: created.Name, id: created.Id });
   return { id: created.Id, name: created.Name };
 }
+
+// ── Vendor bill / subcontractor cost matching (commission engine) ──
+
+/**
+ * Fetch all QB vendor Bills in a date range, with per-line Customer:Job / Class
+ * refs surfaced (when populated) — used to find candidate subcontractor costs
+ * for a given job. No caller in this codebase queried Bill before this.
+ */
+export async function getVendorBillsForPeriod(startDate, endDate) {
+  const PAGE_SIZE = 300;
+  let bills = [];
+  for (let start = 1; ; start += PAGE_SIZE) {
+    const q = `SELECT * FROM Bill WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
+    const res = await query({ query: q });
+    const page = res?.Bill ?? [];
+    bills = bills.concat(page);
+    if (page.length < PAGE_SIZE) break;
+  }
+
+  return bills.map(b => ({
+    id: b.Id,
+    date: b.TxnDate,
+    vendorName: b.VendorRef?.name ?? '—',
+    amount: Number(b.TotalAmt ?? 0),
+    balance: Number(b.Balance ?? 0),
+    memo: b.PrivateNote ?? '',
+    lines: (b.Line ?? []).map(l => {
+      const detail = l.AccountBasedExpenseLineDetail ?? l.ItemBasedExpenseLineDetail ?? {};
+      return {
+        description: l.Description ?? '',
+        amount: Number(l.Amount ?? 0),
+        customerName: detail.CustomerRef?.name ?? null,
+        className: detail.ClassRef?.name ?? null,
+      };
+    }),
+  }));
+}
+
+function normalizeForMatch(s) {
+  return (s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+/**
+ * Fuzzy-match candidate vendor bill lines to a job, for subcontractor-cost
+ * flagging in the commission report. Not a final cost computation — surfaces
+ * candidates for manual confirmation, since Customer:Job tracking isn't
+ * reliably populated on every bill.
+ *
+ * getVendorBillsForPeriod also surfaces each line's Class ref (className), but
+ * no caller here has a QBO Class to compare it against — SA data carries no
+ * such reference — so a Class-based match tier isn't included. Add one if a
+ * source for the job's own Class ref ever exists.
+ *
+ * Confidence tiers:
+ *   'high'   — line's Customer:Job ref matches the job's client name directly
+ *   'medium' — bill falls within the job's date window and a line description
+ *              mentions the client name (no direct ref match)
+ *
+ * @param {{ clientName: string, dateStart: string, dateEnd: string }} job
+ * @param {Array} bills - output of getVendorBillsForPeriod
+ * @returns {Array<{ qboBillId, vendorName, billAmount, billDate, matchConfidence, billLineDescription }>}
+ */
+export function matchBillsToJob(job, bills) {
+  const jobNameNorm = normalizeForMatch(job.clientName);
+  const start = new Date(job.dateStart);
+  const end = new Date(job.dateEnd);
+  const matches = [];
+
+  for (const bill of bills) {
+    const billDate = new Date(bill.date);
+    for (const line of bill.lines) {
+      let confidence = null;
+
+      if (line.customerName && normalizeForMatch(line.customerName) === jobNameNorm) {
+        confidence = 'high';
+      } else if (
+        jobNameNorm &&
+        billDate >= start && billDate <= end &&
+        line.description && normalizeForMatch(line.description).includes(jobNameNorm)
+      ) {
+        confidence = 'medium';
+      }
+
+      if (confidence) {
+        matches.push({
+          qboBillId: bill.id,
+          vendorName: bill.vendorName,
+          billAmount: line.amount || bill.amount,
+          billDate: bill.date,
+          matchConfidence: confidence,
+          // The matched bill line's own description — used to best-effort
+          // attribute this subcontractor cost to a specific invoice line
+          // (invoice lines carry no direct FK to a bill line).
+          billLineDescription: line.description,
+        });
+      }
+    }
+  }
+  return matches;
+}

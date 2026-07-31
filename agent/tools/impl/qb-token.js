@@ -9,10 +9,35 @@
 
 import axios from 'axios';
 import { execFileSync } from 'child_process';
-import { writeFileSync, unlinkSync } from 'fs';
-import { join } from 'path';
+import { writeFileSync, unlinkSync, mkdirSync, readFileSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import { logger } from '../../core/logger.js';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const QB_TOKEN_META_FILE = join(__dirname, '../../data/qb-token-meta.json');
+
+// QB refresh tokens expire 101 days after last rotation (Intuit policy).
+// We record the rotation timestamp so the reminder cron can warn 14 days before expiry.
+export const QB_TOKEN_TTL_DAYS = 101;
+
+function saveTokenTimestamp() {
+  try {
+    mkdirSync(join(__dirname, '../../data'), { recursive: true });
+    writeFileSync(QB_TOKEN_META_FILE, JSON.stringify({ lastRotatedAt: new Date().toISOString() }), 'utf8');
+  } catch (err) {
+    logger.warn('QB: failed to save token timestamp', { err: err.message });
+  }
+}
+
+export function getQBTokenMeta() {
+  try {
+    return JSON.parse(readFileSync(QB_TOKEN_META_FILE, 'utf8').replace(/^﻿/, ''));
+  } catch {
+    return null;
+  }
+}
 
 const QB_REDIRECT_URI = 'https://agent.jrboehlke.com/qb-callback';
 
@@ -97,6 +122,7 @@ async function _doRefresh() {
       err => logger.warn('QB: refresh token rotation — Credential Manager save failed (token updated in memory only)', { err: err.message })
     );
   }
+  saveTokenTimestamp();
 
   return _accessToken;
 }
@@ -121,6 +147,7 @@ export async function exchangeQBAuthCode(code) {
   process.env.QB_REFRESH_TOKEN = _refreshToken;
 
   await saveRefreshToken(_refreshToken);
+  saveTokenTimestamp();
   logger.info('QB: OAuth code exchanged, tokens saved');
   return { accessToken: _accessToken, refreshToken: _refreshToken };
 }

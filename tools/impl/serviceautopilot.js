@@ -1211,6 +1211,27 @@ export async function getSAClientPhone(clientId) {
 }
 
 /**
+ * Fetch phone AND address for a single SA account via GetClientInfo in one call.
+ * Same endpoint as getSAClientPhone; returns the full contact detail needed for CardDAV vCards.
+ * Returns { phone, address, city, state, zip } — empty strings where SA has no data.
+ */
+export async function getSAClientDetails(clientId) {
+  const res = await post('/WebServices/ClientEditOverlayWs.asmx/GetClientInfo', { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) return { homePhone: '', cellPhone: '', workPhone: '', otherPhone: '', address: '', city: '', state: '', zip: '' };
+  return {
+    homePhone:  d.HomePhone  || '',
+    cellPhone:  d.CellPhone  || '',
+    workPhone:  d.WorkPhone  || '',
+    otherPhone: d.OtherPhone || '',
+    address:    d.Address    || '',
+    city:       d.City       || '',
+    state:      d.State || d.StateAbbr || '',
+    zip:        d.PostalCode || d.Zip || '',
+  };
+}
+
+/**
  * Fetch scheduling-relevant client profile: OfficeNotes (gate codes, property access,
  * special instructions), BillingNotes, contact info, and custom fields (CustomField1-6)
  * if configured in SA Admin → Account Settings → Custom Fields.
@@ -1251,6 +1272,172 @@ export async function fetchClientPavementSf(clientId) {
   const field = fields.find(f => f.Description === 'Pavement Size');
   const val = parseFloat(field?.Value);
   return isNaN(val) ? null : val;
+}
+
+/**
+ * Read, calculate, and write the "Lbs of Crackfill" custom field for an SA client.
+ * Lbs of Crackfill = Math.round(Pavement Size × 0.015)
+ *
+ * Mechanism: GetCustomFieldList returns field GUIDs + current values. SaveClient accepts a
+ * CustomFields array of { CustomFieldValue, CustomFieldDate: null, CustomFieldID } objects
+ * that overwrites all custom fields atomically. Confirmed via reverse-engineering SA's Knockout
+ * overlay save (probe-cf-saveclicked.mjs, 2026-07-21).
+ */
+export async function setClientCrackfill({ clientId }) {
+  // 1. Get custom field list (IDs + current values)
+  const gcflRes = await post('/webservices/ClientEditOverlayWs.asmx/GetCustomFieldList',
+    { ClientID: clientId }, 'Clients.aspx');
+  const fields = gcflRes.data?.d;
+  if (!Array.isArray(fields)) {
+    throw new Error(`SA setClientCrackfill: GetCustomFieldList failed for ${clientId}: ${gcflRes.text?.slice(0, 200)}`);
+  }
+
+  const pavementField   = fields.find(f => f.CustomFieldName === 'Pavement Size');
+  const crackfillField  = fields.find(f => f.CustomFieldName === 'Lbs of Crackfill');
+
+  if (!pavementField || !crackfillField) {
+    const missing = [!pavementField && 'Pavement Size', !crackfillField && 'Lbs of Crackfill'].filter(Boolean);
+    throw new Error(`SA setClientCrackfill: custom field(s) not found: ${missing.join(', ')}`);
+  }
+
+  const pavementSf = parseFloat(pavementField.CustomFieldValue);
+  if (!pavementField.CustomFieldValue || isNaN(pavementSf) || pavementSf <= 0) {
+    return { clientId, skipped: true, reason: `Pavement Size "${pavementField.CustomFieldValue}" is not a valid positive number` };
+  }
+
+  const lbsCrackfill = Math.round(pavementSf * 0.015);
+  if (lbsCrackfill === 0) {
+    return { clientId, skipped: true, reason: `Pavement Size ${pavementSf} sq ft rounds to 0 lbs crackfill` };
+  }
+
+  // 2. Get full client record for SaveClient
+  const ciRes = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'Clients.aspx');
+  const d = ciRes.data?.d;
+  if (!d) throw new Error(`SA setClientCrackfill: GetClientInfo failed for ${clientId}: ${ciRes.text?.slice(0, 200)}`);
+
+  function parseSaDate(v) {
+    if (!v) return { Month: -1, Day: -1, Year: -1 };
+    if (typeof v === 'object' && 'Month' in v && 'Day' in v && 'Year' in v) {
+      const { Month, Day, Year } = v;
+      if (Month > 0 && Day > 0 && Year > 0) {
+        const dt = new Date(Year, Month - 1, Day);
+        if (dt.getMonth() + 1 === Month && dt.getDate() === Day) return { Month, Day, Year };
+      }
+      return { Month: -1, Day: -1, Year: -1 };
+    }
+    const ms = String(v).match(/\/Date\((-?\d+)\)\//);
+    const dt = ms ? new Date(parseInt(ms[1])) : new Date(v);
+    if (isNaN(dt.getTime())) return { Month: -1, Day: -1, Year: -1 };
+    return { Month: dt.getMonth() + 1, Day: dt.getDate(), Year: dt.getFullYear() };
+  }
+
+  // 3. Build CustomFields array — all fields preserved, crackfill updated
+  const customFields = fields.map(f => ({
+    CustomFieldValue: f.CustomFieldName === 'Lbs of Crackfill' ? String(lbsCrackfill) : (f.CustomFieldValue || ''),
+    CustomFieldDate:  null,
+    CustomFieldID:    f.CustomFieldID,
+  }));
+
+  // 4. Build SaveClient info — preserve all existing client values, only add CustomFields
+  const info = {
+    ClientID:                clientId,
+    IsLead:                  false,
+    saveType:                0,
+    IsConvertingLead:        false,
+    FirstName:               d.FirstName                        || '',
+    LastName:                d.LastName                         || '',
+    NickName:                d.NickName                         || '',
+    ClientCompanyName:       d.ClientCompanyName                || '',
+    Email:                   d.Email                            || '',
+    HomePhone:               d.HomePhone                        || '',
+    CellPhone:               d.CellPhone                        || '',
+    ProviderID:              d.ProviderData?.Value              || EMPTY_GUID,
+    WorkPhone:               d.WorkPhone                        || '',
+    OtherPhone:              d.OtherPhone                       || '',
+    FaxNumber:               d.FaxNumber                        || '',
+    PreferredPhoneID:        d.PreferredPhoneID                 || '1',
+    ClientTitle:             d.ClientTitle                      || '',
+    ListID:                  d.ListID                           || EMPTY_GUID,
+    QboID:                   d.QboID                            || '',
+    PropertyName:            d.PropertyName                     || '',
+    PropertyNameAttentionTo: d.PropertyNameAttentionTo          || '',
+    Address:                 d.Address                          || '',
+    AddressTwo:              d.AddressTwo                       || '',
+    City:                    d.City                             || '',
+    StateID:                 d.StateInfo?.Value                 || EMPTY_GUID,
+    PostalCode:              d.PostalCode                       || '',
+    MapCode:                 d.MapCode                          || '',
+    DivisionID:              d.DivisionInfo?.Value              || EMPTY_GUID,
+    NameOnInv:               d.NameOnInv                        || '',
+    AttentionTo:             d.AttentionTo                      || '',
+    BillingAddress:          d.BillingAddress                   || '',
+    BillingAddressTwo:       d.BillingAddressTwo                || '',
+    BillingCity:             d.BillingCity                      || '',
+    BillingStateID:          d.BillingStateInfo?.Value          || EMPTY_GUID,
+    BillingPostalCode:       d.BillingPostalCode                || '',
+    SalesTaxRefID:           d.SalesTaxInfo?.Value              || EMPTY_GUID,
+    MasterPropertyClientID:  d.MasterPropertyClientInfo?.Value  || EMPTY_GUID,
+    CountryID:               d.CountryInfo?.Value               || EMPTY_GUID,
+    DefaultBillingUnderID:   d.BillingUnderInfo?.Value          || EMPTY_GUID,
+    ClientSinceDate:         parseSaDate(d.ClientSinceDate),
+    CSRId:                   d.CSRInfo?.Value                   || EMPTY_GUID,
+    AccountTypeID:           d.AccountTypeInfo?.Value           || EMPTY_GUID,
+    PriorityID:              d.PriorityID                       || 0,
+    UserName:                d.UserName                         || '',
+    Password:                d.Password                         || '',
+    Latitude:                d.Latitude                         || '',
+    Longitude:               d.Longitude                        || '',
+    SalesPersonID:           d.SalesPersonInfo?.Value           || EMPTY_GUID,
+    CustomerSourceID:        d.CustomerSourceInfo?.Value        || EMPTY_GUID,
+    ReferredByID:            d.ReferredByInfo?.Value            || EMPTY_GUID,
+    DoNotMarket:             d.DoNotMarket                      || false,
+    BillingEmail:            d.BillingEmail                     || '',
+    FlagForReview:           d.FlagForReview                    || false,
+    AccountNumber:           d.AccountNumber                    || '',
+    SubscriptionType:        d.SubscriptionType                 || 0,
+    BillingDate:             parseSaDate(d.BillingDate),
+    AutoCharge:              d.AutoCharge                       || false,
+    BillingNotes:            d.BillingNotes                     || '',
+    PaymentMethodID:         d.PaymentMethodInfo?.Value         || EMPTY_GUID,
+    SalesTaxCodeID:          d.SalesTaxCodeInfo?.Value          || EMPTY_GUID,
+    InvoiceFrequencyID:      d.InvoiceFrequencyInfo?.Value      || EMPTY_GUID,
+    StandardTermID:          d.StandardTermInfo?.Value          || EMPTY_GUID,
+    SendInvoiceBy:           d.SendInvoiceBy                    || 'Email',
+    DefaultInvoiceFormatID:  d.DefaultInvoiceInfo?.Value        || EMPTY_GUID,
+    OfficeNotes:             d.OfficeNotes                      || '',
+    CCFirstName:             d.CCFirstName                      || '',
+    CCLastName:              d.CCLastName                       || '',
+    CCBillingAddress:        d.CCBillingAddress                 || '',
+    CCBillingZip:            d.CCBillingZip                     || '',
+    CCNumber:                d.CCNumber                         || '',
+    CCExpiration:            d.CCExpiration                     || '',
+    CCToken:                 d.CCToken                          || '',
+    CCCustomerToken:         d.CCCustomerToken                  || '',
+    CCBrand:                 d.CCBrand                          || '',
+    Geocode:                 false,
+    ManualGeocode:           false,
+    UpdateManualGeocodeFlag: false,
+    CustomFields:            customFields,
+  };
+
+  // 5. Save
+  const saveRes = await post('/webservices/ClientEditOverlayWs.asmx/SaveClient',
+    { info }, 'ClientView.aspx');
+  const result = saveRes.data?.d;
+  const errors = result?.response?.Errors;
+
+  if (errors?.length > 0) {
+    throw new Error(`SA setClientCrackfill SaveClient errors: ${JSON.stringify(errors)}`);
+  }
+  if (saveRes.status === 500) {
+    // QBO-sync bug: server saves OK then crashes in post-save QBO sync — custom fields persisted
+    logger.warn('SA setClientCrackfill: SaveClient 500 (QBO sync bug) — field likely saved', { clientId, lbsCrackfill });
+    return { clientId, pavementSf, lbsCrackfill, savedViaApi: false };
+  }
+
+  logger.info('SA: setClientCrackfill complete', { clientId, pavementSf, lbsCrackfill });
+  return { clientId, pavementSf, lbsCrackfill, savedViaApi: true };
 }
 
 /**
