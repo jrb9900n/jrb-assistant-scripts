@@ -150,6 +150,18 @@ let _sessionExpiry       = 0;
 let _loginPromise        = null; // deduplicate concurrent login attempts
 let _incapsulaBackoffUntil = 0;  // epoch ms; refuse SA calls until this clears
 
+// Closes the live SA browser session, if any. Exported so cron.js can call this
+// from a process-exit handler — a live Chromium instance kept open for up to
+// SESSION_TTL_MS otherwise becomes an orphaned OS process (leaked memory) if the
+// Node process exits without cleaning it up first.
+export async function closeSaSession() {
+  if (_browser) {
+    try { await _browser.close(); } catch {}
+    _browser = null;
+    _page = null;
+  }
+}
+
 // ── Session management ───────────────────────────────────────────────────────
 
 async function saveSessionCookies(page) {
@@ -280,11 +292,16 @@ async function login() {
     args: launchArgs,
   });
 
-  const page = await browser.newPage();
-  if (proxyAuth) await page.authenticate(proxyAuth);
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-
+  // newPage()/authenticate()/setUserAgent() used to run outside this try block —
+  // if any of them threw (all three are real network/IPC calls that can fail,
+  // especially with a flaky residential proxy), the freshly-launched browser was
+  // never closed and never assigned to _browser, leaking an orphaned Chromium
+  // process. Moved inside so the catch below covers them too.
   try {
+    const page = await browser.newPage();
+    if (proxyAuth) await page.authenticate(proxyAuth);
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+
     // Try restoring from cached cookies first — avoids triggering a new login
     const restored = await tryRestoreSession(page);
     if (restored) {

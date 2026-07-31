@@ -16,11 +16,38 @@ try {
   if (existsSync(SCHEDULER_PID_FILE)) {
     const oldPid = parseInt(readFileSync(SCHEDULER_PID_FILE, 'utf8').trim(), 10);
     if (oldPid && oldPid !== process.pid) {
-      try { execSync(`taskkill /f /pid ${oldPid}`, { encoding: 'utf8', timeout: 3000 }); } catch {}
+      // /t kills the whole process tree, not just the parent — without it, a live SA
+      // Chromium session (kept open up to 4h per SESSION_TTL_MS) becomes an orphaned
+      // process every time the scheduler self-dedups a stale prior instance, which
+      // happens on nearly every restart during active development. Left unchecked
+      // this accumulates leaked Chromium instances until the machine OOMs.
+      try { execSync(`taskkill /f /t /pid ${oldPid}`, { encoding: 'utf8', timeout: 3000 }); } catch {}
     }
   }
 } catch {}
 try { writeFileSync(SCHEDULER_PID_FILE, String(process.pid), 'utf8'); } catch {}
+
+// Close any live SA Chromium session before this process exits gracefully (Ctrl+C,
+// Stop-ScheduledTask, or a signal from Task Manager) — otherwise it's orphaned the
+// same way an unclean taskkill leaves one behind. Best-effort only: SIGKILL / a
+// forceful `taskkill /f` (as used above against a prior instance) can't be caught
+// by either handler and will still orphan the browser, but /t on that taskkill
+// call now takes care of that specific path.
+let _shuttingDown = false;
+async function gracefulShutdown(signal) {
+  if (_shuttingDown) return;
+  _shuttingDown = true;
+  logger.info(`Scheduler: received ${signal}, closing SA session before exit`);
+  try {
+    const { closeSaSession } = await import('../tools/impl/serviceautopilot.js');
+    await closeSaSession();
+  } catch (err) {
+    logger.warn('Scheduler: closeSaSession failed during shutdown', { err: err.message });
+  }
+  process.exit(0);
+}
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 function acquireRunLock(taskName, ttlMs = 60_000) {
   const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
