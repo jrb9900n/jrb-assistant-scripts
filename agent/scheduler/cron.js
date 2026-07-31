@@ -262,7 +262,11 @@ const SCHEDULED_TASKS = [
   },
   {
     // Monday 4:30 AM — BTA SP funnel CSVs from SA data. Non-fatal: the underlying
-    // SA data isn't at risk, only this formatted view of it.
+    // SA data isn't at risk, only this formatted view of it. Last step of the
+    // BTA weekly report, so it also sends the completion notification below —
+    // Michael wants to know every time this report runs (not just on failure),
+    // with the actual per-category numbers visible, after finding and fixing
+    // two counting bugs here 2026-07-30/31 (see funnel-summary read below).
     schedule: '30 4 * * 1',
     name: 'bta_sp_funnel_report',
     run: async () => {
@@ -285,6 +289,20 @@ const SCHEDULED_TASKS = [
           });
           child.on('error', reject);
         });
+
+        let summaryLines = 'BTA Weekly Report ran — Leads / Est / Won by category:';
+        try {
+          const year = new Date().getFullYear();
+          const summaryPath = 'C:\\Users\\Assistant\\BTA Reporting\\Output\\funnel-summary-' + year + '.json';
+          const { summary } = JSON.parse(readFileSync(summaryPath, 'utf8'));
+          for (const div of Object.values(summary)) {
+            summaryLines += `\n- ${div.label}: Leads ${div.leads} / Est ${div.estimates} / Won ${div.jobs_won} ($${div.dollars_won.toLocaleString()})`;
+          }
+        } catch (readErr) {
+          logger.warn('bta_sp_funnel_report: could not read funnel-summary for notification', { err: readErr.message });
+          summaryLines = 'BTA Weekly Report ran (funnel-summary JSON unavailable for detail).';
+        }
+        await sendProactiveMessage(summaryLines).catch(() => {});
       } catch (err) {
         logger.warn('bta_sp_funnel_report: FAILED (non-fatal)', { err: err.message });
         await sendProactiveMessage(`BTA SP Funnel Report WARNING — sheets-formatter.js: ${err.message}`).catch(() => {});
