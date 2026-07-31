@@ -318,15 +318,16 @@ async function findJobLevelSalesRep({ saClientId, invoiceSaId, invoiceDate, fuzz
 async function buildAttributionIndexes() {
   const { data: allAssignments, error: assignError } = await fleetops
     .from('pm_job_assignments')
-    .select('sa_invoice_sa_id, sa_contract_id, sa_client_id, employee_name, assigned_at')
+    .select('sa_invoice_sa_id, sa_contract_id, sa_client_id, employee_name, source, confidence, assigned_at')
     .order('assigned_at', { ascending: true }); // ascending: later rows overwrite earlier ones below, matching "most recent wins"
   if (assignError) throw new Error(`pm_job_assignments prefetch failed: ${assignError.message}`);
 
   const assignmentIndex = { byInvoice: new Map(), byContract: new Map(), byClient: new Map() };
   for (const row of allAssignments ?? []) {
-    if (row.sa_invoice_sa_id) assignmentIndex.byInvoice.set(row.sa_invoice_sa_id, row.employee_name);
-    if (row.sa_contract_id) assignmentIndex.byContract.set(row.sa_contract_id, row.employee_name);
-    if (row.sa_client_id) assignmentIndex.byClient.set(row.sa_client_id, row.employee_name);
+    const entry = { employeeName: row.employee_name, source: row.source, confidence: row.confidence };
+    if (row.sa_invoice_sa_id) assignmentIndex.byInvoice.set(row.sa_invoice_sa_id, entry);
+    if (row.sa_contract_id) assignmentIndex.byContract.set(row.sa_contract_id, entry);
+    if (row.sa_client_id) assignmentIndex.byClient.set(row.sa_client_id, entry);
   }
 
   const { data: allEstimates, error: estError } = await fleetops
@@ -352,12 +353,24 @@ async function buildAttributionIndexes() {
 // > scraped from the client's original accepted estimate. The manual tiers
 // and the estimate scrape both read from indexes prefetched once for the
 // whole run (see buildAttributionIndexes) rather than querying per job.
+// Returns { employeeName, confidence } or null. confidence is one of
+// 'manual' | 'job_confirmed' | 'job_fuzzy_matched' | 'estimate_scrape' — see
+// the 20260801_commission_pm_confidence.sql migration. Only 'estimate_scrape'
+// (the fallible date-proximity guess, caught wrong 3 times against real data:
+// Sterling Pharma, Celia Shaughnessy, Lori Pegelow) withholds payable
+// commission pending human confirmation; everything else is trusted.
 async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, isContractJob, fuzzyCandidateCache, assignmentIndex, estimatesByClient }) {
   const manualMatch =
     (invoiceSaId && assignmentIndex.byInvoice.get(invoiceSaId)) ||
     (contractId && assignmentIndex.byContract.get(contractId)) ||
     (saClientId && assignmentIndex.byClient.get(saClientId));
-  if (manualMatch) return manualMatch;
+  if (manualMatch) {
+    // A row written before this confidence column existed has confidence=null
+    // — treat it the same as 'estimate_scrape' (least trusted) rather than
+    // assuming it's safe, since we can't tell retroactively which tier wrote it.
+    const confidence = manualMatch.source === 'manual' ? 'manual' : (manualMatch.confidence ?? 'estimate_scrape');
+    return { employeeName: manualMatch.employeeName, confidence };
+  }
 
   // No manual assignment exists yet — try real job-level data before falling
   // back to guessing off an estimate. Contract jobs skip this entirely (no
@@ -369,10 +382,11 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
         sa_invoice_sa_id: invoiceSaId,
         employee_name: jobLevel.employeeName,
         source: 'sa_signal',
+        confidence: jobLevel.confidence,
         notes: `Matched from sa_jobs.raw_json.SalesRep (${jobLevel.confidence})`,
       });
       if (insertError) logger.warn('pm_job_assignments job-level insert failed', { err: insertError.message });
-      return jobLevel.employeeName;
+      return { employeeName: jobLevel.employeeName, confidence: jobLevel.confidence };
     }
   }
 
@@ -386,7 +400,9 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
   // scrape time — the old query had no upper bound on quote_date at all.
   // sa_accepted_estimates is synced daily by the existing overnight_sa_report
   // cron and already carries a resolved employee name (not a raw SA rep GUID)
-  // in sales_rep.
+  // in sales_rep. Still caught wrong since (Celia Shaughnessy, Lori Pegelow) —
+  // this whole tier is 'estimate_scrape' confidence, payable withheld until
+  // confirmed (see runCommissionEngine's main loop).
   if (saClientId && earliestDate) {
     // estimatesByClient's per-client array is sorted ascending by quote_date
     // (see buildAttributionIndexes) — scan forward and keep the last row still
@@ -409,12 +425,13 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
         ...scopeCols,
         employee_name: estRow.sales_rep,
         source: 'sa_signal',
+        confidence: 'estimate_scrape',
         notes: `Scraped from accepted estimate ${estRow.estimate_id}`,
       });
       // Duplicate-insert races (two jobs for the same brand-new client resolving
       // concurrently) are harmless — both attribute the same employee_name either way.
       if (insertError) logger.warn('pm_job_assignments sa_signal insert failed', { err: insertError.message });
-      return estRow.sales_rep;
+      return { employeeName: estRow.sales_rep, confidence: 'estimate_scrape' };
     }
   }
   return null;
@@ -564,7 +581,7 @@ export async function runCommissionEngine({ quarter } = {}) {
   const { assignmentIndex, estimatesByClient } = await buildAttributionIndexes();
 
   for (const job of allJobs) {
-    const employeeName = await resolvePM({
+    const pmResolution = await resolvePM({
       saClientId: job.saClientId,
       contractId: job.contractId,
       invoiceSaId: job.invoiceSaId,
@@ -574,6 +591,12 @@ export async function runCommissionEngine({ quarter } = {}) {
       assignmentIndex,
       estimatesByClient,
     });
+    const employeeName = pmResolution?.employeeName ?? null;
+    // Withhold payable (not accrued) for any attribution resting solely on the
+    // fallible estimate-date guess, until a human confirms it -- see
+    // 20260801_commission_pm_confidence.sql. Everything else (manual entry,
+    // job-level SalesRep match) is trusted.
+    const pmAttributionConfirmed = pmResolution?.confidence !== 'estimate_scrape';
     if (!employeeName) {
       results.skippedNoPM++;
       results.unassignedJobs.push({
@@ -781,7 +804,13 @@ export async function runCommissionEngine({ quarter } = {}) {
 
     const priorCommissionedThrough = priorQuarterRow ? Number(priorQuarterRow.commissioned_through_amount) : 0;
     const incrementalPaid = Math.max(0, job.paidAmount - priorCommissionedThrough);
-    const confirmedIncrementalPaid = incrementalPaid * (1 - unconfirmedFraction);
+    // Same withholding mechanism as unconfirmedFraction, composed rather than
+    // duplicated: an unconfirmed PM attribution zeroes the confirmed fraction
+    // entirely (same as unconfirmedFraction=1), and commissionedThroughAmount
+    // simply doesn't advance until a human confirms it -- the whole backlog
+    // becomes payable in one run the moment it is, exactly like the existing
+    // subcontractor catch-up.
+    const confirmedIncrementalPaid = incrementalPaid * (1 - unconfirmedFraction) * (pmAttributionConfirmed ? 1 : 0);
 
     // Accrued: full amount, booked once in the row for the earliest quarter on
     // record. A same-quarter re-run recomputes it (confirmation status may have
@@ -823,6 +852,7 @@ export async function runCommissionEngine({ quarter } = {}) {
         payable_commission: payableCommission,
         involves_subcontractor: involvesSubcontractor,
         unconfirmed_subcontracted_fraction: Number(unconfirmedFraction.toFixed(4)),
+        pm_attribution_confirmed: pmAttributionConfirmed,
         service_names: jobDetails.serviceNames,
         estimate_number: jobDetails.estimateNumber,
         estimate_date: jobDetails.estimateDate,
