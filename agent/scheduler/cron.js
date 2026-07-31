@@ -42,6 +42,16 @@ function releaseRunLock(taskName) {
 let saWasDown = false;
 let qbWasDown = false;
 
+// branch_drift_check's debounce flag, persisted so a scheduler restart while
+// drift is still ongoing doesn't re-fire the "detected" alert unnecessarily
+// (an in-memory-only flag would reset to false on every restart).
+const BRANCH_DRIFT_STATE_FILE = join(tmpdir(), 'jrb-branch-drift-state.json');
+let branchWasDrifted = false;
+try { branchWasDrifted = JSON.parse(readFileSync(BRANCH_DRIFT_STATE_FILE, 'utf8')).drifted === true; } catch {}
+function saveBranchDriftState(drifted) {
+  try { writeFileSync(BRANCH_DRIFT_STATE_FILE, JSON.stringify({ drifted }), 'utf8'); } catch {}
+}
+
 const SCHEDULED_TASKS = [
   {
     // Daily 8 AM — send follow-up SMS to employees with incomplete expense reports
@@ -348,6 +358,56 @@ const SCHEDULED_TASKS = [
             }),
           ]);
         }
+      }
+    },
+  },
+  {
+    // Every 6 hours — checked-out branch drift check. A stale/wrong branch
+    // silently missing merged features (found 2026-07-30: this machine was
+    // running an old unmerged branch, missing qb_reauth_reminder and
+    // crackfill_reconciliation with zero indication anything was wrong) is
+    // exactly the kind of failure that goes unnoticed for a long time.
+    // Alerts once when drift is detected and once when it clears, not on
+    // every check.
+    schedule: '0 */6 * * *',
+    name: 'branch_drift_check',
+    run: async () => {
+      const REPO_DIR = 'C:\\Users\\Assistant\\JRBAgent';
+      try {
+        const branch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: REPO_DIR, encoding: 'utf8', timeout: 10_000 }).trim();
+        // "HEAD" means detached — another concurrent session on this shared
+        // checkout is very likely mid-checkout/rebase (a known pattern on
+        // this machine). That's transient, not a real deployment problem;
+        // skip this cycle rather than firing a false alarm that will have
+        // already resolved itself by the next check.
+        if (branch === 'HEAD') {
+          logger.debug('branch_drift_check: HEAD is detached (likely a concurrent git operation) — skipping this cycle');
+          return;
+        }
+        execSync('git fetch origin main --quiet', { cwd: REPO_DIR, timeout: 20_000 });
+        const behind = parseInt(execSync('git rev-list --count HEAD..origin/main', { cwd: REPO_DIR, encoding: 'utf8', timeout: 10_000 }).trim(), 10) || 0;
+        const drifted = branch !== 'main' || behind > 0;
+
+        if (drifted) {
+          logger.warn('branch_drift_check: drift detected', { branch, behind });
+          if (!branchWasDrifted) {
+            branchWasDrifted = true;
+            saveBranchDriftState(true);
+            const detail = branch !== 'main'
+              ? `checked out on "${branch}"${behind > 0 ? `, ${behind} commit${behind === 1 ? '' : 's'} behind origin/main` : ''}`
+              : `${behind} commit${behind === 1 ? '' : 's'} behind origin/main`;
+            await sendProactiveMessage(`⚠️ JRBAgent deployment is ${detail}. Deployed code may be missing merged features — this exact issue caused qb_reauth_reminder to silently stop running for weeks. Check out main and restart the scheduler/bot when convenient.`).catch(() => {});
+          }
+        } else if (branchWasDrifted) {
+          branchWasDrifted = false;
+          saveBranchDriftState(false);
+          logger.info('branch_drift_check: back on main, up to date');
+          await sendProactiveMessage('✅ JRBAgent deployment is back on main and up to date with origin/main.').catch(() => {});
+        } else {
+          logger.debug('branch_drift_check: on main, up to date');
+        }
+      } catch (err) {
+        logger.warn('branch_drift_check: check failed', { err: err.message });
       }
     },
   },
