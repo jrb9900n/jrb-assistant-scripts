@@ -670,8 +670,18 @@ const SCHEDULED_TASKS = [
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
           try {
             let current;
-            try { current = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8')); }
-            catch { return; } // no queue file — nothing to patch
+            try {
+              current = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8'));
+            } catch (readErr) {
+              // ENOENT (no queue file yet) is expected and silent. Anything else —
+              // a corrupted/partial file — silently no-opping here would leave this
+              // entry permanently stuck at whatever status it already had (e.g.
+              // 'processing' forever), with no trace of why. Warn so it's visible.
+              if (readErr.code !== 'ENOENT') {
+                logger.warn('self_heal_watcher: patchEntry could not read queue file', { id, err: readErr.message });
+              }
+              return;
+            }
             const idx = current.findIndex(e => e.id === id);
             if (idx === -1) return;
             current[idx] = { ...current[idx], ...updates };
