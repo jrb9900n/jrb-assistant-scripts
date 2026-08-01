@@ -263,6 +263,10 @@ const TEAMS_TOOLS = [
       type: 'object',
       properties: {
         message: { type: 'string', description: 'The message to send to Michael in Teams.' },
+        suppress_self_heal: {
+          type: 'boolean',
+          description: 'Set true ONLY when sending a self-heal remediation summary (i.e. you were invoked by the self_heal_watcher cron task to investigate an earlier alert). Prevents your own status report from being re-enqueued as a new self-heal alert if it happens to contain a word like "FAILED" — without this, an unresolved issue could re-trigger itself every 10 minutes instead of respecting the normal cooldown. Leave false/omitted in all other contexts.',
+        },
       },
       required: ['message'],
     },

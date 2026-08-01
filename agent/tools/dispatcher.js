@@ -100,7 +100,7 @@ const HANDLERS = {
   web_search:           (i) => webSearch(i),
 
   // Teams
-  send_teams_message:   ({ message }) => sendProactiveMessage(message).then(() => 'Teams message sent.'),
+  send_teams_message:   ({ message, suppress_self_heal }) => sendProactiveMessage(message, { suppressSelfHeal: !!suppress_self_heal }).then(() => 'Teams message sent.'),
 
   // Service Autopilot
   sa_search_clients:       (i) => sa.searchClients(i),
