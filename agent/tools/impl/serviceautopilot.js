@@ -354,17 +354,21 @@ async function login() {
 // mode would read as "ok: true" here. Treat a healthy result as "the proxy
 // accepted the connection," not "the proxy is definitely fine end-to-end."
 export async function checkProxyHealth(timeoutMs = 15000) {
+  // NOTE: deliberately does NOT skip during an active Incapsula backoff. This probe
+  // is a raw CONNECT tunnel to the proxy itself — it never touches SA/Incapsula — so
+  // an Incapsula backoff has no bearing on whether the proxy is healthy. Skipping it
+  // during backoff (the previous behavior) suppressed exactly the diagnostic info
+  // needed to tell "is this outage proxy-caused or Incapsula-caused" during the
+  // window when that question matters most. The backoff state is still surfaced
+  // below (via incapsulaBackoffActive) so callers have full context either way.
   readSharedBackoff();
-  if (Date.now() < _incapsulaBackoffUntil) {
-    const remainingMin = Math.ceil((_incapsulaBackoffUntil - Date.now()) / 60000);
-    return { checked: false, detail: `skipped — Incapsula backoff already active (${remainingMin} min remaining)` };
-  }
+  const incapsulaBackoffActive = Date.now() < _incapsulaBackoffUntil;
 
   const proxyUrl = process.env.SA_PROXY_URL || '';
-  if (!proxyUrl) return { checked: false, detail: 'SA_PROXY_URL not set — SA calls go direct' };
+  if (!proxyUrl) return { checked: false, detail: 'SA_PROXY_URL not set — SA calls go direct', incapsulaBackoffActive };
   const proxy = parseProxyUrl(proxyUrl);
-  if (!proxy) return { checked: false, detail: 'SA_PROXY_URL is malformed' };
-  const targetHost = SA_BASE.replace(/^https?:\/\//, '');
+  if (!proxy) return { checked: false, detail: 'SA_PROXY_URL is malformed', incapsulaBackoffActive };
+  const targetHost = new URL(SA_BASE).hostname;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -374,7 +378,7 @@ export async function checkProxyHealth(timeoutMs = 15000) {
       settled = true;
       clearTimeout(timer);
       try { socket.destroy(); } catch {}
-      resolve(result);
+      resolve({ ...result, incapsulaBackoffActive });
     };
 
     const socket = net.connect({ host: proxy.hostname, port: proxy.port });

@@ -590,7 +590,12 @@ const SCHEDULED_TASKS = [
         if (!saWasDown) {
           saWasDown = true;
           const proxyHealth = await checkProxyHealth().catch(() => null);
-          const proxyNote = proxyHealth?.checked ? `\nProxy check: ${proxyHealth.detail}` : '';
+          // checkProxyHealth now runs its CONNECT probe even during an active Incapsula
+          // backoff (the probe never touches SA/Incapsula, so backoff has no bearing on
+          // it) — surface both signals so it's clear whether this outage is proxy-caused,
+          // Incapsula-caused, or both.
+          const backoffNote = proxyHealth?.incapsulaBackoffActive ? ' (Incapsula backoff also active)' : '';
+          const proxyNote = proxyHealth?.checked ? `\nProxy check: ${proxyHealth.detail}${backoffNote}` : '';
           if (proxyHealth?.checked) logger.warn('sa_connectivity_check: proxy health', proxyHealth);
           try { await sendProactiveMessage(`⚠️ SA connectivity lost — ticket creation and CRM tools are offline.\n\nError: ${err.message.slice(0, 200)}${proxyNote}`); } catch {}
         }
