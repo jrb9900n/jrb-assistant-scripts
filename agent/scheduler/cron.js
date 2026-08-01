@@ -649,33 +649,59 @@ const SCHEDULED_TASKS = [
     schedule: '*/10 * * * *',
     name: 'self_heal_watcher',
     run: async () => {
-      const { SELF_HEAL_QUEUE_PATH } = await import('../teams/notify.js');
+      const { SELF_HEAL_QUEUE_PATH, writeFileAtomic } = await import('../teams/notify.js');
       const COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
+      const STALE_PROCESSING_MS = 30 * 60 * 1000; // 30 min — far longer than any real runAgent call
       const MAX_PER_RUN = 2; // bound how much work one tick can kick off
 
-      // Re-reads the file fresh and patches by id, rather than holding the whole
-      // array across an `await runAgent(...)` (which can run for minutes) and
-      // writing it back at the end — that pattern would silently drop any alert
-      // notify.js enqueues while a remediation run is in flight, since the stale
-      // in-memory copy would overwrite the file. Read+write here have no `await`
-      // between them, so this is atomic with respect to notify.js's own
-      // synchronous read-modify-write in enqueueSelfHeal.
+      // Re-reads the file fresh and patches by id on every transition, rather than
+      // holding the whole array across an `await runAgent(...)` (which can run for
+      // minutes) and writing it back at the end — that pattern would silently drop
+      // any alert notify.js enqueues while a remediation run is in flight. This does
+      // NOT make patchEntry atomic with notify.js's enqueueSelfHeal across process
+      // boundaries (the Teams Bot and Scheduler are separate OS processes) — only
+      // that a crash partway through this run can't lose an already-completed
+      // entry's status. Uses the same atomic (write-temp-then-rename) + retry
+      // strategy as enqueueSelfHeal for the same reason: a torn read from the other
+      // process mid-write is a real, if rare, possibility on Windows.
       const patchEntry = (id, updates) => {
-        let current;
-        try { current = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8')); }
-        catch { return; }
-        const idx = current.findIndex(e => e.id === id);
-        if (idx === -1) return;
-        current[idx] = { ...current[idx], ...updates };
-        writeFileSync(SELF_HEAL_QUEUE_PATH, JSON.stringify(current, null, 2));
+        const MAX_RETRIES = 3;
+        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+          try {
+            let current;
+            try { current = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8')); }
+            catch { return; } // no queue file — nothing to patch
+            const idx = current.findIndex(e => e.id === id);
+            if (idx === -1) return;
+            current[idx] = { ...current[idx], ...updates };
+            writeFileAtomic(SELF_HEAL_QUEUE_PATH, JSON.stringify(current, null, 2));
+            return; // success
+          } catch (err) {
+            if (attempt < MAX_RETRIES - 1) {
+              const deadline = Date.now() + 20 * (attempt + 1);
+              while (Date.now() < deadline) { /* brief spin, rare transient contention */ }
+            } else {
+              logger.warn('self_heal_watcher: patchEntry failed', { id, err: err.message });
+            }
+          }
+        }
       };
 
       let queue;
       try { queue = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8')); }
       catch { return; } // nothing queued yet
 
-      const pending = queue.filter(e => e.status === 'pending');
-      if (!pending.length) return;
+      // Eligible for processing: normal 'pending' entries, PLUS 'processing' entries
+      // stuck past STALE_PROCESSING_MS — the only way an entry stays 'processing'
+      // that long is a crash/kill mid-run, since runAgent has never legitimately
+      // taken 30 minutes. Without this, a crash permanently strands that entry,
+      // since nothing else ever revisits 'processing' status.
+      const now = Date.now();
+      const eligible = queue.filter(e =>
+        e.status === 'pending' ||
+        (e.status === 'processing' && (!e.processing_started_at || now - new Date(e.processing_started_at).getTime() > STALE_PROCESSING_MS))
+      );
+      if (!eligible.length) return;
 
       const lastProcessedAt = {};
       for (const e of queue) {
@@ -687,16 +713,20 @@ const SCHEDULED_TASKS = [
       }
 
       let processedCount = 0, skippedCooldown = 0;
-      for (const entry of pending) {
+      for (const entry of eligible) {
         const last = lastProcessedAt[entry.signature];
         if (last && Date.now() - new Date(last).getTime() < COOLDOWN_MS) {
-          patchEntry(entry.id, { status: 'skipped_cooldown' });
+          // Deliberately does NOT patch status — leaving it 'pending' means this
+          // entry is simply re-evaluated on the next tick, and gets processed
+          // automatically once the cooldown actually expires. Marking it with a
+          // terminal 'skipped_cooldown' status here would abandon it permanently,
+          // since nothing else ever picks that status back up.
           skippedCooldown++;
           continue;
         }
         if (processedCount >= MAX_PER_RUN) continue; // stays 'pending' for the next tick
 
-        patchEntry(entry.id, { status: 'processing' });
+        patchEntry(entry.id, { status: 'processing', processing_started_at: new Date().toISOString() });
         try {
           logger.info('self_heal_watcher: investigating', { id: entry.id, message: entry.message.slice(0, 100) });
           const { result } = await runAgent({
@@ -712,8 +742,8 @@ const SCHEDULED_TASKS = [
         processedCount++;
       }
 
-      if (skippedCooldown) logger.info('self_heal_watcher: skipped (cooldown)', { count: skippedCooldown });
-      const stillPending = pending.length - processedCount - skippedCooldown;
+      if (skippedCooldown) logger.info('self_heal_watcher: skipped (cooldown, will retry next tick)', { count: skippedCooldown });
+      const stillPending = eligible.length - processedCount - skippedCooldown;
       if (stillPending > 0) logger.info('self_heal_watcher: deferred to next run', { count: stillPending });
     },
   },

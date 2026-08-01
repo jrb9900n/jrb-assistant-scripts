@@ -53,7 +53,7 @@ function sanitizeForPrompt(str) {
 // crash (or another process's read — the Teams Bot and Scheduler run as
 // separate OS processes and both call sendProactiveMessage) can't observe or
 // leave behind a half-written file.
-function writeFileAtomic(targetPath, data) {
+export function writeFileAtomic(targetPath, data) {
   const dir = path.dirname(targetPath);
   const tmp = path.join(dir, `.tmp-${randomUUID()}`);
   try {
