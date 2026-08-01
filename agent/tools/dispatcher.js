@@ -100,6 +100,12 @@ const HANDLERS = {
   web_search:           (i) => webSearch(i),
 
   // Teams
+  // NOTE: suppressSelfHeal is intentionally NOT forwarded from LLM tool input.
+  // Self-heal suppression is a security boundary — allowing the LLM to set it
+  // via tool parameters means any agent task (not just self_heal_watcher) could
+  // suppress its own error alerts, defeating the self-healing safety net.
+  // Only trusted internal call sites (e.g. cron.js's self_heal_watcher) may pass
+  // suppressSelfHeal:true, by calling sendProactiveMessage() directly.
   send_teams_message:   ({ message }) => sendProactiveMessage(message).then(() => 'Teams message sent.'),
 
   // Service Autopilot

@@ -874,6 +874,13 @@ const TOOL_MAP = {
   crm:        [...QB_TOOLS, ...SA_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
+  // Unattended remediation runs triggered by the self-heal watcher (cron.js) — same as
+  // `code` but WITHOUT github_merge_pr (this runs with no human in the loop, so it must
+  // never be able to merge its own fix — only open a PR for Michael to approve) and
+  // WITHOUT any Teams tool. The watcher sends the final report itself, server-side,
+  // with suppressSelfHeal hardcoded true — trusting the agent to remember to pass that
+  // flag on every response would be a weak boundary for an unsupervised run.
+  auto_fix:   [...CODE_TOOLS.filter(t => t.name !== 'github_merge_pr'), ...FILE_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
   scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS.filter(t => ['sa_search_clients','sa_fuzzy_match_client','sa_get_client_profile','sa_get_client_notes','sa_list_resources','sa_dispatch_job','sa_update_route_order'].includes(t.name)), ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
