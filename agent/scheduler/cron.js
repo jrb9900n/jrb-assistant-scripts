@@ -637,6 +637,87 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Every 10 minutes — process the self-heal queue. teams/notify.js enqueues every
+    // outbound Teams message matching this codebase's actual alert convention
+    // (⚠️/FAILED/WARNING) to a local JSON queue. For each new entry, this runs an
+    // unattended investigate-and-fix pass via the agent's own agentic loop (taskType
+    // 'auto_fix' — same tools as 'code' minus github_merge_pr, so it can open a PR
+    // for Michael but can never merge one itself, since nobody is watching this run).
+    // Cooldown by signature (digit-stripped message prefix) stops a still-flapping
+    // alert — e.g. the SA proxy check, which can legitimately fire every 30 min while
+    // a known issue is being worked — from spawning a fresh fix attempt every time.
+    schedule: '*/10 * * * *',
+    name: 'self_heal_watcher',
+    run: async () => {
+      const { SELF_HEAL_QUEUE_PATH } = await import('../teams/notify.js');
+      const COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
+      const MAX_PER_RUN = 2; // bound how much work one tick can kick off
+
+      // Re-reads the file fresh and patches by id, rather than holding the whole
+      // array across an `await runAgent(...)` (which can run for minutes) and
+      // writing it back at the end — that pattern would silently drop any alert
+      // notify.js enqueues while a remediation run is in flight, since the stale
+      // in-memory copy would overwrite the file. Read+write here have no `await`
+      // between them, so this is atomic with respect to notify.js's own
+      // synchronous read-modify-write in enqueueSelfHeal.
+      const patchEntry = (id, updates) => {
+        let current;
+        try { current = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8')); }
+        catch { return; }
+        const idx = current.findIndex(e => e.id === id);
+        if (idx === -1) return;
+        current[idx] = { ...current[idx], ...updates };
+        writeFileSync(SELF_HEAL_QUEUE_PATH, JSON.stringify(current, null, 2));
+      };
+
+      let queue;
+      try { queue = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8')); }
+      catch { return; } // nothing queued yet
+
+      const pending = queue.filter(e => e.status === 'pending');
+      if (!pending.length) return;
+
+      const lastProcessedAt = {};
+      for (const e of queue) {
+        if (e.status === 'done' || e.status === 'failed') {
+          if (!lastProcessedAt[e.signature] || e.processed_at > lastProcessedAt[e.signature]) {
+            lastProcessedAt[e.signature] = e.processed_at;
+          }
+        }
+      }
+
+      let processedCount = 0, skippedCooldown = 0;
+      for (const entry of pending) {
+        const last = lastProcessedAt[entry.signature];
+        if (last && Date.now() - new Date(last).getTime() < COOLDOWN_MS) {
+          patchEntry(entry.id, { status: 'skipped_cooldown' });
+          skippedCooldown++;
+          continue;
+        }
+        if (processedCount >= MAX_PER_RUN) continue; // stays 'pending' for the next tick
+
+        patchEntry(entry.id, { status: 'processing' });
+        try {
+          logger.info('self_heal_watcher: investigating', { id: entry.id, message: entry.message.slice(0, 100) });
+          const { result } = await runAgent({
+            taskType: 'auto_fix',
+            task: `An automated alert was just sent to Michael via Teams:\n\n"${entry.message}"\n\nInvestigate the root cause using your available tools (agent logs at C:\\Users\\Assistant\\JRBAgent\\agent\\logs\\agent.log, relevant code/config, recent git history). If you find a genuine code or config bug: create a claude/ branch, fix it, commit, and open a PR — do NOT merge it, that requires Michael's explicit approval. If it's an operational/data/third-party issue rather than a code bug (e.g. a transient outage, rate limit, expired credential), just diagnose it — don't fabricate a code change for a non-code problem. Either way, end by sending exactly one Teams message via send_teams_message summarizing what you found, what you did (if anything), and what Michael needs to do next, if anything. Keep it concise.`,
+          });
+          patchEntry(entry.id, { status: 'done', result: String(result).slice(0, 2000), processed_at: new Date().toISOString() });
+          logger.info('self_heal_watcher: done', { id: entry.id });
+        } catch (err) {
+          patchEntry(entry.id, { status: 'failed', result: err.message, processed_at: new Date().toISOString() });
+          logger.warn('self_heal_watcher: remediation run failed', { id: entry.id, err: err.message });
+        }
+        processedCount++;
+      }
+
+      if (skippedCooldown) logger.info('self_heal_watcher: skipped (cooldown)', { count: skippedCooldown });
+      const stillPending = pending.length - processedCount - skippedCooldown;
+      if (stillPending > 0) logger.info('self_heal_watcher: deferred to next run', { count: stillPending });
+    },
+  },
+  {
     // Hourly — retry any Menards rebates that failed transiently (IP rate limits clear within 1-2h).
     // First-attempt failures are queued as retry_pending; this cron fires the second attempt.
     // If the second attempt also fails, the manual fallback email is sent then.

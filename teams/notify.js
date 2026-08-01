@@ -4,10 +4,41 @@
 import { readFileSync, writeFileSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
+import { randomUUID } from 'crypto';
 import { logger } from '../core/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const CONV_REF_PATH = path.join(__dirname, 'conversation-ref.json');
+
+// Self-heal queue: every outbound Teams message matching this pattern gets queued
+// for an unattended investigate-and-fix pass (see scheduler/cron.js's
+// self_heal_watcher task). Matches this codebase's actual alert conventions
+// (grepped across every sendProactiveMessage call site) rather than a generic
+// "error"/"failed" keyword list, to avoid false-positiving on routine messages
+// like task-poller previews or expense/commission confirmations.
+const ERROR_SIGNAL_RE = /⚠️|\bFAILED\b|\bWARNING\b/;
+export const SELF_HEAL_QUEUE_PATH = path.join(__dirname, 'self-heal-queue.json');
+const SELF_HEAL_QUEUE_MAX = 200; // cap so a flapping alert can't grow this file unbounded
+
+function enqueueSelfHeal(message) {
+  try {
+    let queue = [];
+    try { queue = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8')); } catch {}
+    queue.push({
+      id: randomUUID(),
+      created_at: new Date().toISOString(),
+      message,
+      // Digits stripped so near-identical repeats of a flapping alert (different
+      // timestamps/counts) collapse to the same signature for cooldown purposes.
+      signature: message.replace(/[0-9]+/g, '#').slice(0, 120),
+      status: 'pending',
+    });
+    if (queue.length > SELF_HEAL_QUEUE_MAX) queue = queue.slice(-SELF_HEAL_QUEUE_MAX);
+    writeFileSync(SELF_HEAL_QUEUE_PATH, JSON.stringify(queue, null, 2));
+  } catch (err) {
+    logger.warn('Could not enqueue self-heal entry', { err: err.message });
+  }
+}
 
 const BOT_APP_ID     = () => process.env.TEAMS_BOT_APP_ID;
 const BOT_APP_SECRET = () => process.env.TEAMS_BOT_APP_SECRET;
@@ -62,4 +93,5 @@ export async function sendProactiveMessage(message) {
     throw new Error(`Teams proactive message failed: ${res.status} ${body}`);
   }
   logger.info('Proactive Teams message sent', { preview: message.slice(0, 60) });
+  if (ERROR_SIGNAL_RE.test(message)) enqueueSelfHeal(message);
 }
