@@ -41,6 +41,7 @@ function releaseRunLock(taskName) {
 
 let saWasDown = false;
 let qbWasDown = false;
+let adsHealthWasDown = false;
 
 // branch_drift_check's debounce flag, persisted so a scheduler restart while
 // drift is still ongoing doesn't re-fire the "detected" alert unnecessarily
@@ -565,6 +566,40 @@ const SCHEDULED_TASKS = [
           const proxyNote = proxyHealth?.checked ? `\nProxy check: ${proxyHealth.detail}` : '';
           if (proxyHealth?.checked) logger.warn('sa_connectivity_check: proxy health', proxyHealth);
           try { await sendProactiveMessage(`⚠️ SA connectivity lost — ticket creation and CRM tools are offline.\n\nError: ${err.message.slice(0, 200)}${proxyNote}`); } catch {}
+        }
+      }
+    },
+  },
+  {
+    // Hourly — Google Ads Agent health check. Hits the daemon's own health endpoint
+    // directly on localhost, NOT the public https://agent.jrboehlke.com/ads-health URL —
+    // this machine hosts the daemon itself, so a local check has no dependency on the
+    // Cloudflare tunnel, bot.js's proxy route, or any external egress path. Replaces a
+    // cloud routine (trig_01UUoUnrmBfYMizeA84m6uwu) that hit the public URL via the
+    // WebFetch tool from a Claude cloud sandbox — that sandbox's own egress allowlist
+    // rejected the request with a 403 even though the daemon was healthy the whole time
+    // (confirmed 2026-07-31: a direct curl from that same session succeeded immediately).
+    // Same alert-once-on-failure/once-on-recovery pattern as sa_connectivity_check/qb_health_check.
+    schedule: '23 * * * *',
+    name: 'ads_health_check',
+    run: async () => {
+      try {
+        const res = await fetch('http://localhost:8765/health', { signal: AbortSignal.timeout(10_000) });
+        if (!res.ok) throw new Error(`health endpoint returned ${res.status}`);
+        const data = await res.json();
+        if (data.status !== 'ok') throw new Error(`status=${data.status} hours_since_last_run=${data.hours_since_last_run}`);
+        if (adsHealthWasDown) {
+          adsHealthWasDown = false;
+          logger.info('ads_health_check: Google Ads Agent health restored');
+          await sendProactiveMessage('✅ Google Ads Agent health check restored — daemon is reachable and healthy again.').catch(() => {});
+        } else {
+          logger.debug('ads_health_check: healthy', data);
+        }
+      } catch (err) {
+        logger.warn('ads_health_check: unhealthy or unreachable', { err: err.message });
+        if (!adsHealthWasDown) {
+          adsHealthWasDown = true;
+          await sendProactiveMessage(`⚠️ Google Ads Agent health check failed — daemon may be down.\n\nError: ${err.message}`).catch(() => {});
         }
       }
     },
