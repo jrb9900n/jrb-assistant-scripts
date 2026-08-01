@@ -1,11 +1,10 @@
 // teams/notify.js — Proactive Teams messaging (no circular deps)
 // Separated from bot.js so mcp/server.js can import it without creating a cycle.
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, renameSync, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { randomUUID } from 'crypto';
-import { tmpdir } from 'os';
 import { logger } from '../core/logger.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -25,77 +24,104 @@ const ERROR_SIGNAL_RE = /⚠️|\bFAILED\b|\bWARNING\b/;
 export const SELF_HEAL_QUEUE_PATH = path.join(__dirname, 'self-heal-queue.json');
 const SELF_HEAL_QUEUE_MAX = 200; // cap so a flapping alert can't grow this file unbounded
 
-/**
- * Write data to a file atomically using a write-to-temp-then-rename strategy.
- * On POSIX systems rename(2) is atomic. On Windows it is not guaranteed atomic
- * but is still far safer than truncating the target file in-place, because a
- * crash during the write leaves the original file intact.
- *
- * @param {string} targetPath - Final destination path.
- * @param {string} data       - String content to write.
- */
+// TRUST BOUNDARY: `message` originates from sendProactiveMessage call sites
+// throughout the codebase. Some call sites incorporate external data (API
+// response bodies, client names, filenames). The sanitized message written to
+// the queue is used verbatim as part of an LLM prompt in cron.js's
+// self_heal_watcher (auto_fix task). Strip prompt-injection vectors before
+// enqueuing: remove backtick fences, angle-bracket tags, and newline/control
+// characters that could break prompt structure or inject instructions.
+function sanitizeForPrompt(str) {
+  return str
+    // Remove any content inside <...> tags that could be mistaken for XML/HTML
+    // instruction blocks by the LLM
+    .replace(/<[^>]{0,200}>/g, '')
+    // Remove backtick sequences (code-fence injection)
+    .replace(/`{1,3}/g, "'")
+    // Collapse newlines/carriage returns to a single space so multi-line
+    // content cannot push new instructions onto a fresh prompt line
+    .replace(/[\r\n]+/g, ' ')
+    // Remove other ASCII control characters
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
+    .trim();
+}
+
+// Write data to a file atomically using a write-to-temp-then-rename strategy.
+// On POSIX systems rename(2) is atomic. On Windows it is not guaranteed atomic
+// but is still far safer than truncating the target file in-place, because a
+// crash (or another process's read — the Teams Bot and Scheduler run as
+// separate OS processes and both call sendProactiveMessage) can't observe or
+// leave behind a half-written file.
 function writeFileAtomic(targetPath, data) {
-  // Place the temp file in the same directory so rename stays on one filesystem.
-  const dir  = path.dirname(targetPath);
-  const tmp  = path.join(dir, `.tmp-${randomUUID()}`);
+  const dir = path.dirname(targetPath);
+  const tmp = path.join(dir, `.tmp-${randomUUID()}`);
   try {
     writeFileSync(tmp, data, 'utf8');
     renameSync(tmp, targetPath);
   } catch (err) {
-    // Best-effort cleanup of the temp file; ignore secondary errors.
-    try { import('fs').then(fs => fs.unlinkSync(tmp)); } catch {}
+    try { unlinkSync(tmp); } catch {}
     throw err;
   }
 }
 
 function enqueueSelfHeal(message) {
-  let previousQueueLength = 0;
-  try {
-    let queue = [];
-    let parseError = false;
+  // Sanitize before anything else — cron.js interpolates queue[n].message
+  // directly into an LLM prompt; an unsanitized message containing external
+  // data (API response bodies, client names, filenames) is a prompt-injection
+  // vector into the unattended auto_fix agent.
+  const safeMessage = sanitizeForPrompt(message);
+
+  // Cross-process contention note: readFileSync/writeFileAtomic are atomic on
+  // POSIX but not guaranteed atomic on Windows, and cron.js's patchEntry reads
+  // and writes this same file from a separate process. The retry loop below
+  // recovers from the rare transient failure of a reader catching the OS
+  // mid-rename; the atomic write above already eliminates the more common
+  // failure mode (a torn/truncated read of a partially-written file).
+  const MAX_RETRIES = 3;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    let previousQueueLength = 0;
     try {
-      queue = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8'));
-    } catch (parseErr) {
-      parseError = true;
-      // The file is missing (first run) or corrupt (partial write / OOM kill).
-      // Log at warn rather than silently dropping — operators need to know if
-      // previously-queued entries were lost due to a bad write.
-      if (parseErr.code !== 'ENOENT') {
-        logger.warn(
-          'self-heal queue file could not be parsed — starting fresh. ' +
-          'Previously queued entries may have been lost. Check ' + SELF_HEAL_QUEUE_PATH,
-          { err: parseErr.message }
-        );
+      let queue = [];
+      try {
+        queue = JSON.parse(readFileSync(SELF_HEAL_QUEUE_PATH, 'utf8'));
+      } catch (parseErr) {
+        if (parseErr.code !== 'ENOENT') {
+          logger.warn(
+            'self-heal queue file could not be parsed — starting fresh. Previously queued entries may have been lost.',
+            { err: parseErr.message, path: SELF_HEAL_QUEUE_PATH }
+          );
+        }
+        queue = [];
       }
-      queue = [];
-    }
+      if (!Array.isArray(queue)) {
+        logger.warn('self-heal queue file contained non-array data — resetting to empty queue', { type: typeof queue });
+        queue = [];
+      }
+      previousQueueLength = queue.length;
 
-    if (!Array.isArray(queue)) {
-      logger.warn('self-heal queue file contained non-array data — resetting to empty queue', {
-        type: typeof queue,
+      queue.push({
+        id: randomUUID(),
+        created_at: new Date().toISOString(),
+        message: safeMessage,
+        // Digits stripped so near-identical repeats of a flapping alert (different
+        // timestamps/counts) collapse to the same signature for cooldown purposes.
+        signature: safeMessage.replace(/[0-9]+/g, '#').slice(0, 120),
+        status: 'pending',
       });
-      queue = [];
+      if (queue.length > SELF_HEAL_QUEUE_MAX) queue = queue.slice(-SELF_HEAL_QUEUE_MAX);
+
+      writeFileAtomic(SELF_HEAL_QUEUE_PATH, JSON.stringify(queue, null, 2));
+      return; // success
+    } catch (err) {
+      if (attempt < MAX_RETRIES - 1) {
+        // Brief spin before retry — a rare transient failure resolves within one tick.
+        const deadline = Date.now() + 20 * (attempt + 1);
+        while (Date.now() < deadline) { /* spin */ }
+      } else {
+        logger.warn('Could not enqueue self-heal entry', { err: err.message, previousQueueLength });
+      }
     }
-
-    previousQueueLength = queue.length;
-
-    queue.push({
-      id: randomUUID(),
-      created_at: new Date().toISOString(),
-      message,
-      // Digits stripped so near-identical repeats of a flapping alert (different
-      // timestamps/counts) collapse to the same signature for cooldown purposes.
-      signature: message.replace(/[0-9]+/g, '#').slice(0, 120),
-      status: 'pending',
-    });
-    if (queue.length > SELF_HEAL_QUEUE_MAX) queue = queue.slice(-SELF_HEAL_QUEUE_MAX);
-
-    // Atomic write: write to a temp file then rename so a mid-write crash cannot
-    // corrupt the queue file. The original file remains intact until rename succeeds.
-    writeFileAtomic(SELF_HEAL_QUEUE_PATH, JSON.stringify(queue, null, 2));
-
-  } catch (err) {
-    logger.warn('Could not enqueue self-heal entry', { err: err.message, previousQueueLength });
   }
 }
 
