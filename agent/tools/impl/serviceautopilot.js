@@ -819,6 +819,186 @@ export async function setClientBillingDefaults({ clientId }) {
 }
 
 /**
+ * Set (or correct) the QboID link on an existing SA client record — the field SA
+ * uses to know which QBO customer an invoice should sync to. Round-trips every
+ * other field unchanged via GetClientInfo -> SaveClient (same pattern as
+ * setClientBillingDefaults) so this touches nothing else on the client record —
+ * no billing values, no invoice/line-item data. Never creates a new SA client.
+ * Returns { clientId, previousQboId, newQboId, savedViaApi }
+ */
+export async function setClientQboId({ clientId, qboId }) {
+  const infoRes = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'Clients.aspx');
+  const d = infoRes.data?.d;
+  if (!d) throw new Error(`SA setClientQboId: GetClientInfo failed for ${clientId}: ${infoRes.text?.slice(0, 200)}`);
+
+  function parseSaDate(v) {
+    if (!v) return { Month: -1, Day: -1, Year: -1 };
+    if (typeof v === 'object' && 'Month' in v && 'Day' in v && 'Year' in v) {
+      const { Month, Day, Year } = v;
+      if (Month > 0 && Day > 0 && Year > 0) {
+        const dt = new Date(Year, Month - 1, Day);
+        if (dt.getMonth() + 1 === Month && dt.getDate() === Day) return { Month, Day, Year };
+      }
+      return { Month: -1, Day: -1, Year: -1 };
+    }
+    const ms = String(v).match(/\/Date\((-?\d+)\)\//);
+    const dt = ms ? new Date(parseInt(ms[1])) : new Date(v);
+    if (isNaN(dt.getTime())) return { Month: -1, Day: -1, Year: -1 };
+    return { Month: dt.getMonth() + 1, Day: dt.getDate(), Year: dt.getFullYear() };
+  }
+
+  const previousQboId = d.QboID || '';
+
+  const info = {
+    ClientID: clientId, IsLead: false, saveType: 0, IsConvertingLead: false,
+    FirstName: d.FirstName || '', LastName: d.LastName || '', NickName: d.NickName || '',
+    ClientCompanyName: d.ClientCompanyName || '', Email: d.Email || '',
+    HomePhone: d.HomePhone || '', CellPhone: d.CellPhone || '',
+    ProviderID: d.ProviderData?.Value || EMPTY_GUID,
+    WorkPhone: d.WorkPhone || '', OtherPhone: d.OtherPhone || '', FaxNumber: d.FaxNumber || '',
+    PreferredPhoneID: d.PreferredPhoneID || '1', ClientTitle: d.ClientTitle || '',
+    ListID: d.ListID || EMPTY_GUID,
+    QboID: qboId,                                                    // ← only field being changed
+    PropertyName: d.PropertyName || '', PropertyNameAttentionTo: d.PropertyNameAttentionTo || '',
+    Address: d.Address || '', AddressTwo: d.AddressTwo || '', City: d.City || '',
+    StateID: d.StateInfo?.Value || EMPTY_GUID, PostalCode: d.PostalCode || '',
+    MapCode: d.MapCode || '', DivisionID: d.DivisionInfo?.Value || EMPTY_GUID,
+    NameOnInv: d.NameOnInv || '', AttentionTo: d.AttentionTo || '',
+    BillingAddress: d.BillingAddress || '', BillingAddressTwo: d.BillingAddressTwo || '',
+    BillingCity: d.BillingCity || '', BillingStateID: d.BillingStateInfo?.Value || EMPTY_GUID,
+    BillingPostalCode: d.BillingPostalCode || '',
+    MasterPropertyClientID: d.MasterPropertyClientInfo?.Value || EMPTY_GUID,
+    CountryID: d.CountryInfo?.Value || EMPTY_GUID,
+    DefaultBillingUnderID: d.BillingUnderInfo?.Value || EMPTY_GUID,
+    ClientSinceDate: parseSaDate(d.ClientSinceDate),
+    CSRId: d.CSRInfo?.Value || EMPTY_GUID, AccountTypeID: d.AccountTypeInfo?.Value || EMPTY_GUID,
+    PriorityID: d.PriorityID || 0, UserName: d.UserName || '', Password: d.Password || '',
+    Latitude: d.Latitude || '', Longitude: d.Longitude || '',
+    SalesPersonID: d.SalesPersonInfo?.Value || EMPTY_GUID,
+    CustomerSourceID: d.CustomerSourceInfo?.Value || EMPTY_GUID,
+    ReferredByID: d.ReferredByInfo?.Value || EMPTY_GUID, DoNotMarket: d.DoNotMarket || false,
+    BillingEmail: d.BillingEmail || '', FlagForReview: d.FlagForReview || false,
+    AccountNumber: d.AccountNumber || '', SubscriptionType: d.SubscriptionType || 0,
+    BillingDate: parseSaDate(d.BillingDate), AutoCharge: d.AutoCharge || false,
+    BillingNotes: d.BillingNotes || '', PaymentMethodID: d.PaymentMethodInfo?.Value || EMPTY_GUID,
+    SalesTaxRefID: d.SalesTaxInfo?.Value || EMPTY_GUID,
+    SalesTaxCodeID: d.SalesTaxCodeInfo?.Value || EMPTY_GUID,          // preserve existing tax setting exactly
+    InvoiceFrequencyID: d.InvoiceFrequencyInfo?.Value || EMPTY_GUID,
+    StandardTermID: d.StandardTermInfo?.Value || EMPTY_GUID,
+    SendInvoiceBy: d.SendInvoiceBy || 'Email',                        // preserve existing, don't force
+    DefaultInvoiceFormatID: d.DefaultInvoiceInfo?.Value || EMPTY_GUID,
+    OfficeNotes: d.OfficeNotes || '',
+    CCFirstName: d.CCFirstName || '', CCLastName: d.CCLastName || '',
+    CCBillingAddress: d.CCBillingAddress || '', CCBillingZip: d.CCBillingZip || '',
+    CCNumber: d.CCNumber || '', CCExpiration: d.CCExpiration || '', CCToken: d.CCToken || '',
+    CCCustomerToken: d.CCCustomerToken || '', CCBrand: d.CCBrand || '',
+    Geocode: false, ManualGeocode: false, UpdateManualGeocodeFlag: false,
+  };
+
+  const saveRes = await post('/webservices/ClientEditOverlayWs.asmx/SaveClient', { info }, 'ClientView.aspx');
+  const result = saveRes.data?.d;
+  if (result?.response?.Errors?.length > 0) {
+    throw new Error(`SA setClientQboId SaveClient errors: ${JSON.stringify(result.response.Errors)}`);
+  }
+
+  // Verify via a fresh GetClientInfo read rather than trusting the SaveClient response —
+  // SA returns 500 for QBO-linked clients due to a known server-side post-save sync bug
+  // (see setClientBillingDefaults), even when the underlying field write succeeded.
+  const verifyRes = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'Clients.aspx');
+  const verifiedQboId = verifyRes.data?.d?.QboID || '';
+  const savedViaApi = saveRes.status !== 500;
+  if (!savedViaApi) {
+    logger.warn('SA: SaveClient returned 500 (known SA QBO-sync bug) — verified via GetClientInfo instead', { clientId });
+  }
+  if (verifiedQboId !== qboId) {
+    throw new Error(`SA setClientQboId: verification failed — expected QboID ${qboId}, GetClientInfo shows "${verifiedQboId}"`);
+  }
+  logger.info('SA: QboID set and verified', { clientId, previousQboId, newQboId: qboId, savedViaApi });
+  return { clientId, previousQboId, newQboId: qboId, savedViaApi };
+}
+
+/**
+ * Fetch the full editable record for an SA invoice, via the InvoiceOverlay.asmx
+ * service (distinct from ClientViewWs.asmx / ClientEditOverlayWs.asmx — invoices
+ * have their own overlay service). Endpoint/payload shape confirmed 2026-07-31
+ * from a live browser network capture, not guessed.
+ * Returns the raw `d` object (InvoiceID, CustomerData, InvoiceNumber, LineItems
+ * with full rate/quantity/tax detail, etc.) exactly as SA returns it.
+ */
+export async function getInvoice({ invoiceId }) {
+  const res = await post('/WebServices/InvoiceOverlay.asmx/GetInvoice',
+    { InvoiceID: invoiceId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getInvoice: no data returned for invoiceId ${invoiceId}: ${res.text?.slice(0, 200)}`);
+  return d;
+}
+
+/**
+ * Change only the InvoiceNumber on an existing SA invoice — used to force SA to
+ * re-attempt its one-way sync to QBO (SA re-pushes on any invoice edit; there is
+ * no direct "resync" action). NEVER touches LineItems, Rate, Quantity, Hours,
+ * SalesTax, Total, or any other billing-affecting field — those are round-tripped
+ * from GetInvoice completely unchanged. Mirrors the exact InvoiceData shape
+ * confirmed from a real SaveInvoice call captured live 2026-07-31 (not guessed).
+ * A first attempt hand-picked the field subset from that capture, but live
+ * testing showed SA's save validation silently treats several omitted fields
+ * (CustomerData sub-fields, AllowEdit, etc.) as false/blank when absent,
+ * producing spurious "locked" / "select a payment method" errors even though
+ * nothing was actually wrong with the invoice. Sending the ENTIRE GetInvoice
+ * response back unchanged (spread `d`, override only InvoiceNumber) avoids
+ * that whack-a-mole entirely — every field SA might validate against is
+ * necessarily present and unchanged, since it's the exact object SA itself
+ * just returned. Confirmed safe (2026-07-31): comparing Total/LineItems
+ * before and after showed a completely unmodified invoice, only the number
+ * field differed.
+ * Returns { invoiceId, previousNumber, newNumber }
+ */
+export async function setInvoiceNumber({ invoiceId, newNumber }) {
+  const d = await getInvoice({ invoiceId });
+  const previousNumber = d.InvoiceNumber;
+
+  const invoiceData = { ...d, InvoiceNumber: newNumber };
+
+  const saveRes = await post('/WebServices/InvoiceOverlay.asmx/SaveInvoice',
+    { InvoiceData: invoiceData }, 'ClientView.aspx');
+  const result = saveRes.data?.d;
+  if (result?.Errors?.length > 0) {
+    throw new Error(`SA setInvoiceNumber SaveInvoice errors: ${JSON.stringify(result.Errors)}`);
+  }
+
+  // Verify via a fresh GetInvoice read rather than trusting the SaveInvoice response.
+  const verify = await getInvoice({ invoiceId });
+  if (verify.InvoiceNumber !== newNumber) {
+    throw new Error(`SA setInvoiceNumber: verification failed — expected "${newNumber}", GetInvoice shows "${verify.InvoiceNumber}"`);
+  }
+  logger.info('SA: invoice number changed and verified', { invoiceId, previousNumber, newNumber });
+  return { invoiceId, previousNumber, newNumber };
+}
+
+/**
+ * Permanently delete SA client records via the bulk-delete action from the
+ * Clients list view. Endpoint/payload confirmed from SA's own ClientList.js
+ * 2026-07-31 (not guessed) — this is the real "select clients, click Delete"
+ * feature, not a workaround. DESTRUCTIVE AND IRREVERSIBLE — callers must
+ * verify each clientId has no attached jobs/invoices/estimates/history before
+ * calling this. SA itself may also refuse (returned per-id in `errors`) if a
+ * client has attached records it won't let go.
+ * Returns { requested, removedIds, errors }
+ */
+export async function deleteClients({ clientIds }) {
+  const res = await post('/webservices/ClientList.asmx/DeleteClients',
+    { DeleteItems: clientIds }, 'Clients.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA deleteClients: no data returned: ${res.text?.slice(0, 300)}`);
+  const errors = d.Errors || [];
+  const removedIds = d.RemovedIndexes || [];
+  logger.info('SA: deleteClients complete', { requested: clientIds, removedIds, errors });
+  return { requested: clientIds, removedIds, errors };
+}
+
+/**
  * Fetch SA client details needed to post tickets.
  * Returns { clientId, customerJobId, currentUserId, currentUserType, name, address }
  */
