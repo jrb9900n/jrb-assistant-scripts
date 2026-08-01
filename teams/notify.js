@@ -33,11 +33,17 @@ const SELF_HEAL_QUEUE_MAX = 200; // cap so a flapping alert can't grow this file
 // characters that could break prompt structure or inject instructions.
 function sanitizeForPrompt(str) {
   return str
-    // Remove any content inside <...> tags that could be mistaken for XML/HTML
-    // instruction blocks by the LLM
-    .replace(/<[^>]{0,200}>/g, '')
+    // Strip ALL angle brackets (not just up to 200 chars between them) — an
+    // unbounded/greedy match here would itself be a ReDoS-ish risk on
+    // pathological input, so strip the delimiter characters directly instead
+    // of trying to match complete tags.
+    .replace(/[<>]/g, '')
     // Remove backtick sequences (code-fence injection)
     .replace(/`{1,3}/g, "'")
+    // The message is interpolated into cron.js's prompt as `"${entry.message}"` —
+    // a literal double-quote would close that string early and let the rest of
+    // the message be read as raw prompt/instruction text rather than data.
+    .replace(/"/g, "'")
     // Collapse newlines/carriage returns to a single space so multi-line
     // content cannot push new instructions onto a fresh prompt line
     .replace(/[\r\n]+/g, ' ')
@@ -65,7 +71,9 @@ export function writeFileAtomic(targetPath, data) {
   }
 }
 
-function enqueueSelfHeal(message) {
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function enqueueSelfHeal(message) {
   // Sanitize before anything else — cron.js interpolates queue[n].message
   // directly into an LLM prompt; an unsanitized message containing external
   // data (API response bodies, client names, filenames) is a prompt-injection
@@ -115,9 +123,10 @@ function enqueueSelfHeal(message) {
       return; // success
     } catch (err) {
       if (attempt < MAX_RETRIES - 1) {
-        // Brief spin before retry — a rare transient failure resolves within one tick.
-        const deadline = Date.now() + 20 * (attempt + 1);
-        while (Date.now() < deadline) { /* spin */ }
+        // Brief async delay before retry — a rare transient failure resolves within
+        // one tick. Uses setTimeout rather than a busy-wait so this can't block the
+        // event loop (this process also runs the Teams bot's own request handling).
+        await sleep(20 * (attempt + 1));
       } else {
         logger.warn('Could not enqueue self-heal entry', { err: err.message, previousQueueLength });
       }
@@ -191,6 +200,6 @@ export async function sendProactiveMessage(message, { suppressSelfHeal = false }
   logger.info('Proactive Teams message sent', { preview: message.slice(0, 60), suppressSelfHeal });
 
   if (!suppressSelfHeal && ERROR_SIGNAL_RE.test(message)) {
-    enqueueSelfHeal(message);
+    await enqueueSelfHeal(message);
   }
 }

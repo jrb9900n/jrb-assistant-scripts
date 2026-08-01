@@ -649,10 +649,11 @@ const SCHEDULED_TASKS = [
     schedule: '*/10 * * * *',
     name: 'self_heal_watcher',
     run: async () => {
-      const { SELF_HEAL_QUEUE_PATH, writeFileAtomic } = await import('../teams/notify.js');
+      const { SELF_HEAL_QUEUE_PATH, writeFileAtomic, sendProactiveMessage: notify } = await import('../teams/notify.js');
       const COOLDOWN_MS = 4 * 60 * 60 * 1000; // 4 hours
       const STALE_PROCESSING_MS = 30 * 60 * 1000; // 30 min — far longer than any real runAgent call
       const MAX_PER_RUN = 2; // bound how much work one tick can kick off
+      const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
       // Re-reads the file fresh and patches by id on every transition, rather than
       // holding the whole array across an `await runAgent(...)` (which can run for
@@ -664,7 +665,7 @@ const SCHEDULED_TASKS = [
       // entry's status. Uses the same atomic (write-temp-then-rename) + retry
       // strategy as enqueueSelfHeal for the same reason: a torn read from the other
       // process mid-write is a real, if rare, possibility on Windows.
-      const patchEntry = (id, updates) => {
+      const patchEntry = async (id, updates) => {
         const MAX_RETRIES = 3;
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
           try {
@@ -678,8 +679,9 @@ const SCHEDULED_TASKS = [
             return; // success
           } catch (err) {
             if (attempt < MAX_RETRIES - 1) {
-              const deadline = Date.now() + 20 * (attempt + 1);
-              while (Date.now() < deadline) { /* brief spin, rare transient contention */ }
+              // Async delay, not a busy-wait — this process also runs every other
+              // scheduled task, so blocking the event loop here would stall them too.
+              await sleep(20 * (attempt + 1));
             } else {
               logger.warn('self_heal_watcher: patchEntry failed', { id, err: err.message });
             }
@@ -726,24 +728,39 @@ const SCHEDULED_TASKS = [
         }
         if (processedCount >= MAX_PER_RUN) continue; // stays 'pending' for the next tick
 
-        patchEntry(entry.id, { status: 'processing', processing_started_at: new Date().toISOString() });
+        await patchEntry(entry.id, { status: 'processing', processing_started_at: new Date().toISOString() });
         try {
           logger.info('self_heal_watcher: investigating', { id: entry.id, message: entry.message.slice(0, 100) });
+          // Note: entry.message was already sanitized (sanitizeForPrompt in
+          // notify.js) before it was written to the queue, so interpolating it
+          // directly here is safe.
           const { result } = await runAgent({
             taskType: 'auto_fix',
-            task: `An automated alert was just sent to Michael via Teams:\n\n"${entry.message}"\n\nInvestigate the root cause using your available tools (agent logs at C:\\Users\\Assistant\\JRBAgent\\agent\\logs\\agent.log, relevant code/config, recent git history). If you find a genuine code or config bug: create a claude/ branch, fix it, commit, and open a PR — do NOT merge it, that requires Michael's explicit approval. If it's an operational/data/third-party issue rather than a code bug (e.g. a transient outage, rate limit, expired credential), just diagnose it — don't fabricate a code change for a non-code problem. Either way, end by sending exactly one Teams message via send_teams_message (with suppress_self_heal: true — your own status report should never re-trigger another self-heal run, even if it says something didn't work) summarizing what you found, what you did (if anything), and what Michael needs to do next, if anything. Keep it concise.`,
+            task: `An automated alert was just sent to Michael via Teams:\n\n"${entry.message}"\n\nInvestigate the root cause using your available tools (agent logs at C:\\Users\\Assistant\\JRBAgent\\agent\\logs\\agent.log, relevant code/config, recent git history). If you find a genuine code or config bug: create a claude/ branch, fix it, commit, and open a PR — do NOT merge it, that requires Michael's explicit approval. If it's an operational/data/third-party issue rather than a code bug (e.g. a transient outage, rate limit, expired credential), just diagnose it — don't fabricate a code change for a non-code problem. End your response with a concise plain-text summary of what you found, what you did (if anything), and what Michael needs to do next, if anything — do not send it via Teams yourself, that's handled automatically after you finish.`,
           });
-          patchEntry(entry.id, { status: 'done', result: String(result).slice(0, 2000), processed_at: new Date().toISOString() });
+          const now = new Date().toISOString();
+          await patchEntry(entry.id, { status: 'done', result: String(result).slice(0, 2000), processed_at: now });
+          lastProcessedAt[entry.signature] = now; // visible to any later same-signature entry in this same run
           logger.info('self_heal_watcher: done', { id: entry.id });
+          // Sent server-side with suppressSelfHeal hardcoded — NOT via the LLM
+          // calling send_teams_message itself. auto_fix's tool set has no Teams
+          // tool at all (see registry.js): trusting the agent to remember a flag
+          // on every response is a weak boundary for an unattended, unsupervised
+          // run — a summary that happens to contain "FAILED" and omits the flag
+          // would silently re-enqueue itself.
+          await notify(`🔧 Self-heal report for: "${entry.message.slice(0, 150)}"\n\n${String(result).slice(0, 1500)}`, { suppressSelfHeal: true }).catch(() => {});
         } catch (err) {
-          patchEntry(entry.id, { status: 'failed', result: err.message, processed_at: new Date().toISOString() });
+          const now = new Date().toISOString();
+          await patchEntry(entry.id, { status: 'failed', result: err.message, processed_at: now });
+          lastProcessedAt[entry.signature] = now;
           logger.warn('self_heal_watcher: remediation run failed', { id: entry.id, err: err.message });
+          await notify(`🔧 Self-heal FAILED for: "${entry.message.slice(0, 150)}"\n\nRemediation run itself errored: ${err.message.slice(0, 300)}`, { suppressSelfHeal: true }).catch(() => {});
         }
         processedCount++;
       }
 
       if (skippedCooldown) logger.info('self_heal_watcher: skipped (cooldown, will retry next tick)', { count: skippedCooldown });
-      const stillPending = eligible.length - processedCount - skippedCooldown;
+      const stillPending = Math.max(0, eligible.length - processedCount - skippedCooldown);
       if (stillPending > 0) logger.info('self_heal_watcher: deferred to next run', { count: stillPending });
     },
   },
