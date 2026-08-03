@@ -952,26 +952,7 @@ export async function getInvoice({ invoiceId }) {
   return d;
 }
 
-/**
- * Change only the InvoiceNumber on an existing SA invoice — used to force SA to
- * re-attempt its one-way sync to QBO (SA re-pushes on any invoice edit; there is
- * no direct "resync" action). NEVER touches LineItems, Rate, Quantity, Hours,
- * SalesTax, Total, or any other billing-affecting field — those are round-tripped
- * from GetInvoice completely unchanged. Mirrors the exact InvoiceData shape
- * confirmed from a real SaveInvoice call captured live 2026-07-31 (not guessed).
- * A first attempt hand-picked the field subset from that capture, but live
- * testing showed SA's save validation silently treats several omitted fields
- * (CustomerData sub-fields, AllowEdit, etc.) as false/blank when absent,
- * producing spurious "locked" / "select a payment method" errors even though
- * nothing was actually wrong with the invoice. Sending the ENTIRE GetInvoice
- * response back unchanged (spread `d`, override only InvoiceNumber) avoids
- * that whack-a-mole entirely — every field SA might validate against is
- * necessarily present and unchanged, since it's the exact object SA itself
- * just returned. Confirmed safe (2026-07-31): comparing Total/LineItems
- * before and after showed a completely unmodified invoice, only the number
- * field differed.
- * Returns { invoiceId, previousNumber, newNumber }
- */
+/** Converts GetInvoice's 0-indexed Month to the 1-indexed shape SaveInvoice expects. */
 function toSaveInvoiceDate(dateObj) {
   if (!dateObj || typeof dateObj !== 'object') return dateObj;
   return { Month: dateObj.Month + 1, Day: dateObj.Day, Year: dateObj.Year };
