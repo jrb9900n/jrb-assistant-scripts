@@ -1,0 +1,6 @@
+2026-05-04 02:19:17 [[32minfo[39m] [task-poller] Started — polling every 30s
+2026-05-04 02:19:17 [[32minfo[39m] Scheduler starting {"tasks":["daily_email_digest","weekly_crm_report","invoice_aging_check","email_poller"]}
+2026-05-04 02:19:17 [[32minfo[39m] All schedules registered. Scheduler running.
+2026-05-04 02:20:29 [[32minfo[39m] [task-poller] Started — polling every 30s
+2026-05-04 02:21:23 [[32minfo[39m] [task-poller] Started — polling every 30s
+2026-05-04 02:22:57 [[32minfo[39m] [task-poller] Started — polling every 30s

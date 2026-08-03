@@ -1,0 +1,7 @@
+﻿2026-06-17 16:59:06  Scheduler not found -- restarting
+2026-06-27 12:29:06  Scheduler not found -- restarting
+2026-07-05 16:22:56  Scheduler watchdog: no task has completed in 161 min. Scheduler process is alive (PID 25084) but may be stalled. Check agent logs.
+2026-07-05 23:08:42  Scheduler watchdog: no task has completed in 404 min. Scheduler process is alive (PID 25084) but may be stalled. Check agent logs.
+2026-07-12 15:43:22  Scheduler not found -- restarting
+  Heartbeat check error: Exception of type 'System.OutOfMemoryException' was thrown.
+2026-07-24 13:59:07  Scheduler not found -- restarting

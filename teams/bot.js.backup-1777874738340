@@ -1,0 +1,357 @@
+// teams/bot.js - Microsoft Teams bot server
+import 'dotenv/config';
+import { handleMcpRequest, handleMcpMessage, handleMcpRequestPublic, handleMcpMessagePublic, handleMcpPost, handleMcpGet, handleMcpOptions, isAuthorized } from '../mcp/server.js';
+import { handleOAuthAuthorize, handleOAuthApprove, handleOAuthToken, dynamicClients } from '../mcp/oauth.js';
+import http from 'http';
+import { runAgent } from '../core/agent.js';
+import { runSavedAgent } from '../agents/library.js';
+import { runSkill } from '../skills/library.js';
+import { listAgents } from '../agents/library.js';
+import { listSkills } from '../skills/library.js';
+import { logger } from '../core/logger.js';
+
+const PORT = parseInt(process.env.TEAMS_PORT ?? '3978');
+const BOT_APP_ID     = process.env.TEAMS_BOT_APP_ID;
+const BOT_APP_SECRET = process.env.TEAMS_BOT_APP_SECRET;
+
+let _botToken = null;
+let _botTokenExpiry = 0;
+
+async function getBotToken() {
+  if (_botToken && Date.now() < _botTokenExpiry - 30_000) return _botToken;
+  const res = await fetch('https://login.microsoftonline.com/9299991a-3e06-48e4-8ba8-f3f7d3aada32/oauth2/v2.0/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type:    'client_credentials',
+      client_id:     BOT_APP_ID,
+      client_secret: BOT_APP_SECRET,
+      scope:         'https://api.botframework.com/.default',
+    }),
+  });
+  const data = await res.json();
+  _botToken = data.access_token;
+  _botTokenExpiry = Date.now() + data.expires_in * 1000;
+  return _botToken;
+}
+
+async function replyToTeams(activity, text) {
+  const token = await getBotToken();
+  const serviceUrl = activity.serviceUrl.replace(/\/$/, '');
+  const url = `${serviceUrl}/v3/conversations/${activity.conversation.id}/activities/${activity.id}`;
+  const replyRes = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      type: 'message',
+      text,
+      replyToId: activity.id,
+      from: { id: BOT_APP_ID, name: 'JRB Assistant' },
+      conversation: activity.conversation,
+      recipient: activity.from,
+    }),
+  });
+  const replyText = await replyRes.text();
+  logger.info('Reply status', { status: replyRes.status, body: replyText.slice(0, 200) });
+}
+
+// â”€â”€ Dev task detection â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+// Returns true when Michael is clearly asking for code to be written/deployed.
+// Looks for explicit build/code intent combined with a deliverable noun.
+function isExplicitDevTask(text) {
+  const t = text.toLowerCase();
+  const intentVerbs = /\b(build|create|write|develop|code|make|set up|implement|automate|generate)\b/;
+  const deliverableNouns = /\b(script|program|tool|app|application|function|integration|workflow|automation|report|dashboard|bot|scheduler|pipeline)\b/;
+  const explicitPhrases = /\b(using your coding skills|write (me |us )?code|build (me |us )?a|deploy (this|it|to)|push to (github|vercel|prod)|open a pr|create a branch)\b/;
+  return explicitPhrases.test(t) || (intentVerbs.test(t) && deliverableNouns.test(t));
+}
+
+// Returns true when the message mentions code/tech topics but intent is unclear â€”
+// could be a question, a discussion, or a build request.
+function isAmbiguousDevTask(text) {
+  const t = text.toLowerCase();
+  const techTerms = /\b(script|code|github|deploy|vercel|supabase|automate|function|api|database|repo|branch|commit)\b/;
+  return techTerms.test(t) && !isExplicitDevTask(text);
+}
+
+// â”€â”€ Message handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+async function handleMessage(text, activity) {
+  const trimmed = text.trim();
+
+  // Built-in slash commands
+  if (/^\/list\s+(agents|skills)/i.test(trimmed)) {
+    const type = trimmed.match(/agents/i) ? 'agents' : 'skills';
+    const items = type === 'agents' ? await listAgents() : await listSkills();
+    const lines = items.map(i => `â€¢ **${i.name}** â€” ${i.description}`).join('\n');
+    return `**Available ${type}:**\n\n${lines}`;
+  }
+
+  const agentMatch = trimmed.match(/^\/agent\s+(\S+)\s+([\s\S]+)/i);
+  if (agentMatch) {
+    const [, agentName, task] = agentMatch;
+    const { result } = await runSavedAgent({ agentName, task });
+    return result;
+  }
+
+  const skillMatch = trimmed.match(/^\/skill\s+(\S+)(.*)/i);
+  if (skillMatch) {
+    const [, skillName, varStr] = skillMatch;
+    const vars = Object.fromEntries(
+      [...varStr.matchAll(/(\w+)=([^\s]+)/g)].map(m => [m[1], m[2]])
+    );
+    const { result } = await runSkill({ skill: skillName, vars });
+    return result;
+  }
+
+  // Dev task routing
+  if (isExplicitDevTask(trimmed)) {
+    // Clear build intent â€” run the github-dev skill and return scope proposal
+    const { result } = await runAgent({
+      task: trimmed,
+      taskType: 'code',
+      systemPromptOverride: buildDevSystemPrompt(),
+    });
+    return result;
+  }
+
+  if (isAmbiguousDevTask(trimmed)) {
+    // Unclear whether Michael wants code built or just a question answered â€”
+    // ask for clarification before starting any dev work
+    return [
+      `Just to make sure I understand what you need:`,
+      ``,
+      `Are you asking me to **build or write code** for this, or are you looking for information/advice?`,
+      ``,
+      `Reply with **"yes, build it"** and I'll put together a scope plan. Or just rephrase and I'll take it from there.`,
+    ].join('\n');
+  }
+
+  // All other tasks â€” standard agent routing
+  const { result } = await runAgent({
+    task: trimmed,
+    taskType: inferTaskType(trimmed),
+  });
+  return result;
+}
+
+// System prompt override for dev tasks â€” loads the github-dev skill rules
+function buildDevSystemPrompt() {
+  return `You are JRB Assistant, an AI executive assistant for J.R. Boehlke, LLC.
+
+You have been asked to build or write code. Follow the github-dev skill workflow exactly:
+
+1. SCOPE FIRST â€” before writing any code, restate the goal in 2-3 sentences, list the files 
+   that will be created or changed, identify which repo this belongs in, state any assumptions, 
+   and ask Michael to confirm before proceeding.
+
+2. BRANCH â€” all work goes on a branch named claude/[short-task-description], never on main.
+
+3. CHECKPOINTS â€” check in with Michael after scope, after core logic, after testing, 
+   and before any deployment. Do not proceed past a checkpoint without a response.
+
+4. PR â€” open a Pull Request when ready. Never merge without Michael's approval.
+   Approval phrases: "looks good", "ship it", "approve", "merge it".
+
+5. DEPLOY â€” never deploy to Vercel production or apply Supabase migrations without 
+   explicit instruction from Michael.
+
+Repos in scope: jrb9900n/jrb-assistant-scripts, jrb9900n/FleetOps, 
+jrb9900n/FieldOps, jrb9900n/AuditMatchingEngine.
+
+Start your response with the scope proposal. Do not write any code yet.`;
+}
+
+function inferTaskType(text) {
+  const t = text.toLowerCase();
+  if (/email|inbox|draft|send|reply|message/i.test(t))   return 'email';
+  if (/invoice|payment|overdue|quickbooks|crm|deal|hubspot/i.test(t)) return 'crm';
+  if (/report|summary|analyse|analyze|pipeline/i.test(t)) return 'report';
+  if (/script|code|write|function|playwright|automate/i.test(t)) return 'code';
+  if (/file|folder|onedrive|save|upload/i.test(t))       return 'file';
+  return 'general';
+}
+
+// â”€â”€ HTTP server â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+const EXECUTE_SECRET = process.env.CLAUDE_EXECUTE_SECRET;
+
+const server = http.createServer(async (req, res) => {
+  console.log('[REQUEST]', req.method, req.url, 'from', req.socket.remoteAddress);
+  // ── OAuth — Claude.ai connector authentication ─────────────────────────────
+  if (req.method === 'GET' && (req.url?.startsWith('/oauth/authorize') || req.url?.startsWith('/authorize'))) { await handleOAuthAuthorize(req, res); return; }
+  if (req.method === 'GET' && req.url?.startsWith('/oauth/approve')) { await handleOAuthApprove(req, res); return; }
+  if (req.method === 'POST' && (req.url === '/oauth/token' || req.url === '/token')) { await handleOAuthToken(req, res); return; }
+
+  if (req.url === '/introspect' || req.url?.startsWith('/introspect')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+    const chunks = []; for await (const c of req) chunks.push(c);
+    const body = new URLSearchParams(Buffer.concat(chunks).toString());
+    const token = body.get('token');
+    const validTokens = [process.env.CLAUDE_EXECUTE_SECRET, process.env.OAUTH_CLIENT_SECRET, 'jrb-mcp-token-2026'].filter(Boolean);
+    const active = validTokens.includes(token);
+    console.log('[introspect] token check:', active ? 'valid' : 'invalid');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ active, scope: 'mcp', token_type: 'Bearer' }));
+    return;
+  }
+
+  if (req.url?.startsWith('/.well-known/')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    const wkUrl = req.url || '';
+    if (wkUrl.includes('oauth-protected-resource')) {
+      res.end(JSON.stringify({ resource: 'https://agent.jrboehlke.com/mcp4', authorization_servers: ['https://agent.jrboehlke.com'] }));
+    } else {
+      res.end(JSON.stringify({ issuer: 'https://agent.jrboehlke.com', authorization_endpoint: 'https://agent.jrboehlke.com/authorize', token_endpoint: 'https://agent.jrboehlke.com/token', registration_endpoint: 'https://agent.jrboehlke.com/register', response_types_supported: ['code'], grant_types_supported: ['authorization_code'], code_challenge_methods_supported: ['S256'], token_endpoint_auth_methods_supported: ['none', 'client_secret_post'] }));
+    }
+    return;
+  }
+  if (req.url === '/register' || req.url?.startsWith('/register?')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+    if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
+    const rChunks = []; for await (const c of req) rChunks.push(c);
+    let rParsed = {}; try { rParsed = JSON.parse(Buffer.concat(rChunks).toString()); } catch {}
+    console.log('[REGISTER] client_name:', rParsed.client_name, 'redirect_uris:', JSON.stringify(rParsed.redirect_uris));
+    const dynClientId = 'claude-' + Math.random().toString(36).slice(2);
+    dynamicClients.set(dynClientId, { redirect_uris: rParsed.redirect_uris, client_name: rParsed.client_name });
+    res.writeHead(201, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ client_id: dynClientId, client_secret: process.env.CLAUDE_EXECUTE_SECRET, redirect_uris: rParsed.redirect_uris || ['https://claude.ai/api/mcp/auth_callback'], grant_types: ['authorization_code'], response_types: ['code'], token_endpoint_auth_method: 'none', client_id_issued_at: Math.floor(Date.now()/1000), client_secret_expires_at: 0 }));
+    return;
+  }
+
+  // ── MCP — Claude.ai native tool connection ───────────────────────────────────
+  // ── /mcp4 — already present
+  if (req.url === '/mcp4' || req.url?.startsWith('/mcp4?') || req.url?.startsWith('/mcp4/')) {
+    if (req.method === 'OPTIONS') { handleMcpOptions(req, res); return; }
+    // Validate Bearer token if present
+    const authHeader = req.headers['authorization'] || '';
+    const bearerToken = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (bearerToken && bearerToken !== process.env.CLAUDE_EXECUTE_SECRET && bearerToken !== process.env.OAUTH_CLIENT_SECRET && bearerToken !== 'jrb-mcp-token-2026') {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.writeHead(401, { 'Content-Type': 'application/json', 'WWW-Authenticate': 'Bearer' });
+      res.end(JSON.stringify({ error: 'invalid_token' })); return;
+    }
+    if (req.method === 'POST') { await handleMcpPost(req, res); return; }
+    if (req.method === 'GET') { await handleMcpGet(req, res); return; }
+    res.writeHead(405); res.end('Method not allowed'); return;
+  }
+
+  // ── /mcp3 — Streamable HTTP transport (Claude.ai connector) ──────────────────
+  if (req.url === '/mcp3' || req.url?.startsWith('/mcp3?') || req.url?.startsWith('/mcp3/')) {
+    if (req.method === 'OPTIONS') { handleMcpOptions(req, res); return; }
+    if (req.method === 'POST') { await handleMcpPost(req, res); return; }
+    if (req.method === 'GET') { await handleMcpGet(req, res); return; }
+    res.writeHead(405); res.end('Method not allowed'); return;
+  }
+  if (req.url === '/mcp' || req.url?.startsWith('/mcp?') || req.url === '/mcp2' || req.url?.startsWith('/mcp2?')) {
+    const mcpBase = (req.url === '/mcp2' || req.url?.startsWith('/mcp2?')) ? '/mcp2' : '/mcp';
+    await handleMcpRequest(req, res, mcpBase); return;
+  }
+  if (req.method === 'POST' && (req.url?.startsWith('/mcp/message') || req.url?.startsWith('/mcp2/message'))) {
+    await handleMcpMessage(req, res); return;
+  }
+
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Execute-Secret');
+    res.writeHead(204); res.end(); return;
+  }
+
+  if (req.method === 'POST' && req.url === '/execute') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const provided = req.headers['x-execute-secret'];
+    if (!EXECUTE_SECRET || provided !== EXECUTE_SECRET) {
+      logger.warn('Unauthorized /execute attempt', { ip: req.socket.remoteAddress });
+      res.writeHead(401); res.end('Unauthorized'); return;
+    }
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks).toString();
+    let task;
+    try { task = JSON.parse(body).task; if (!task) throw new Error('Missing task'); }
+    catch { res.writeHead(400); res.end('Bad request'); return; }
+    logger.info('Execute task received', { task: task.slice(0, 120) });
+    try {
+      const { result } = await runAgent({ task, taskType: inferTaskType(task) });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, result }));
+    } catch (err) {
+      logger.error('Execute error', { err: err.message });
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: err.message }));
+    }
+    return;
+  }
+
+  if (req.method !== 'POST' || req.url !== '/api/messages') {
+    res.writeHead(404);
+    res.end('Not found');
+    return;
+  }
+
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  const body = Buffer.concat(chunks).toString();
+
+  let activity;
+  try {
+    activity = JSON.parse(body);
+  } catch {
+    res.writeHead(400);
+    res.end('Bad request');
+    return;
+  }
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end('{}');
+
+  if (activity.type !== 'message' || !activity.text) return;
+
+  const text = activity.text.replace(/<at>[^<]+<\/at>/g, '').trim();
+  if (!text) return;
+
+  logger.info('Teams message received', {
+    serviceUrl: activity.serviceUrl,
+    from: activity.from?.name,
+    text: text.slice(0, 80),
+  });
+
+  try {
+    await replyToTeams(activity, 'â³ Working on it...');
+    const reply = await handleMessage(text, activity);
+    const msgChunks = chunkText(reply, 24000);
+    for (const chunk of msgChunks) {
+      await replyToTeams(activity, chunk);
+    }
+  } catch (err) {
+    logger.error('Teams handler error', { err: err.message });
+    await replyToTeams(activity, `âŒ Error: ${err.message}`);
+  }
+});
+
+function chunkText(text, maxLen) {
+  if (text.length <= maxLen) return [text];
+  const chunks = [];
+  let i = 0;
+  while (i < text.length) {
+    chunks.push(text.slice(i, i + maxLen));
+    i += maxLen;
+  }
+  return chunks;
+}
+
+server.listen(PORT, () => {
+  logger.info(`Teams bot listening on port ${PORT}`);
+});
+
+export default server;
