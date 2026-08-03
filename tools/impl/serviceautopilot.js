@@ -351,6 +351,40 @@ function looksLikeIncapsula(res) {
   );
 }
 
+async function saGet(page, url) {
+  const result = await page.evaluate(async (url) => {
+    const res = await window.fetch(url, { credentials: 'include' });
+    const text = await res.text();
+    return { status: res.status, text };
+  }, url);
+  return result;
+}
+
+/**
+ * Read-only raw GET fetch inside the live SA browser session (same TLS/cookie
+ * context as post()). Used for investigative work — e.g. pulling down SA's own
+ * minified JS bundles to search for endpoint names not otherwise documented.
+ */
+export async function fetchRawUrl({ url }) {
+  const page = await getSession();
+  return saGet(page, url);
+}
+
+/**
+ * Actually navigates the live browser tab to a client's ClientView.aspx page
+ * (a real page.goto(), not just a spoofed Referer header). Some SA endpoints
+ * (confirmed: GetQboCompanyData) throw a server-side NullReferenceException
+ * unless the ASP.NET session has real per-session state from having loaded
+ * that specific customer's page first — a plain XHR with a Referer header
+ * alone isn't enough for those. Call this before such endpoints.
+ */
+export async function navigateToClientView({ clientId }) {
+  const page = await getSession();
+  await page.goto(`${SA_BASE}/ClientView.aspx?ID=${clientId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // Give the page's own onload JS (which establishes server-side session context) a moment to run.
+  await new Promise(r => setTimeout(r, 3000));
+}
+
 async function post(path, body, referer) {
   readSharedBackoff();
   if (Date.now() < _incapsulaBackoffUntil) {
@@ -1254,6 +1288,66 @@ export async function getClientProfile({ clientId }) {
 }
 
 /**
+ * SA's own real "QBO Catchup Sync" feature, reverse-engineered from
+ * QboCompanyOverlay.js (the client page's "Link to QuickBooks" panel,
+ * opened via ClientView's ShowQboCompany()). `doInitialSync: true` is what
+ * the UI sends when no catch-up date is chosen — the option meant for a
+ * client that's never synced before. This is a first-class, documented SA
+ * UI action, not a workaround.
+ */
+export async function triggerQboInitialSync({ clientId }) {
+  const res = await post('/v3/WebServices/Shared/UtilitiesWs.asmx/TriggerQBOInitialSync', {
+    SAPCustomerID: clientId,
+    browserDate: { Month: 1, Day: 1, Year: 2014 },
+    doInitialSync: true,
+  }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA triggerQboInitialSync: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const errors = d.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA triggerQboInitialSync failed: ${JSON.stringify(errors)}`);
+  }
+  logger.info('SA: QBO initial sync triggered', { clientId });
+  return { clientId, errors };
+}
+
+/**
+ * Read-only status check for SA's QBO company-sync overlay — last sync
+ * time, subscription status, sync step, and error code for a given client.
+ */
+export async function getQboCompanyData({ clientId }) {
+  const res = await post('/WebServices/ClientViewWs.asmx/GetQboCompanyData',
+    { customerId: clientId }, 'ClientView.aspx');
+  const result = res.data?.d?.Result;
+  if (!result) {
+    throw new Error(`SA getQboCompanyData: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  return result;
+}
+
+/**
+ * Read-only check of the SA client's own QboID link (the field that gates
+ * whether SA's automatic invoice sync has a QBO customer to push to).
+ * Returns the raw field set — SA doesn't reliably use one consistent key
+ * name across responses, so callers should check all of them.
+ */
+export async function getClientQboLink({ clientId }) {
+  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getClientQboLink: no data returned for clientId ${clientId}`);
+  return {
+    clientId,
+    name: d.PropertyName || `${d.FirstName || ''} ${d.LastName || ''}`.trim(),
+    QboID: d.QboID ?? null,
+    QboId: d.QboId ?? null,
+    HasQBO: d.HasQBO ?? null,
+  };
+}
+
+/**
  * Fetch the Pavement Size custom field value for a single SA client.
  * Uses GetCustomerDataAsync to get the CustomerJobID, then GetCustomFields to read
  * the "Pavement Size" field by Description. Returns sq ft as a number, or null.
@@ -1688,4 +1782,164 @@ export async function updateRouteOrder({ scheduleDate, jobIds }) {
 
   logger.info('SA: route order updated', { scheduleDate, count: jobIds.length });
   return { success: true, count: jobIds.length };
+}
+
+// ── Invoice editing — InvoiceOverlay.asmx ────────────────────────────────────
+
+/**
+ * Fetch the full editable record for an SA invoice via InvoiceOverlay.asmx.
+ * Returns the raw `d` object — CustomerData, LineItems (rate/qty/tax/dates),
+ * SalesTax, Total, QboID, HasQBO, IsLocked, InvoiceNumber, InvoiceDate, etc.
+ */
+export async function getInvoice({ invoiceId }) {
+  const res = await post('/WebServices/InvoiceOverlay.asmx/GetInvoice',
+    { InvoiceID: invoiceId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA getInvoice: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  return d;
+}
+
+// GetInvoice returns date fields as {Month, Day, Year, IsValid} with Month
+// 0-indexed (Jan=0). SaveInvoice's InvoiceData expects Month 1-indexed (Jan=1)
+// — confirmed 2026-07-31 via a live isolated single-field test (sending Month+1
+// reproduced the exact original date with zero drift; sending Month raw shifted
+// the date back one calendar month, compounding on every save). This mirrors
+// SA's own real browser UI (independently observed via live network capture),
+// which has always sent Month+1 relative to GetInvoice's read for the same
+// invoice/moment. Applies to InvoiceDate, InvoiceDueDate, and every
+// LineItems[].Date. IsValid is dropped — real UI payloads never send it.
+// If a date is passed via `overrides` in saveInvoiceFields (bypassing this
+// conversion), supply an already-1-indexed month yourself (June = 6).
+function toSaveInvoiceDate(dateObj) {
+  if (!dateObj || typeof dateObj !== 'object') return dateObj;
+  return { Month: dateObj.Month + 1, Day: dateObj.Day, Year: dateObj.Year };
+}
+
+/**
+ * Read-modify-write an SA invoice via InvoiceOverlay.asmx, round-tripping the
+ * full record from GetInvoice unchanged except for whatever's in `overrides`.
+ * Converts InvoiceDate/InvoiceDueDate/LineItems[].Date to SaveInvoice's
+ * 1-indexed-month shape automatically (see toSaveInvoiceDate). `overrides` are
+ * applied last and are NOT auto-converted — pass already-1-indexed months there.
+ * `expect` is an optional {field: expectedValue} map checked against a fresh
+ * GetInvoice read after saving; throws if any field doesn't match.
+ */
+export async function saveInvoiceFields({ invoiceId, overrides = {}, expect = {} }) {
+  const d = await getInvoice({ invoiceId });
+  const invoiceData = {
+    ...d,
+    // GetInvoice returns these as null when empty, but a real save from SA's
+    // own UI always sends "" / [] respectively — confirmed 2026-07-31 from a
+    // live capture of a successful lock-toggle save. Raw null causes a
+    // server-side NullReferenceException specifically on that path.
+    TxnID: d.TxnID ?? '',
+    DeletedLineItems: d.DeletedLineItems ?? [],
+    InvoiceDate: toSaveInvoiceDate(d.InvoiceDate),
+    InvoiceDueDate: toSaveInvoiceDate(d.InvoiceDueDate),
+    LineItems: (d.LineItems || []).map(li => ({ ...li, Date: toSaveInvoiceDate(li.Date) })),
+    ...overrides,
+  };
+
+  const saveRes = await post('/WebServices/InvoiceOverlay.asmx/SaveInvoice',
+    { InvoiceData: invoiceData }, 'ClientView.aspx');
+  const result = saveRes.data?.d;
+  if (result?.Errors?.length > 0) {
+    throw new Error(`SA saveInvoiceFields errors: ${JSON.stringify(result.Errors)}`);
+  }
+
+  const verify = await getInvoice({ invoiceId });
+  for (const [field, expected] of Object.entries(expect)) {
+    if (verify[field] !== expected) {
+      throw new Error(`SA saveInvoiceFields: verification failed — expected ${field}="${expected}", GetInvoice shows "${verify[field]}"`);
+    }
+  }
+  return verify;
+}
+
+/**
+ * Toggle an invoice's number — the established manual technique for forcing
+ * SA to re-attempt its one-way sync to QBO. Round-trips the invoice unchanged
+ * except InvoiceNumber.
+ */
+export async function setInvoiceNumber({ invoiceId, newNumber }) {
+  return saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: newNumber },
+    expect: { InvoiceNumber: newNumber },
+  });
+}
+
+/**
+ * Automates the manual "append/remove a character on the invoice number to
+ * force a resync" technique. Unlocks (if locked), appends 'z' to the invoice
+ * number, saves once, polls GetInvoice for a populated QboID, then ALWAYS
+ * reverts the number and restores the original lock state — regardless of
+ * whether the sync completed — so this never leaves an invoice in a
+ * half-toggled state even on failure/timeout.
+ */
+export async function resyncInvoiceToQbo({ invoiceId, pollIntervalMs = 15_000, maxPolls = 8 }) {
+  const before = await getInvoice({ invoiceId });
+  const originalNumber = before.InvoiceNumber;
+  const originalLocked = !!before.IsLocked;
+  const alreadyQboId = before.QboID || null;
+
+  logger.info('SA: resyncInvoiceToQbo starting', { invoiceId, originalNumber, originalLocked, alreadyQboId });
+
+  await saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: `${originalNumber}z`, IsLocked: false },
+    expect: { InvoiceNumber: `${originalNumber}z` },
+  });
+
+  let qboId = null;
+  let attempts = 0;
+  for (let i = 0; i < maxPolls; i++) {
+    attempts++;
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    const check = await getInvoice({ invoiceId });
+    if (check.QboID) {
+      qboId = check.QboID;
+      break;
+    }
+  }
+
+  await saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: originalNumber, IsLocked: originalLocked },
+    expect: { InvoiceNumber: originalNumber },
+  });
+  attempts++;
+
+  const synced = !!qboId;
+  if (!synced) {
+    logger.warn('SA: resyncInvoiceToQbo did not observe a QboID within poll budget — reverted, not retrying further', { invoiceId, maxPolls });
+  } else {
+    logger.info('SA: resyncInvoiceToQbo synced successfully', { invoiceId, qboId });
+  }
+
+  return { invoiceId, synced, qboId, originalNumber, originalLocked, attempts };
+}
+
+// ── Client bulk-delete — ClientList.asmx ─────────────────────────────────────
+
+/**
+ * The real "select clients in the list view, click Delete" action.
+ * Destructive and irreversible — callers must verify zero attached
+ * jobs/invoices/estimates/waiting-list entries before calling this.
+ */
+export async function deleteClients({ clientIds }) {
+  const res = await post('/webservices/ClientList.asmx/DeleteClients',
+    { DeleteItems: clientIds }, 'ClientList.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA deleteClients: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const errors = d.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA deleteClients failed: ${JSON.stringify(errors)}`);
+  }
+  logger.info('SA: clients deleted', { requested: clientIds.length, removed: (d.RemovedIndexes || []).length });
+  return { requested: clientIds.length, removedIds: clientIds, errors };
 }
