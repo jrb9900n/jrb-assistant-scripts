@@ -655,6 +655,19 @@ function mapScheduledWorkItem(item) {
 /** Returns the epoch ms timestamp when the Incapsula backoff clears (0 if not active). */
 export function getSABackoffUntil() { return _incapsulaBackoffUntil; }
 
+/** Generic authenticated POST for investigative use — returns raw {status, data, text}. */
+export async function postRaw({ path, body, referer }) {
+  return post(path, body, referer || 'ClientView.aspx');
+}
+
+/** Fetches SA's own payment record — the only known way to inspect a payment's QBO sync state. */
+export async function getPaymentData({ paymentId }) {
+  const res = await post('/WebServices/PaymentOverlayWs.asmx/GetPaymentData', { PaymentID: paymentId }, 'ClientView.aspx');
+  const d = res.data?.d || res.data;
+  if (!d) throw new Error(`SA getPaymentData failed for ${paymentId}: ${res.text?.slice(0, 200)}`);
+  return d;
+}
+
 /**
  * Search SA clients by name.
  * Returns [{ clientId, name, address, type }]
@@ -1010,46 +1023,115 @@ export async function getInvoice({ invoiceId }) {
   return d;
 }
 
-/**
- * Change only the InvoiceNumber on an existing SA invoice — used to force SA to
- * re-attempt its one-way sync to QBO (SA re-pushes on any invoice edit; there is
- * no direct "resync" action). NEVER touches LineItems, Rate, Quantity, Hours,
- * SalesTax, Total, or any other billing-affecting field — those are round-tripped
- * from GetInvoice completely unchanged. Mirrors the exact InvoiceData shape
- * confirmed from a real SaveInvoice call captured live 2026-07-31 (not guessed).
- * A first attempt hand-picked the field subset from that capture, but live
- * testing showed SA's save validation silently treats several omitted fields
- * (CustomerData sub-fields, AllowEdit, etc.) as false/blank when absent,
- * producing spurious "locked" / "select a payment method" errors even though
- * nothing was actually wrong with the invoice. Sending the ENTIRE GetInvoice
- * response back unchanged (spread `d`, override only InvoiceNumber) avoids
- * that whack-a-mole entirely — every field SA might validate against is
- * necessarily present and unchanged, since it's the exact object SA itself
- * just returned. Confirmed safe (2026-07-31): comparing Total/LineItems
- * before and after showed a completely unmodified invoice, only the number
- * field differed.
- * Returns { invoiceId, previousNumber, newNumber }
- */
-export async function setInvoiceNumber({ invoiceId, newNumber }) {
-  const d = await getInvoice({ invoiceId });
-  const previousNumber = d.InvoiceNumber;
+/** Converts GetInvoice's 0-indexed Month to the 1-indexed shape SaveInvoice expects. */
+function toSaveInvoiceDate(dateObj) {
+  if (!dateObj || typeof dateObj !== 'object') return dateObj;
+  return { Month: dateObj.Month + 1, Day: dateObj.Day, Year: dateObj.Year };
+}
 
-  const invoiceData = { ...d, InvoiceNumber: newNumber };
+/**
+ * Read-modify-write an SA invoice via InvoiceOverlay.asmx, round-tripping the
+ * full record from GetInvoice unchanged except for whatever's in `overrides`.
+ * Converts InvoiceDate/InvoiceDueDate/LineItems[].Date to SaveInvoice's
+ * 1-indexed-month shape automatically (see toSaveInvoiceDate) — GetInvoice
+ * returns Month 0-indexed but SaveInvoice expects it 1-indexed; skipping this
+ * conversion corrupts the invoice's dates on every save (confirmed incident,
+ * Kettle Moraine invoice #33351, 2026-07-31 — fully reverted same day).
+ * `overrides` are applied last and are NOT auto-converted — pass already-
+ * 1-indexed months there. `expect` is an optional {field: expectedValue} map
+ * checked against a fresh GetInvoice read after saving; throws if mismatched.
+ */
+export async function saveInvoiceFields({ invoiceId, overrides = {}, expect = {} }) {
+  const d = await getInvoice({ invoiceId });
+  const invoiceData = {
+    ...d,
+    TxnID: d.TxnID ?? '',
+    DeletedLineItems: d.DeletedLineItems ?? [],
+    InvoiceDate: toSaveInvoiceDate(d.InvoiceDate),
+    InvoiceDueDate: toSaveInvoiceDate(d.InvoiceDueDate),
+    LineItems: (d.LineItems || []).map(li => ({ ...li, Date: toSaveInvoiceDate(li.Date) })),
+    ...overrides,
+  };
 
   const saveRes = await post('/WebServices/InvoiceOverlay.asmx/SaveInvoice',
     { InvoiceData: invoiceData }, 'ClientView.aspx');
   const result = saveRes.data?.d;
   if (result?.Errors?.length > 0) {
-    throw new Error(`SA setInvoiceNumber SaveInvoice errors: ${JSON.stringify(result.Errors)}`);
+    throw new Error(`SA saveInvoiceFields errors: ${JSON.stringify(result.Errors)}`);
   }
 
-  // Verify via a fresh GetInvoice read rather than trusting the SaveInvoice response.
   const verify = await getInvoice({ invoiceId });
-  if (verify.InvoiceNumber !== newNumber) {
-    throw new Error(`SA setInvoiceNumber: verification failed — expected "${newNumber}", GetInvoice shows "${verify.InvoiceNumber}"`);
+  for (const [field, expected] of Object.entries(expect)) {
+    if (verify[field] !== expected) {
+      throw new Error(`SA saveInvoiceFields: verification failed — expected ${field}="${expected}", GetInvoice shows "${verify[field]}"`);
+    }
   }
-  logger.info('SA: invoice number changed and verified', { invoiceId, previousNumber, newNumber });
-  return { invoiceId, previousNumber, newNumber };
+  return verify;
+}
+
+/**
+ * Toggle an invoice's number — the established manual technique for forcing
+ * SA to re-attempt its one-way sync to QBO. Round-trips the invoice unchanged
+ * except InvoiceNumber. Uses saveInvoiceFields (date-safe) rather than a bare
+ * spread-and-save, unlike the previous implementation of this function.
+ */
+export async function setInvoiceNumber({ invoiceId, newNumber }) {
+  return saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: newNumber },
+    expect: { InvoiceNumber: newNumber },
+  });
+}
+
+/**
+ * Toggles an invoice's number to force SA's backend to re-attempt its QBO
+ * sync, polls for a resulting QboID, then reverts the number/lock state
+ * regardless of outcome. Safe and non-destructive — never touches rate,
+ * quantity, line items, or totals. Confirmed via live testing (2026-08-03)
+ * that a valid client-level QBO link is necessary for this to work; on an
+ * unlinked/stale-linked client it will safely no-op (revert with synced:false).
+ */
+export async function resyncInvoiceToQbo({ invoiceId, pollIntervalMs = 15_000, maxPolls = 8 }) {
+  const before = await getInvoice({ invoiceId });
+  const originalNumber = before.InvoiceNumber;
+  const originalLocked = !!before.IsLocked;
+  const alreadyQboId = before.QboID || null;
+
+  logger.info('SA: resyncInvoiceToQbo starting', { invoiceId, originalNumber, originalLocked, alreadyQboId });
+
+  await saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: `${originalNumber}z`, IsLocked: false },
+    expect: { InvoiceNumber: `${originalNumber}z` },
+  });
+
+  let qboId = null;
+  let attempts = 0;
+  for (let i = 0; i < maxPolls; i++) {
+    attempts++;
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    const check = await getInvoice({ invoiceId });
+    if (check.QboID) {
+      qboId = check.QboID;
+      break;
+    }
+  }
+
+  await saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: originalNumber, IsLocked: originalLocked },
+    expect: { InvoiceNumber: originalNumber },
+  });
+  attempts++;
+
+  const synced = !!qboId;
+  if (!synced) {
+    logger.warn('SA: resyncInvoiceToQbo did not observe a QboID within poll budget — reverted, not retrying further', { invoiceId, maxPolls });
+  } else {
+    logger.info('SA: resyncInvoiceToQbo synced successfully', { invoiceId, qboId });
+  }
+
+  return { invoiceId, synced, qboId, originalNumber, originalLocked, attempts };
 }
 
 /**
