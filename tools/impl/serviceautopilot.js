@@ -1254,6 +1254,26 @@ export async function getClientProfile({ clientId }) {
 }
 
 /**
+ * Read-only check of the SA client's own QboID link (the field that gates
+ * whether SA's automatic invoice sync has a QBO customer to push to).
+ * Returns the raw field set — SA doesn't reliably use one consistent key
+ * name across responses, so callers should check all of them.
+ */
+export async function getClientQboLink({ clientId }) {
+  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getClientQboLink: no data returned for clientId ${clientId}`);
+  return {
+    clientId,
+    name: d.PropertyName || `${d.FirstName || ''} ${d.LastName || ''}`.trim(),
+    QboID: d.QboID ?? null,
+    QboId: d.QboId ?? null,
+    HasQBO: d.HasQBO ?? null,
+  };
+}
+
+/**
  * Fetch the Pavement Size custom field value for a single SA client.
  * Uses GetCustomerDataAsync to get the CustomerJobID, then GetCustomFields to read
  * the "Pavement Size" field by Description. Returns sq ft as a number, or null.
