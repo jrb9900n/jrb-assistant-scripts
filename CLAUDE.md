@@ -129,36 +129,7 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 
 ## Open Issues / Current Priorities
 
-*(No open issues as of 2026-05-21)*
-
----
-
-## Overnight SA Report (built 2026-05-21)
-
-Daily HTML email to michael@jrboehlke.com at 6 AM with SA activity from the prior day.
-
-### Report sections
-1. **Jobs Accepted Yesterday** — Won estimates first seen since prior 6 AM run, sorted by amount
-2. **Accepted — Awaiting Waiting List** — persistent day-over-day; auto-resolves when client appears in `sa_waiting_list`; shows days-since-won and pipeline total
-3. **Estimates Sent Yesterday** — Sent-stage estimates, QuoteDate = yesterday, sorted by amount
-4. **Aging Estimates** — Sent 7–60 days ago, no acceptance (follow-up candidates)
-5. **Today's Dispatch** — job count + crew from `sa_jobs` for today's date
-
-### Key files
-- `tools/impl/overnight-report.js` — report generation, Supabase tracking, HTML email
-- `tools/impl/serviceautopilot.js` — added `getEstimateList({ dateFrom, dateTo, stages, max })` read function
-- `scheduler/cron.js` — `overnight_sa_report` task at `0 6 * * *`
-
-### Supabase (fleetops — mzywmgesulyalevtzudw)
-New table: `sa_accepted_estimates` — tracks Won estimates for day-over-day reporting.
-- `estimate_id` PK, `client_name`, `client_id`, `address`, `sales_rep`, `service_type`, `amount`, `quote_date`
-- `first_seen_at` — when first observed as Won (used for "accepted yesterday" logic)
-- `resolved_at` / `resolved_reason` — set when client appears in `sa_waiting_list`
-
-### Notes
-- Bootstraps on first real cron run: all Won estimates from last 60 days inserted with `first_seen_at = now()`. "Accepted yesterday" is empty on day one, accurate from day two.
-- Uses `Promise.allSettled` — a failed SA section (e.g., browser login timeout) does not block the email.
-- SA estimate queries use `puppeteer-core` browser session (same as other SA tools). Sections 1–4 require a live SA login; section 5 reads Supabase only.
+*(No open issues as of 2026-05-20)*
 
 ## Deployment Note — teams/bot.js
 
@@ -223,7 +194,7 @@ Storage bucket: `expense-receipts` (10MB limit, image/* + PDF)
 
 ## Service Autopilot Write Tools (built 2026-05-18)
 
-SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints. Session cached 4 hours.
+SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints. Browser is kept open for the full 4-hour session (not closed after login) and all API calls run via `page.evaluate()` inside Chromium — bypasses Incapsula JA3 TLS fingerprint detection that blocked Node.js `fetch()` calls after rapid restarts.
 
 ### Available SA tools
 - `sa_search_clients` — search by name
@@ -235,6 +206,7 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 - `sa_create_estimate` — create estimate with line items; preserves template EstimateNote; returns `placeholders` array for `[x]`-style tokens
 - `sa_update_estimate_notes` — re-save estimate with filled placeholder values
 - `sa_create_job` — schedule waiting-list job from estimate via CreateServiceJobFromQuote + SaveWaitingListService
+- `sa_set_billing_defaults` — set Taxable=Tax, InvoiceDelivery=Email on a client (call ~5 min after `sa_create_client`)
 
 ### Key constants
 - `EMPTY_GUID` = `00000000-0000-0000-0000-000000000000`
@@ -244,6 +216,7 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 ### Known limitations
 - `createJob` / `SaveWaitingListService` errors with "Object reference not set" on the APIProbe test account — that account has no commission configuration. Works on JRB production account.
 - SA_EMAIL and SA_PASSWORD must be in Credential Manager as `JRBAgent:SA_EMAIL` and `JRBAgent:SA_PASSWORD`
+- **No dedicated API endpoint exists for `Taxable` or `InvoiceDelivery` fields.** Exhaustive probing of ClientView-minified.js (207 KB), ClientList.js (171 KB), and sa-minified.js (1.1 MB) confirmed zero save endpoints for these fields specifically. Workaround: `sa_set_billing_defaults` calls `ClientEditOverlayWs.asmx/GetClientInfo` to get the full client record, overrides `SalesTaxCodeID` (JRB "Tax" code `c432e644-…`) and `SendInvoiceBy` ("Email"), then POSTs to `ClientEditOverlayWs.asmx/SaveClient` with the full payload. No puppeteer UI clicking required.
 
 ---
 
@@ -276,7 +249,7 @@ Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users
 ## Credentials
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
-Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
+Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~July 2026 — calendar reminder set), `GITHUB_TOKEN` (expires every 90 days), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
 
 Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 
@@ -309,7 +282,7 @@ All functions accept optional `userEmail` param — omit for `assistant@`, pass 
 `email_catalog` table — idempotent upsert on `message_id`. Columns: mailbox, subject, from_address, category, action_taken, folder, thread_id, snippet, etc.
 
 ### Azure app permissions (Application, admin-consented)
-`Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`, `Contacts.ReadWrite`
+`Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`
 
 ### SharePoint gotchas
 - Graph Search API requires `region: 'NAM'` when using Application permissions
@@ -318,8 +291,41 @@ All functions accept optional `userEmail` param — omit for `assistant@`, pass 
 
 ---
 
+## CardDAV Contact Server (built 2026-05-21)
+
+Replaces Outlook contact sync. Serves QBO customers + vendors as a read-only CardDAV addressbook at `https://agent.jrboehlke.com/carddav/`. Employees add it as a native Contacts account on iOS/Android — contacts appear in the phone dialer. Revoking a credential instantly cuts access; contacts disappear from the phone on the next sync.
+
+### How it works
+- Per-employee tokens stored in Supabase `carddav_credentials` table (jrb-assistant project)
+- QBO contacts fetched via QB API and cached 2 hours; cache refreshes on next sync request
+- vCard 3.0 format; UID format `JRB-CUSTOMER-{Id}@jrboehlke.com` / `JRB-VENDOR-{Id}@jrboehlke.com`
+- CATEGORIES field = `JRB Customer` or `JRB Vendor` (creates groups on iOS)
+
+### Setup on iOS
+Settings → Contacts → Accounts → Add Account → Other → Add CardDAV Account
+- Server: `https://agent.jrboehlke.com/carddav/`
+- User Name: `[employee email]`
+- Password: `[token from carddav_provision]`
+
+### Setup on Android
+Open Contacts → Settings → Add account → Other → CardDAV (same credentials)
+
+### Agent tools (crm + general taskTypes)
+- `carddav_provision` — creates/rotates token for an employee; returns setup instructions
+- `carddav_revoke` — deactivates a credential; employee loses access on next sync
+- `carddav_list` — shows all credentials, active status, and last sync time
+
+### Key file
+- `tools/impl/carddav.js` — CardDAV handler + credential management
+- Routes added to `teams/bot.js` BEFORE the CORS OPTIONS handler (CardDAV has its own OPTIONS)
+
+### Supabase (jrb-assistant — znpahinyplccdyoekfeo)
+Table: `carddav_credentials` — columns: `email`, `name`, `token`, `active`, `created_at`, `last_used`
+
+---
+
 ## Supabase (jrb-assistant project — znpahinyplccdyoekfeo)
-Key tables: `rules` (agent rules/feedback loop), `knowledge_log` (observations), `memory` (session summaries), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller), `email_catalog` (inbox audit trail)
+Key tables: `rules` (agent rules/feedback loop), `knowledge_log` (observations), `memory` (session summaries), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller), `email_catalog` (inbox audit trail), `carddav_credentials` (CardDAV access tokens)
 
 ---
 

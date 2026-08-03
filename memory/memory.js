@@ -32,12 +32,19 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  * @param {number} [opts.limit] - Max summaries to load (default 5)
  */
 export async function loadContext({ topic, limit = 5 }) {
-  // 1. Load recent summaries ordered by relevance (simple keyword match on topic)
-  const { data: summaries } = await supabase
+  let query = supabase
     .from('agent_memory')
     .select('summary, created_at, topics')
     .order('created_at', { ascending: false })
     .limit(limit);
+
+  if (topic) query = query.contains('topics', [topic]);
+
+  const { data: summaries, error } = await query;
+  if (error) {
+    logger.warn('loadContext query failed', { err: error.message, topic });
+    return '';
+  }
 
   if (!summaries?.length) return '';
 
@@ -61,7 +68,21 @@ export async function saveMemory({ messages, topic, runId }) {
   if (!messages?.length) return;
 
   const transcript = messages
-    .map(m => `${m.role}: ${typeof m.content === 'string' ? m.content : JSON.stringify(m.content)}`)
+    .map(m => {
+      if (typeof m.content === 'string') return `${m.role}: ${m.content}`;
+      if (!Array.isArray(m.content)) return '';
+      const parts = m.content.flatMap(b => {
+        if (b.type === 'text') return [b.text];
+        if (b.type === 'tool_use') return [`[tool: ${b.name}(${JSON.stringify(b.input).slice(0, 120)})]`];
+        if (b.type === 'tool_result') {
+          const snippet = typeof b.content === 'string' ? b.content : JSON.stringify(b.content);
+          return [`[tool_result: ${snippet.slice(0, 300)}]`];
+        }
+        return [];
+      });
+      return parts.length ? `${m.role}: ${parts.join(' ')}` : '';
+    })
+    .filter(Boolean)
     .join('\n');
 
   // Summarise with Haiku (cheap)

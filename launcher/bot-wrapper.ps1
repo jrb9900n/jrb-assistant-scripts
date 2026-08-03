@@ -1,25 +1,31 @@
-# Load secrets from Windows Credential Manager
-function Get-Secret($name) {
-    $cred = cmdkey /list:JRBAgent:$name 2>$null
-    $result = cmdkey /list | Select-String "JRBAgent:$name"
-    if ($result) {
-        Add-Type -AssemblyName System.Security
-        $cm = [System.Net.CredentialCache]::DefaultCredentials
+# launcher/bot-wrapper.ps1
+# Kills any orphaned Teams bot process before starting fresh.
+# Task Scheduler runs this instead of start-agent.ps1 directly.
+
+# Kill by port 3978
+$portLine = netstat -ano | Select-String ":3978 .*LISTENING" | Select-Object -First 1
+if ($portLine) {
+    $orphanPid = ($portLine -split '\s+')[-1].Trim()
+    if ($orphanPid -match '^\d+$') {
+        Write-Output "bot-wrapper: killing PID $orphanPid on port 3978"
+        $killResult = taskkill /f /pid $orphanPid 2>&1
+        Write-Output "bot-wrapper: taskkill result: $killResult"
     }
-    # Use credential manager via PowerShell
-    $wincred = Get-StoredCredential -Target "JRBAgent:$name" -ErrorAction SilentlyContinue
-    return $wincred?.Password
 }
 
-# Load all secrets into environment
-$secrets = @(
-    "ANTHROPIC_API_KEY","SUPABASE_URL","SUPABASE_SERVICE_KEY",
-    "M365_TENANT_ID","M365_CLIENT_ID","M365_CLIENT_SECRET",
-    "TEAMS_BOT_APP_SECRET","QB_CLIENT_ID","QB_CLIENT_SECRET",
-    "QB_REFRESH_TOKEN","GITHUB_TOKEN","BRAVE_SEARCH_API_KEY",
-    "SA_EMAIL","SA_PASSWORD","SA_EMAIL_OLD","SA_PASSWORD_OLD"
-)
-
-foreach ($key in $secrets) {
-    $val = (cmdkey /list:JRBAgent:$key 2>&1)
+# Kill by command line using CimInstance (preferred over WMI)
+try {
+    Get-CimInstance Win32_Process -Filter "name='node.exe'" | Where-Object {
+        $_.CommandLine -like '*teams/bot.js*' -or $_.CommandLine -like '*teams\bot.js*'
+    } | ForEach-Object {
+        Write-Output "bot-wrapper: stopping node.exe PID $($_.ProcessId) by command line"
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+} catch {
+    Write-Output "bot-wrapper: CimInstance query failed: $_"
 }
+
+# Wait for OS to release the port before the new process starts
+Start-Sleep -Seconds 4
+
+& "C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1" teams

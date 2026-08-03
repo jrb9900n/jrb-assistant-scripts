@@ -153,6 +153,34 @@ const EMAIL_TOOLS = [
     },
   },
   {
+    name: 'run_inbox_processor',
+    description: 'Run the autonomous inbox processor now on michael@jrboehlke.com. Fetches unread emails, classifies priority, moves to folders, creates draft replies for P1 emails, and sends Teams alerts for hot items. Use when Michael asks to "process inbox", "check my email", "triage inbox", or "run the inbox processor".',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_email_triage',
+    description: 'Query the email_triage table — shows already-processed emails from michael@jrboehlke.com with priority, category, intent, and draft status. Use to answer "what did I get today", "any P1 emails", "what needs a response".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        hours: { type: 'number', description: 'How many hours back to look (default: 24)', default: 24 },
+        priority: { type: 'string', description: 'Filter to p1, p2, or p3' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'send_draft_reply',
+    description: 'Send a draft reply that was saved by the inbox processor. Use when Michael says "send it", "send the draft to [name]", or "go ahead and send".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        draft_id: { type: 'string', description: 'Draft ID from email_triage.draft_id' },
+      },
+      required: ['draft_id'],
+    },
+  },
+  {
     name: 'create_reminder',
     description: 'Create a To Do reminder or task in Microsoft 365.',
     input_schema: {
@@ -251,6 +279,18 @@ const QB_TOOLS = [
         query: { type: 'string', description: 'QBO SQL-like query string e.g. "SELECT * FROM Invoice WHERE Balance > 0"' },
       },
       required: ['query'],
+    },
+  },
+  {
+    name: 'identify_unknown_card',
+    description: 'Register an unknown Chase credit card by linking it to an employee. Updates the credit_cards record with the real last-four digits, routes any pending_identification expense stubs to that employee (sends SMS), and creates a QB CreditCard sub-account under the Chase parent. Call this when Michael says "identify card XXXX as [Employee Name]" after an unknown-card Teams alert.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lastFour:     { type: 'string', description: '4-digit card number from the Chase alert (digits only, e.g. "3421")' },
+        employeeName: { type: 'string', description: 'Employee name matching the credit_cards table (e.g. "Steffen Jacob")' },
+      },
+      required: ['lastFour', 'employeeName'],
     },
   },
 ];
@@ -507,17 +547,19 @@ const SA_TOOLS = [
   },
   {
     name: 'sa_create_client',
-    description: 'Create a new client record in Service Autopilot.',
+    description: 'Create a new client record in Service Autopilot. For business customers, pass companyName (it becomes the SA client name). For individuals, pass firstName + lastName (client name will be "First Last"). Always pass all address fields separately.',
     input_schema: {
       type: 'object',
       properties: {
-        firstName: { type: 'string', description: 'First name' },
-        lastName:  { type: 'string', description: 'Last name' },
-        address:   { type: 'string', description: 'Street address' },
-        city:      { type: 'string', description: 'City' },
-        zip:       { type: 'string', description: 'ZIP code' },
-        email:     { type: 'string', description: 'Email address' },
-        phone:     { type: 'string', description: 'Primary phone number' },
+        firstName:   { type: 'string', description: 'Contact first name' },
+        lastName:    { type: 'string', description: 'Contact last name' },
+        companyName: { type: 'string', description: 'Company/business name — only pass for business customers. Omit for residential.' },
+        address:     { type: 'string', description: 'Street address line 1 (number + street name)' },
+        city:        { type: 'string', description: 'City' },
+        state:       { type: 'string', description: '2-letter state abbreviation, e.g. WI' },
+        zip:         { type: 'string', description: 'ZIP code' },
+        email:       { type: 'string', description: 'Email address' },
+        phone:       { type: 'string', description: 'Primary phone number' },
       },
       required: ['firstName', 'lastName'],
     },
@@ -595,27 +637,141 @@ const SA_TOOLS = [
   },
   {
     name: 'sa_add_ticket',
-    description: 'Add a support ticket or follow-up task to a Service Autopilot client record. Ticket appears in the client timeline. Use for follow-ups, inquiries, or action items.',
+    description: 'Add a CRM ticket to a Service Autopilot client record. Ticket appears in the CRM TicketList. For new inbound leads use category="Estimate" (default) so it appears in the Estimate queue.',
     input_schema: {
       type: 'object',
       properties: {
-        clientId: { type: 'string', description: 'SA Client ID (GUID) from sa_search_clients' },
-        subject:  { type: 'string', description: 'Ticket subject/title' },
-        notes:    { type: 'string', description: 'Ticket body / details' },
-        dueDate:  { type: 'string', description: 'Optional due date ISO 8601 (YYYY-MM-DD)' },
+        clientId:  { type: 'string', description: 'SA Client ID (GUID) from sa_search_clients' },
+        subject:   { type: 'string', description: 'Ticket subject/title' },
+        notes:     { type: 'string', description: 'Ticket body / details' },
+        dueDate:   { type: 'string', description: 'Optional due date ISO 8601 (YYYY-MM-DD)' },
+        category:  { type: 'string', description: 'Ticket category: Estimate (default), Other, Schedule_Service, Account_Issue' },
       },
       required: ['clientId', 'subject'],
     },
   },
   {
     name: 'sa_get_ticket',
-    description: 'Read back a ticket from Service Autopilot by its ID. Use immediately after sa_add_ticket to verify the ticket was saved. Returns ticket subject and status, or null if not found.',
+    description: 'Verify a ticket was saved in Service Autopilot. Call immediately after sa_add_ticket with the returned ticketId. Returns { ticketId } if the ID is confirmed valid, or null if missing/invalid.',
     input_schema: {
       type: 'object',
       properties: {
         ticketId: { type: 'string', description: 'Ticket ID (GUID) returned by sa_add_ticket' },
       },
       required: ['ticketId'],
+    },
+  },
+  {
+    name: 'sa_set_billing_defaults',
+    description: 'Set billing defaults on an existing SA client: Taxable=Tax, InvoiceDelivery=Email. Call as a separate step ~5 minutes after sa_create_client to allow SA indexing to complete. Returns { clientId, sendInvoiceBy, taxable }.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID returned by sa_create_client' },
+      },
+      required: ['clientId'],
+    },
+  },
+  {
+    name: 'sa_set_crackfill',
+    description: 'Calculate Lbs of Crackfill (= Pavement Size × 0.015, rounded) and write it to the SA custom field. If pavementSf is provided, also writes it to the Pavement Size field — use this at client intake when you have the value. If omitted, reads Pavement Size from SA. Call after sa_set_billing_defaults whenever pavementSf is known. Returns { clientId, pavementSf, lbsCrackfill, savedViaApi } or { skipped, reason } if Pavement Size is missing/invalid.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId:   { type: 'string', description: 'SA client GUID' },
+        pavementSf: { type: 'number', description: 'Pavement area in sq ft. If supplied, writes this value to the Pavement Size field and calculates crackfill. If omitted, reads Pavement Size from SA.' },
+      },
+      required: ['clientId'],
+    },
+  },
+  {
+    name: 'sa_list_resources',
+    description: 'List SA dispatch board resources (crews/employees available for scheduling). Returns [{ id, name }]. Call before sa_dispatch_job to confirm the resource ID for a crew name.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'sa_dispatch_job',
+    description: 'Dispatch a waiting-list job to a specific date and crew in Service Autopilot. This moves the job off the waiting list onto the schedule. Use the job_id from sa_waiting_list table (job_id column). Requires a SA resource GUID from sa_list_resources.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        wl_item_id:    { type: 'string', description: 'SA waiting list item UUID (sa_waiting_list.job_id)' },
+        schedule_date: { type: 'string', description: 'ISO date to schedule the job, e.g. "2026-06-16"' },
+        resource_id:   { type: 'string', description: 'SA resource/crew GUID from sa_list_resources' },
+      },
+      required: ['wl_item_id', 'schedule_date', 'resource_id'],
+    },
+  },
+  {
+    name: 'sa_update_route_order',
+    description: 'Set the stop sequence order for jobs already dispatched to the SA dispatch board. Pass the same schedule_date used during dispatch and job_ids as an ordered array (index 0 = stop 1). Call this once after all sa_dispatch_job calls complete for the day.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        schedule_date: { type: 'string', description: 'ISO date, e.g. "2026-06-19"' },
+        job_ids:       { type: 'array', items: { type: 'string' }, description: 'Job UUIDs in stop order — first element = stop 1' },
+      },
+      required: ['schedule_date', 'job_ids'],
+    },
+  },
+  {
+    name: 'sa_fuzzy_match_client',
+    description: 'Compare incoming contact form data against a list of SA search results to find duplicate accounts. Handles nicknames (Deborah/Debbie, Robert/Bob, etc.), address abbreviations (St/Street, Dr/Drive), spouse/same-address matches, and normalized phone/email. Returns the best match with a recommendation: USE_EXISTING, USE_EXISTING_VERIFY, or CREATE_NEW.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        incoming: {
+          type: 'object',
+          description: 'Contact data from the web form',
+          properties: {
+            firstName: { type: 'string' },
+            lastName:  { type: 'string' },
+            address:   { type: 'string', description: 'Street address only (no city/state/zip)' },
+            email:     { type: 'string' },
+            phone:     { type: 'string' },
+          },
+        },
+        candidates: {
+          type: 'array',
+          description: 'SA search results from one or more sa_search_clients calls — merge all results before passing here',
+          items: {
+            type: 'object',
+            properties: {
+              clientId:  { type: 'string' },
+              name:      { type: 'string', description: 'Full name as stored in SA' },
+              firstName: { type: 'string' },
+              lastName:  { type: 'string' },
+              address:   { type: 'string' },
+              email:     { type: 'string' },
+              phone:     { type: 'string' },
+            },
+          },
+        },
+      },
+      required: ['incoming', 'candidates'],
+    },
+  },
+  {
+    name: 'sa_get_client_profile',
+    description: 'Fetch scheduling-relevant client profile from SA: office notes (gate codes, property access instructions, special crew notes), billing notes, address, and phone. Call this before scheduling a client\'s jobs to get property context. Also returns custom fields if configured in SA (CustomField1-6).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID from sa_search_clients' },
+      },
+      required: ['clientId'],
+    },
+  },
+  {
+    name: 'sa_get_client_notes',
+    description: 'Fetch recent CRM notes and tickets for a client — call history, site visit notes, consultation records, issue logs. Returns newest first. Useful for scheduling context: know what was discussed, what issues exist, what services were requested.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID' },
+        limit:    { type: 'number', description: 'Max notes to return (default 10)' },
+      },
+      required: ['clientId'],
     },
   },
 ];
@@ -628,12 +784,12 @@ const SCHEDULING_TOOLS = [
   },
   {
     name: 'get_waiting_list',
-    description: 'Load unscheduled jobs from the SA waiting list. Optionally filter by service keyword.',
+    description: 'Load unscheduled jobs from the SA waiting list. Each job includes internal_notes (SA job-level scheduling notes — timing preferences, access requirements, special instructions), target_date, amount, and budgeted_hours. Optionally filter by service keyword.',
     input_schema: {
       type: 'object',
       properties: {
         service_filter: { type: 'string', description: 'Keyword to filter by service type, e.g. "app 3" or "fert"' },
-        limit: { type: 'number', description: 'Max records to return', default: 100 },
+        limit: { type: 'number', description: 'Max records to return (default 2000)', default: 2000 },
       },
       required: [],
     },
@@ -652,7 +808,7 @@ const SCHEDULING_TOOLS = [
   },
   {
     name: 'get_weather_forecast',
-    description: 'Get 14-day weather forecast for SE Wisconsin including safe_for_fert flag per day.',
+    description: 'Get 14-day weather forecast for SE Wisconsin. Each day includes morning (6am-noon), afternoon (noon-6pm), and evening (6pm-10pm) slots with precip_prob and condition. safe_for_fert is true when at least one daytime slot has <40% rain and temp 45-95F. Use slot data to determine if rain is only evening — morning/afternoon work can still proceed.',
     input_schema: {
       type: 'object',
       properties: {
@@ -688,15 +844,45 @@ const SCHEDULING_TOOLS = [
       required: [],
     },
   },
+  {
+    name: 'sync_pavement_sizes',
+    description: 'Sync the Pavement Size (sq ft) custom field from SA into Supabase for all PMM waiting-list clients. Run this when pavement_sf values are missing from get_waiting_list results. Pass force=true to re-fetch all clients, not just those with null values. Returns { synced, skipped, failed, total }.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        force: { type: 'boolean', description: 'Re-fetch all PMM clients, even those already having a pavement_sf value (default false)' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'record_decision',
+    description: 'Persist a confirmed user decision to session memory so it survives across turns. Call this IMMEDIATELY whenever Michael confirms a specific action — a job move, a hold, an inclusion, an exclusion, a date change, or any fact he states as settled. Use plain English with enough detail to reconstruct the decision: client name, job ID if known, action, and reason. Example: "Amy Braeger (job abc123): CONFIRMED move from 6/19 to 6/18 — listing photos". Once recorded, do NOT ask about that decision again.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Current session ID (shown in Session Context)' },
+        decision:   { type: 'string', description: 'Plain-English statement of the confirmed decision, e.g. "Schulze 483fd6ae: ON HOLD — 4 patches not yet complete"' },
+      },
+      required: ['session_id', 'decision'],
+    },
+  },
 ];
 
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
-  crm:        [...QB_TOOLS, ...SA_TOOLS, ...TEAMS_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
+  // Unattended remediation runs triggered by the self-heal watcher (cron.js) — same as
+  // `code` but WITHOUT github_merge_pr (this runs with no human in the loop, so it must
+  // never be able to merge its own fix — only open a PR for Michael to approve) and
+  // WITHOUT any Teams tool. The watcher sends the final report itself, server-side,
+  // with suppressSelfHeal hardcoded true — trusting the agent to remember to pass that
+  // flag on every response would be a weak boundary for an unsupervised run.
+  auto_fix:   [...CODE_TOOLS.filter(t => t.name !== 'github_merge_pr'), ...FILE_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS.filter(t => ['sa_search_clients','sa_fuzzy_match_client','sa_get_client_profile','sa_get_client_notes','sa_list_resources','sa_dispatch_job','sa_update_route_order'].includes(t.name)), ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],

@@ -283,6 +283,47 @@ export async function submitExpenseReport(token, fields) {
   return { success: true, status: newStatus, maintenance_log_id, maintenance_log_url: maintLogUrl };
 }
 
+// ── Maintenance Log Portal ─────────────────────────────────────
+
+export async function getMaintenanceLogData(logId) {
+  const { data: log, error } = await supabase
+    .from('maintenance_logs')
+    .select('*, assets(id, name, year, make, model)')
+    .eq('id', logId)
+    .single();
+
+  if (error || !log) return null;
+
+  const { data: report } = await supabase
+    .from('expense_reports')
+    .select('id, status, employee_name, submitted_at')
+    .eq('maintenance_log_id', logId)
+    .single();
+
+  return { log, report };
+}
+
+export async function completeMaintenanceLog(logId) {
+  const { data: report, error } = await supabase
+    .from('expense_reports')
+    .select('id, status')
+    .eq('maintenance_log_id', logId)
+    .single();
+
+  if (error || !report) return { error: 'Maintenance log not found' };
+  if (report.status === 'complete') return { success: true, already_complete: true };
+
+  const { error: updateErr } = await supabase
+    .from('expense_reports')
+    .update({ status: 'complete' })
+    .eq('id', report.id);
+
+  if (updateErr) return { error: 'Failed to update status' };
+
+  logger.info('Maintenance log completed', { logId, reportId: report.id });
+  return { success: true };
+}
+
 async function uploadReceiptToQboAsync(reportId, qboTransactionId, storagePath) {
   try {
     const { data: blob, error } = await supabase.storage
