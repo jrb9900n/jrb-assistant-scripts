@@ -30,10 +30,20 @@ export const logger = winston.createLogger({
 let _supabase = null;
 function getSupabase() {
   if (!_supabase) {
-    _supabase = createClient(
-      process.env.SUPABASE_URL,
-      process.env.SUPABASE_SERVICE_KEY
-    );
+    const url = process.env.SUPABASE_URL;
+    const key = process.env.SUPABASE_SERVICE_KEY;
+    if (!url || !key) {
+      throw new Error(
+        'Supabase configuration is missing: ' +
+        (!url && !key
+          ? 'SUPABASE_URL and SUPABASE_SERVICE_KEY are not set'
+          : !url
+          ? 'SUPABASE_URL is not set'
+          : 'SUPABASE_SERVICE_KEY is not set') +
+        '. Token logging is unavailable.'
+      );
+    }
+    _supabase = createClient(url, key);
   }
   return _supabase;
 }
