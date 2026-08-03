@@ -351,6 +351,40 @@ function looksLikeIncapsula(res) {
   );
 }
 
+async function saGet(page, url) {
+  const result = await page.evaluate(async (url) => {
+    const res = await window.fetch(url, { credentials: 'include' });
+    const text = await res.text();
+    return { status: res.status, text };
+  }, url);
+  return result;
+}
+
+/**
+ * Read-only raw GET fetch inside the live SA browser session (same TLS/cookie
+ * context as post()). Used for investigative work — e.g. pulling down SA's own
+ * minified JS bundles to search for endpoint names not otherwise documented.
+ */
+export async function fetchRawUrl({ url }) {
+  const page = await getSession();
+  return saGet(page, url);
+}
+
+/**
+ * Actually navigates the live browser tab to a client's ClientView.aspx page
+ * (a real page.goto(), not just a spoofed Referer header). Some SA endpoints
+ * (confirmed: GetQboCompanyData) throw a server-side NullReferenceException
+ * unless the ASP.NET session has real per-session state from having loaded
+ * that specific customer's page first — a plain XHR with a Referer header
+ * alone isn't enough for those. Call this before such endpoints.
+ */
+export async function navigateToClientView({ clientId }) {
+  const page = await getSession();
+  await page.goto(`${SA_BASE}/ClientView.aspx?ID=${clientId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // Give the page's own onload JS (which establishes server-side session context) a moment to run.
+  await new Promise(r => setTimeout(r, 3000));
+}
+
 async function post(path, body, referer) {
   readSharedBackoff();
   if (Date.now() < _incapsulaBackoffUntil) {
@@ -1251,6 +1285,46 @@ export async function getClientProfile({ clientId }) {
     officeNotes:  d.OfficeNotes  || '',
     billingNotes: d.BillingNotes || '',
   };
+}
+
+/**
+ * SA's own real "QBO Catchup Sync" feature, reverse-engineered from
+ * QboCompanyOverlay.js (the client page's "Link to QuickBooks" panel,
+ * opened via ClientView's ShowQboCompany()). `doInitialSync: true` is what
+ * the UI sends when no catch-up date is chosen — the option meant for a
+ * client that's never synced before. This is a first-class, documented SA
+ * UI action, not a workaround.
+ */
+export async function triggerQboInitialSync({ clientId }) {
+  const res = await post('/v3/WebServices/Shared/UtilitiesWs.asmx/TriggerQBOInitialSync', {
+    SAPCustomerID: clientId,
+    browserDate: { Month: 1, Day: 1, Year: 2014 },
+    doInitialSync: true,
+  }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA triggerQboInitialSync: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const errors = d.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA triggerQboInitialSync failed: ${JSON.stringify(errors)}`);
+  }
+  logger.info('SA: QBO initial sync triggered', { clientId });
+  return { clientId, errors };
+}
+
+/**
+ * Read-only status check for SA's QBO company-sync overlay — last sync
+ * time, subscription status, sync step, and error code for a given client.
+ */
+export async function getQboCompanyData({ clientId }) {
+  const res = await post('/WebServices/ClientViewWs.asmx/GetQboCompanyData',
+    { customerId: clientId }, 'ClientView.aspx');
+  const result = res.data?.d?.Result;
+  if (!result) {
+    throw new Error(`SA getQboCompanyData: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  return result;
 }
 
 /**
