@@ -4,6 +4,7 @@
 
 import fs from 'fs';
 import net from 'net';
+import tls from 'tls';
 import { fileURLToPath } from 'url';
 import { logger } from '../../core/logger.js';
 
@@ -347,29 +348,16 @@ async function login() {
 // This probes the proxy directly via a raw CONNECT tunnel, bypassing the
 // browser, so a real proxy-layer status (e.g. 407) can be surfaced.
 //
-// Known limitation: this only confirms the CONNECT handshake succeeds, not
-// that the tunnel actually carries traffic afterward. Some proxy plans
-// (including Webshare's Static Residential fair-use policy) throttle data
-// AFTER a successful CONNECT rather than rejecting it outright — that failure
-// mode would read as "ok: true" here. Treat a healthy result as "the proxy
-// accepted the connection," not "the proxy is definitely fine end-to-end."
-export async function checkProxyHealth(timeoutMs = 15000) {
-  // NOTE: deliberately does NOT skip during an active Incapsula backoff. This probe
-  // is a raw CONNECT tunnel to the proxy itself — it never touches SA/Incapsula — so
-  // an Incapsula backoff has no bearing on whether the proxy is healthy. Skipping it
-  // during backoff (the previous behavior) suppressed exactly the diagnostic info
-  // needed to tell "is this outage proxy-caused or Incapsula-caused" during the
-  // window when that question matters most. The backoff state is still surfaced
-  // below (via incapsulaBackoffActive) so callers have full context either way.
-  readSharedBackoff();
-  const incapsulaBackoffActive = Date.now() < _incapsulaBackoffUntil;
-
-  const proxyUrl = process.env.SA_PROXY_URL || '';
-  if (!proxyUrl) return { checked: false, detail: 'SA_PROXY_URL not set — SA calls go direct', incapsulaBackoffActive };
-  const proxy = parseProxyUrl(proxyUrl);
-  if (!proxy) return { checked: false, detail: 'SA_PROXY_URL is malformed', incapsulaBackoffActive };
-  const targetHost = new URL(SA_BASE).hostname;
-
+// Phase 1 (connectPhase) opens the CONNECT tunnel, exactly as before.
+// Phase 2 (checkTunnelThroughput) is new: some proxy plans (including
+// Webshare's Static Residential fair-use policy — the actual cause of the
+// 2026-07-31 12-hour outage) throttle data AFTER a successful CONNECT rather
+// than rejecting it outright, so a CONNECT-only check reads that failure
+// mode as "ok: true". Phase 2 sends one real HTTPS request through the
+// already-open tunnel and requires an actual response byte to arrive before
+// calling it healthy — the exact signal a bandwidth-exhausted/throttled
+// tunnel can't produce, since it opens but never carries real traffic.
+async function connectPhase(proxy, targetHost, timeoutMs) {
   return new Promise((resolve) => {
     let settled = false;
     let buffer = '';
@@ -377,8 +365,8 @@ export async function checkProxyHealth(timeoutMs = 15000) {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      try { socket.destroy(); } catch {}
-      resolve({ ...result, incapsulaBackoffActive });
+      if (!result.socket) { try { socket.destroy(); } catch {} }
+      resolve(result);
     };
 
     const socket = net.connect({ host: proxy.hostname, port: proxy.port });
@@ -414,7 +402,14 @@ export async function checkProxyHealth(timeoutMs = 15000) {
       const match = statusLine.match(/HTTP\/\d\.\d (\d{3})/);
       const status = match ? Number(match[1]) : null;
       if (status === 200) {
-        finish({ checked: true, ok: true, status, detail: 'proxy accepted the connection — issue is likely SA/Incapsula, not the proxy' });
+        // Hand the live socket to phase 2 instead of destroying it. Strip every
+        // listener this phase attached first — phase 2 installs its own
+        // 'data'/'error'/'close' handlers on top of the TLS wrapper, and this
+        // phase's copies would otherwise stay attached (harmless no-ops once
+        // `settled` is true, but pointless dangling listeners on a socket
+        // that's about to be reused for something else).
+        socket.removeAllListeners();
+        finish({ checked: true, ok: true, status, socket });
       } else if (status === 407) {
         finish({ checked: true, ok: false, status, detail: 'proxy rejected credentials (407) — check proxy provider account/bandwidth' });
       } else {
@@ -422,6 +417,82 @@ export async function checkProxyHealth(timeoutMs = 15000) {
       }
     });
   });
+}
+
+function checkTunnelThroughput(socket, host, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let tlsSocket;
+    const startedAt = Date.now();
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { tlsSocket?.destroy(); } catch {}
+      try { socket.destroy(); } catch {}
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish({
+      ok: false,
+      detail: `proxy accepted CONNECT but no response arrived within ${timeoutMs}ms — tunnel likely open but not carrying real traffic (bandwidth exhausted/throttled)`,
+    }), timeoutMs);
+
+    try {
+      tlsSocket = tls.connect({ socket, host, servername: host, rejectUnauthorized: true }, () => {
+        tlsSocket.write(`GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\nUser-Agent: JRBAgent-ProxyHealthCheck\r\n\r\n`);
+      });
+    } catch (err) {
+      finish({ ok: false, detail: `TLS handshake over tunnel failed to start: ${err.message}` });
+      return;
+    }
+
+    tlsSocket.on('data', () => {
+      // First byte of a real response is enough — this only needs to distinguish
+      // "the tunnel carries real traffic" from "it doesn't", not benchmark speed.
+      finish({ ok: true, detail: `tunnel carries real traffic — first response byte after ${Date.now() - startedAt}ms` });
+    });
+    tlsSocket.on('error', (err) => {
+      finish({ ok: false, detail: `error reading through tunnel: ${err.message}` });
+    });
+    tlsSocket.on('close', () => {
+      finish({ ok: false, detail: 'tunnel closed without any data ever arriving — likely throttled to zero' });
+    });
+  });
+}
+
+export async function checkProxyHealth(timeoutMs = 15000, throughputTimeoutMs = 10000) {
+  // NOTE: deliberately does NOT skip during an active Incapsula backoff. This probe
+  // is a raw CONNECT tunnel to the proxy itself — it never touches SA/Incapsula — so
+  // an Incapsula backoff has no bearing on whether the proxy is healthy. Skipping it
+  // during backoff (the previous behavior) suppressed exactly the diagnostic info
+  // needed to tell "is this outage proxy-caused or Incapsula-caused" during the
+  // window when that question matters most. The backoff state is still surfaced
+  // below (via incapsulaBackoffActive) so callers have full context either way.
+  readSharedBackoff();
+  const incapsulaBackoffActive = Date.now() < _incapsulaBackoffUntil;
+
+  const proxyUrl = process.env.SA_PROXY_URL || '';
+  if (!proxyUrl) return { checked: false, detail: 'SA_PROXY_URL not set — SA calls go direct', incapsulaBackoffActive };
+  const proxy = parseProxyUrl(proxyUrl);
+  if (!proxy) return { checked: false, detail: 'SA_PROXY_URL is malformed', incapsulaBackoffActive };
+  const targetHost = new URL(SA_BASE).hostname;
+
+  const connectResult = await connectPhase(proxy, targetHost, timeoutMs);
+  if (!connectResult.ok) {
+    return { ...connectResult, incapsulaBackoffActive };
+  }
+
+  const throughputResult = await checkTunnelThroughput(connectResult.socket, targetHost, throughputTimeoutMs);
+  return {
+    checked: true,
+    ok: throughputResult.ok,
+    status: connectResult.status,
+    detail: throughputResult.ok
+      ? `proxy accepted the connection and real traffic flows through it — ${throughputResult.detail}`
+      : `proxy accepted the CONNECT handshake, but ${throughputResult.detail}`,
+    incapsulaBackoffActive,
+  };
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
