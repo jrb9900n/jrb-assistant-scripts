@@ -351,6 +351,25 @@ function looksLikeIncapsula(res) {
   );
 }
 
+async function saGet(page, url) {
+  const result = await page.evaluate(async (url) => {
+    const res = await window.fetch(url, { credentials: 'include' });
+    const text = await res.text();
+    return { status: res.status, text };
+  }, url);
+  return result;
+}
+
+/**
+ * Read-only raw GET fetch inside the live SA browser session (same TLS/cookie
+ * context as post()). Used for investigative work — e.g. pulling down SA's own
+ * minified JS bundles to search for endpoint names not otherwise documented.
+ */
+export async function fetchRawUrl({ url }) {
+  const page = await getSession();
+  return saGet(page, url);
+}
+
 async function post(path, body, referer) {
   readSharedBackoff();
   if (Date.now() < _incapsulaBackoffUntil) {
