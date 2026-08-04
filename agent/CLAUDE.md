@@ -129,7 +129,47 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 
 ## Open Issues / Current Priorities
 
-*(No open issues as of 2026-05-20)*
+*(No open issues as of 2026-05-21)*
+
+---
+
+## AuditMatchingEngine (migrated 2026-05-21)
+
+Standalone financial reconciliation engine at `C:\Users\Assistant\AuditMatchingEngine\`.
+Scrapes SA invoices/payments via Playwright, downloads QB data via API, runs 3-tier matching.
+
+### Run via launcher (always use ame-run.ps1 — injects creds from Credential Manager)
+```powershell
+# Pre-flight check
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" setup
+
+# Sync SA (invoices + payments + payment applications)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" sync:sa
+
+# Sync QB (invoices + payments)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" sync:qb
+
+# Run matching engine
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" match
+
+# Full run (sync all + match)
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\AuditMatchingEngine\ame-run.ps1" run:full
+```
+
+### Supabase (fleetops — mzywmgesulyalevtzudw)
+Tables: `sa_invoices`, `sa_payments`, `sa_payment_applications`, `qb_invoices`, `qb_payments`, `audit_matches`
+Data as of 2026-05-21: 8,517 SA invoices · 6,091 SA payments · 11,535 applications · 8,349 QB invoices · 8,368 matches
+
+### Credentials
+- Supabase: uses `FLEETOPS_SUPABASE_SERVICE_KEY` from Credential Manager (same as expense system)
+- QB: uses `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` from Credential Manager (same as JRBAgent)
+- SA: uses `SA_EMAIL`, `SA_PASSWORD` from Credential Manager
+- Do NOT edit `.env` QB/Supabase values — they say INJECTED_BY_LAUNCHER on purpose
+
+### Note on the weekly audit cron
+The `audit_runs` / `audit_issues` tables (added 2026-05-20) are separate from the AME tables.
+The JRBAgent weekly cron checks for high-level discrepancies; the AME does the deep invoice-level match.
+Both live in the fleetops Supabase project.
 
 ## Deployment Note — teams/bot.js
 
@@ -152,12 +192,15 @@ Then restart the agent.
 Full receipt capture workflow for company credit cards. Lives across both repos.
 
 ### How it works
-1. Chase charge hits QBO → webhook fires to `POST /qbo-webhook` → expense report created in Supabase (fleetops) → cardholder texted via email-to-SMS gateway
-2. Employee taps link → FieldOps expense portal (`/expense/:uuid`) → fills form, uploads receipt photo
-3. Receipt saved to Supabase Storage (`expense-receipts` bucket) → automatically attached to QBO Purchase transaction via Attachments API
-4. Alternatively: employee emails receipt photo to `assistant@jrboehlke.com` → matched by card last-four + amount → uploaded to Storage + QBO, confirmation text sent
-5. Daily 8 AM reminders (24h first, 72h subsequent, max 3) for incomplete reports
-6. Monday 7 AM weekly expense report emailed to michael@jrboehlke.com
+1. Chase alert email forwarded to `assistant@jrboehlke.com` → email poller (every 5 min) → `processChaseAlert()` → expense report created → **Twilio SMS** sent to cardholder within ~5 minutes of charge
+2. QBO webhook (`POST /qbo-webhook`) fires separately when QBO processes the transaction → reconciles with Chase stub (updates `qbo_transaction_id`) or creates its own report if no stub exists
+3. Employee taps SMS link → FieldOps expense portal (`/expense/:uuid`) → fills form, uploads receipt photo
+4. Receipt saved to Supabase Storage (`expense-receipts` bucket) → automatically attached to QBO Purchase transaction via Attachments API
+5. Alternatively: employee emails receipt photo to `assistant@jrboehlke.com` → matched by card last-four + amount → uploaded to Storage + QBO, confirmation SMS sent
+6. Daily 8 AM reminders (24h first, 72h subsequent, max 3) for incomplete reports
+7. Monday 7 AM weekly expense report emailed to michael@jrboehlke.com
+
+> **QBO webhook status (2026-05-30):** Endpoint is live but has never fired in production. All 9 reports came through the Chase alert path. Entity type mismatch suspected (Chase bank feed may send `BankTransaction` not `Purchase`). Diagnostic deployed: handler now logs all entity types and sends a Teams alert for unhandled types.
 
 ### Key files
 - `tools/impl/expense.js` — core logic (webhook, portal data, submission, reminders, weekly report, email receipt processing)
@@ -167,7 +210,9 @@ Full receipt capture workflow for company credit cards. Lives across both repos.
 - `FieldOps/vercel.json` — rewrite rule for `/expense/*` → `/index.html`
 
 ### SMS approach
-Uses **email-to-carrier gateways** (no Twilio) via existing M365 `sendEmail()` with `contentType: 'Text'`. Gateway addresses stored on `credit_cards.sms_gateway`. `sendEmail` now accepts optional `contentType` param (default `'HTML'`).
+Uses **Twilio** via `twilio` npm package. Phone number stored on `credit_cards.phone_number` (E.164 normalized by `toE164()` helper in expense.js). Secrets: `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_FROM_PHONE` in Credential Manager. Teams proactive message also sent as backup.
+
+> **Previous approaches (abandoned):** (1) email-to-carrier gateways — silently quarantined by Proofpoint outbound filter. (2) Azure Communication Services (ACS) toll-free number — ACS accepted sends but Verizon silently dropped all messages due to missing Toll-Free Verification (TFV).
 
 ### Supabase (fleetops — mzywmgesulyalevtzudw)
 New tables: `credit_cards`, `expense_reports`, `menards_rebates`
@@ -188,6 +233,9 @@ Storage bucket: `expense-receipts` (10MB limit, image/* + PDF)
 ### Secrets required
 - `FLEETOPS_SUPABASE_SERVICE_KEY` ✅ configured
 - `QB_WEBHOOK_VERIFIER_TOKEN` ✅ configured
+- `TWILIO_ACCOUNT_SID` ✅ configured (2026-06-12)
+- `TWILIO_AUTH_TOKEN` ✅ configured (2026-06-12)
+- `TWILIO_FROM_PHONE` ✅ configured (2026-06-12)
 - `MENARDS_REBATE_*` (10 keys) — pending
 
 ---
@@ -217,6 +265,7 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 - `createJob` / `SaveWaitingListService` errors with "Object reference not set" on the APIProbe test account — that account has no commission configuration. Works on JRB production account.
 - SA_EMAIL and SA_PASSWORD must be in Credential Manager as `JRBAgent:SA_EMAIL` and `JRBAgent:SA_PASSWORD`
 - **No dedicated API endpoint exists for `Taxable` or `InvoiceDelivery` fields.** Exhaustive probing of ClientView-minified.js (207 KB), ClientList.js (171 KB), and sa-minified.js (1.1 MB) confirmed zero save endpoints for these fields specifically. Workaround: `sa_set_billing_defaults` calls `ClientEditOverlayWs.asmx/GetClientInfo` to get the full client record, overrides `SalesTaxCodeID` (JRB "Tax" code `c432e644-…`) and `SendInvoiceBy` ("Email"), then POSTs to `ClientEditOverlayWs.asmx/SaveClient` with the full payload. No puppeteer UI clicking required.
+- `sa_set_billing_defaults` — set `Taxable=Tax`, `InvoiceDelivery=Email` on a client (call ~5 min after `sa_create_client`)
 
 ---
 
@@ -249,7 +298,7 @@ Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users
 ## Credentials
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
-Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~July 2026 — calendar reminder set), `GITHUB_TOKEN` (expires every 90 days), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
+Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
 
 Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 
@@ -282,7 +331,7 @@ All functions accept optional `userEmail` param — omit for `assistant@`, pass 
 `email_catalog` table — idempotent upsert on `message_id`. Columns: mailbox, subject, from_address, category, action_taken, folder, thread_id, snippet, etc.
 
 ### Azure app permissions (Application, admin-consented)
-`Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`
+`Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`, `Contacts.ReadWrite`
 
 ### SharePoint gotchas
 - Graph Search API requires `region: 'NAM'` when using Application permissions
@@ -321,6 +370,9 @@ Open Contacts → Settings → Add account → Other → CardDAV (same credentia
 
 ### Supabase (jrb-assistant — znpahinyplccdyoekfeo)
 Table: `carddav_credentials` — columns: `email`, `name`, `token`, `active`, `created_at`, `last_used`
+
+### Security note
+Remove the old `agent/delete-outlook-contacts.mjs` one-off script once this session is done.
 
 ---
 

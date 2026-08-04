@@ -567,6 +567,40 @@ async function post(path, body, referer) {
   return res;
 }
 
+async function saGet(page, url) {
+  const result = await page.evaluate(async (url) => {
+    const res = await window.fetch(url, { credentials: 'include' });
+    const text = await res.text();
+    return { status: res.status, text };
+  }, url);
+  return result;
+}
+
+/**
+ * Read-only raw GET fetch inside the live SA browser session (same TLS/cookie
+ * context as post()). Used for investigative work — e.g. pulling down SA's own
+ * minified JS bundles to search for endpoint names not otherwise documented.
+ */
+export async function fetchRawUrl({ url }) {
+  const page = await getSession();
+  return saGet(page, url);
+}
+
+/**
+ * Actually navigates the live browser tab to a client's ClientView.aspx page
+ * (a real page.goto(), not just a spoofed Referer header). Some SA endpoints
+ * (confirmed: GetQboCompanyData) throw a server-side NullReferenceException
+ * unless the ASP.NET session has real per-session state from having loaded
+ * that specific customer's page first — a plain XHR with a Referer header
+ * alone isn't enough for those. Call this before such endpoints.
+ */
+export async function navigateToClientView({ clientId }) {
+  const page = await getSession();
+  await page.goto(`${SA_BASE}/ClientView.aspx?ID=${clientId}`, { waitUntil: 'domcontentloaded', timeout: 30000 });
+  // Give the page's own onload JS (which establishes server-side session context) a moment to run.
+  await new Promise(r => setTimeout(r, 3000));
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function toSaBrowserDate(d) {
@@ -1008,6 +1042,66 @@ export async function setClientQboId({ clientId, qboId }) {
 }
 
 /**
+ * SA's own real "QBO Catchup Sync" feature, reverse-engineered from
+ * QboCompanyOverlay.js (the client page's "Link to QuickBooks" panel,
+ * opened via ClientView's ShowQboCompany()). `doInitialSync: true` is what
+ * the UI sends when no catch-up date is chosen — the option meant for a
+ * client that's never synced before. This is a first-class, documented SA
+ * UI action, not a workaround.
+ */
+export async function triggerQboInitialSync({ clientId }) {
+  const res = await post('/v3/WebServices/Shared/UtilitiesWs.asmx/TriggerQBOInitialSync', {
+    SAPCustomerID: clientId,
+    browserDate: { Month: 1, Day: 1, Year: 2014 },
+    doInitialSync: true,
+  }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA triggerQboInitialSync: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const errors = d.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA triggerQboInitialSync failed: ${JSON.stringify(errors)}`);
+  }
+  logger.info('SA: QBO initial sync triggered', { clientId });
+  return { clientId, errors };
+}
+
+/**
+ * Read-only status check for SA's QBO company-sync overlay — last sync
+ * time, subscription status, sync step, and error code for a given client.
+ */
+export async function getQboCompanyData({ clientId }) {
+  const res = await post('/WebServices/ClientViewWs.asmx/GetQboCompanyData',
+    { customerId: clientId }, 'ClientView.aspx');
+  const result = res.data?.d?.Result;
+  if (!result) {
+    throw new Error(`SA getQboCompanyData: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  return result;
+}
+
+/**
+ * Read-only check of the SA client's own QboID link (the field that gates
+ * whether SA's automatic invoice sync has a QBO customer to push to).
+ * Returns the raw field set — SA doesn't reliably use one consistent key
+ * name across responses, so callers should check all of them.
+ */
+export async function getClientQboLink({ clientId }) {
+  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getClientQboLink: no data returned for clientId ${clientId}`);
+  return {
+    clientId,
+    name: d.PropertyName || `${d.FirstName || ''} ${d.LastName || ''}`.trim(),
+    QboID: d.QboID ?? null,
+    QboId: d.QboId ?? null,
+    HasQBO: d.HasQBO ?? null,
+  };
+}
+
+/**
  * Fetch the full editable record for an SA invoice, via the InvoiceOverlay.asmx
  * service (distinct from ClientViewWs.asmx / ClientEditOverlayWs.asmx — invoices
  * have their own overlay service). Endpoint/payload shape confirmed 2026-07-31
@@ -1021,6 +1115,68 @@ export async function getInvoice({ invoiceId }) {
   const d = res.data?.d;
   if (!d) throw new Error(`SA getInvoice: no data returned for invoiceId ${invoiceId}: ${res.text?.slice(0, 200)}`);
   return d;
+}
+
+// ── Audit trail — AuditTrailsWs.asmx ─────────────────────────────────────────
+
+// SA's per-record "view history" dialog (ShowAuditTrailDialog) always passes one
+// of these literal Type strings as EntityID's Type. Confirmed by reading SA's own
+// minified frontend JS call sites:
+//   - "Quote"            → sa-js-cache/service-autopilot.md doc (estimates)
+//   - "Invoice"           → sa-js-cache-InvoiceOverlay.js:1213
+//   - "ScheduledService"  → sa-js-cache-ClientView-minified.js (job.ID / ServiceItem.ID)
+//   - "Customer"          → sa-js-cache-ClientView-minified.js (_clientView.customerID)
+//   - "Ticket"            → sa-js-cache-ClientView-minified.js / sa-minified.js
+//   - "Payment"           → sa-js-cache-sa-minified.js
+// "job"/"payment"/"client" below are our own friendly aliases — pass either the
+// alias or the raw SA Type string directly.
+const AUDIT_TRAIL_TYPES = {
+  estimate: 'Quote',
+  quote:    'Quote',
+  invoice:  'Invoice',
+  job:      'ScheduledService',
+  payment:  'Payment',
+  client:   'Customer',
+  ticket:   'Ticket',
+};
+
+// SA .NET date format: "/Date(1776780203813)/"
+function parseNetDate(val) {
+  if (!val) return null;
+  const match = String(val).match(/\/Date\((\d+)\)\//);
+  if (match) return new Date(parseInt(match[1], 10));
+  const d = new Date(val);
+  return isNaN(d) ? null : d;
+}
+
+/**
+ * Pull the audit trail (who/what/when history log) for a single SA record —
+ * invoice, estimate, job, payment, client, or ticket. `type` accepts either a
+ * friendly alias (estimate/invoice/job/payment/client/ticket) or a raw SA Type
+ * string (e.g. "ScheduledService"). Only "Quote" and "Invoice" have been
+ * confirmed against real records; the other type strings are taken directly
+ * from SA's own frontend JS but haven't been exercised live yet — verify the
+ * response shape the first time you use a new type.
+ *
+ * Returns the raw OutputRecords[] plus a `Note`/`DateCreated` parsed to a JS
+ * Date for convenience (`when`).
+ */
+export async function getAuditTrail({ entityId, type }) {
+  const saType = AUDIT_TRAIL_TYPES[type?.toLowerCase?.()] || type;
+  if (!saType) {
+    throw new Error(`SA getAuditTrail: type is required (one of ${Object.keys(AUDIT_TRAIL_TYPES).join(', ')}, or a raw SA Type string)`);
+  }
+  const res = await post('/WebServices/AuditTrailsWs.asmx/GetAuditTrailData',
+    { InputData: { EntityID: entityId, Type: saType } }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA getAuditTrail: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const records = (d.OutputRecords || []).map(r => ({
+    ...r,
+    when: parseNetDate(r.DateCreated),
+  }));
+  return records;
 }
 
 /** Converts GetInvoice's 0-indexed Month to the 1-indexed shape SaveInvoice expects. */

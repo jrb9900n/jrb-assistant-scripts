@@ -774,6 +774,18 @@ const SA_TOOLS = [
       required: ['clientId'],
     },
   },
+  {
+    name: 'sa_get_audit_trail',
+    description: 'Pull the Service Autopilot audit trail (history log of who changed what and when) for a single record — invoice, estimate, job, payment, client, or ticket. Returns an array of history entries with a parsed `when` date. Only estimate and invoice types are confirmed working; job/payment/client/ticket are taken from SA\'s own frontend code but unverified against a live record.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        entityId: { type: 'string', description: 'GUID of the record (invoiceId, quoteId, jobId, paymentId, clientId, or ticketId)' },
+        type:     { type: 'string', description: 'Record type: estimate, invoice, job, payment, client, or ticket' },
+      },
+      required: ['entityId', 'type'],
+    },
+  },
 ];
 
 const SCHEDULING_TOOLS = [
