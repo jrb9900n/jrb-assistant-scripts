@@ -341,11 +341,11 @@ async function fetchJobDetails(job, { qboPaymentIndex } = {}) {
   // falls back to description only when no item name exists at all. QBO's
   // item names are full category paths ("Landscape:Landscape
   // Enhancements:Topsoil") — only the last segment is the actual item.
-  const lineItemNames = [...new Set(
+  const computedLineItemNames = [...new Set(
     lineItems.map(l => (l.itemName || l.description).split(':').pop().trim()).filter(Boolean)
   )].join(', ') || null;
 
-  const [jobsResult, estimateResult, paymentAppsResult, invoicesResult] = await Promise.all([
+  const [jobsResult, estimateResult, paymentAppsResult, invoicesResult, lineItemOverrideResult] = await Promise.all([
     fleetops.from('sa_jobs').select('service, date_completed').in('invoice_id', invoiceIds),
     // No direct FK from an invoice to its originating estimate — best-effort:
     // the client's accepted estimate closest to (and no later than) this job's
@@ -364,12 +364,17 @@ async function fetchJobDetails(job, { qboPaymentIndex } = {}) {
     // category — a contract row's Invoice #/Date is representative, not
     // exhaustive.
     fleetops.from('sa_invoices').select('invoice_number, date').in('sa_id', invoiceIds).order('date', { ascending: true }).limit(1).maybeSingle(),
+    // Manual escape hatch for when QBO's own line data doesn't resolve at all
+    // (see commission_line_item_overrides' own migration).
+    fleetops.from('commission_line_item_overrides').select('line_item_name').in('sa_invoice_sa_id', invoiceIds).limit(1).maybeSingle(),
   ]);
+  const lineItemNames = lineItemOverrideResult.data?.line_item_name ?? computedLineItemNames;
 
   if (jobsResult.error) logger.warn('fetchJobDetails sa_jobs query failed', { err: jobsResult.error.message, saReference: job.saReference });
   if (estimateResult.error) logger.warn('fetchJobDetails sa_accepted_estimates query failed', { err: estimateResult.error.message, saReference: job.saReference });
   if (paymentAppsResult.error) logger.warn('fetchJobDetails sa_payment_applications query failed', { err: paymentAppsResult.error.message, saReference: job.saReference });
   if (invoicesResult.error) logger.warn('fetchJobDetails sa_invoices query failed', { err: invoicesResult.error.message, saReference: job.saReference });
+  if (lineItemOverrideResult.error) logger.warn('fetchJobDetails commission_line_item_overrides query failed', { err: lineItemOverrideResult.error.message, saReference: job.saReference });
 
   const jobRows = jobsResult.data ?? [];
   const serviceNames = [...new Set(jobRows.map(r => r.service).filter(Boolean))].join(', ') || null;
@@ -850,6 +855,28 @@ export async function runCommissionEngine({ quarter, isFinal = true } = {}) {
     .from('commission_ledger').select('id, sa_reference').eq('quarter', targetQuarter);
   if (existingLedgerError) throw new Error(`existing commission_ledger prefetch failed: ${existingLedgerError.message}`);
   const existingLedgerIdByReference = new Map((existingLedgerRows ?? []).map(r => [r.sa_reference, r.id]));
+
+  // Broader case than removeStaleLedgerRowIfAny below: a job can vanish from
+  // allJobs ENTIRELY, not just resolve to a different employee -- e.g. its
+  // invoice_total gets corrected to $0 in QBO/SA after the fact (real case
+  // caught 2026-08-04: two Jason Carver invoices, $2,268.25 and $131.88,
+  // were zeroed out — apparently re-split into two other invoices that DO
+  // have real amounts — but sat in the ledger unchanged since the query that
+  // assembles candidate jobs filters on invoice_total > 0, so a zeroed
+  // invoice never even reaches the per-job loop to be reconsidered). Any
+  // existing row whose sa_reference isn't in this run's candidate set at all
+  // is unconditionally stale.
+  const allJobReferences = new Set(allJobs.map(j => j.saReference));
+  const orphanedRows = (existingLedgerRows ?? []).filter(r => !allJobReferences.has(r.sa_reference));
+  if (orphanedRows.length) {
+    const { error: orphanDeleteError } = await fleetops.from('commission_ledger').delete().in('id', orphanedRows.map(r => r.id));
+    if (orphanDeleteError) {
+      logger.warn('orphaned commission_ledger row cleanup failed', { err: orphanDeleteError.message });
+    } else {
+      logger.info('Removed commission_ledger rows for jobs no longer in the candidate set at all', { saReferences: orphanedRows.map(r => r.sa_reference) });
+      for (const r of orphanedRows) existingLedgerIdByReference.delete(r.sa_reference);
+    }
+  }
 
   async function removeStaleLedgerRowIfAny(saReference) {
     const staleId = existingLedgerIdByReference.get(saReference);
