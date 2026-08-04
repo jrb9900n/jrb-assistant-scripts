@@ -178,7 +178,7 @@ function lineKeyOf(line) {
 async function fetchJobDetails(job) {
   const invoiceIds = job.underlyingInvoices.map(inv => inv.saId);
 
-  const [jobsResult, estimateResult, paymentAppsResult] = await Promise.all([
+  const [jobsResult, estimateResult, paymentAppsResult, invoicesResult] = await Promise.all([
     fleetops.from('sa_jobs').select('service, date_completed').in('invoice_id', invoiceIds),
     // No direct FK from an invoice to its originating estimate — best-effort:
     // the client's accepted estimate closest to (and no later than) this job's
@@ -191,11 +191,18 @@ async function fetchJobDetails(job) {
       .limit(1)
       .maybeSingle(),
     fleetops.from('sa_payment_applications').select('payment_sa_id').in('invoice_sa_id', invoiceIds),
+    // For self_performed jobs there's exactly one underlying invoice; for a
+    // maintenance_snow contract row (many invoices) this shows the EARLIEST
+    // one, matching the "first-year value" basis used elsewhere for that
+    // category — a contract row's Invoice #/Date is representative, not
+    // exhaustive.
+    fleetops.from('sa_invoices').select('invoice_number, date').in('sa_id', invoiceIds).order('date', { ascending: true }).limit(1).maybeSingle(),
   ]);
 
   if (jobsResult.error) logger.warn('fetchJobDetails sa_jobs query failed', { err: jobsResult.error.message, saReference: job.saReference });
   if (estimateResult.error) logger.warn('fetchJobDetails sa_accepted_estimates query failed', { err: estimateResult.error.message, saReference: job.saReference });
   if (paymentAppsResult.error) logger.warn('fetchJobDetails sa_payment_applications query failed', { err: paymentAppsResult.error.message, saReference: job.saReference });
+  if (invoicesResult.error) logger.warn('fetchJobDetails sa_invoices query failed', { err: invoicesResult.error.message, saReference: job.saReference });
 
   const jobRows = jobsResult.data ?? [];
   const serviceNames = [...new Set(jobRows.map(r => r.service).filter(Boolean))].join(', ') || null;
@@ -217,6 +224,8 @@ async function fetchJobDetails(job) {
     serviceNames,
     estimateNumber: estimateResult.data?.estimate_number ?? null,
     estimateDate: estimateResult.data?.quote_date ?? null,
+    invoiceNumber: invoicesResult.data?.invoice_number ?? null,
+    invoiceDate: invoicesResult.data?.date ?? null,
     dateCompleted,
     datePaid,
   };
@@ -435,6 +444,51 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
     }
   }
   return null;
+}
+
+// ── Estimate-first coverage check (2026-08-04) ──────────────────────────────
+// The main engine works backward from invoices (scan every company invoice,
+// then guess who sold it) — that guessing is exactly what caused the Sterling
+// Pharma/Celia Shaughnessy/Lori Pegelow misattributions. This works forward
+// instead, starting from ground truth (sa_accepted_estimates.sales_rep) for
+// the small set of estimates a given employee actually won, and checks
+// whether each one ever produced a commission_ledger row — surfacing any
+// that haven't as a coverage gap rather than letting a won job silently
+// never appear in a report (this is how the Sterling enhancement job went
+// unreported for a full report cycle: it was correctly in the ledger, the
+// report just wasn't regenerated after it landed). estimate_number linkage
+// is the same best-effort match fetchJobDetails/resolvePM already rely on
+// elsewhere in this file — not a strict FK — so this is a coverage signal to
+// review, not proof that something is actually wrong with any given estimate.
+export async function findUnmatchedWonEstimates({ employeeName, lookbackDays = LOOKBACK_DAYS } = {}) {
+  const cutoff = dateStr(lookbackDays);
+  const { data: estimates, error } = await fleetops
+    .from('sa_accepted_estimates')
+    .select('estimate_id, estimate_number, client_name, client_id, amount, quote_date')
+    .eq('sales_rep', employeeName)
+    .gte('quote_date', cutoff);
+  if (error) throw new Error(`findUnmatchedWonEstimates estimates query failed: ${error.message}`);
+
+  const estimateNumbers = [...new Set((estimates ?? []).map(e => e.estimate_number).filter(Boolean))];
+  if (!estimateNumbers.length) return [];
+
+  const { data: tracedRows, error: tracedError } = await fleetops
+    .from('commission_ledger')
+    .select('estimate_number')
+    .in('estimate_number', estimateNumbers);
+  if (tracedError) throw new Error(`findUnmatchedWonEstimates ledger query failed: ${tracedError.message}`);
+  const tracedSet = new Set((tracedRows ?? []).map(r => r.estimate_number).filter(Boolean));
+
+  return (estimates ?? [])
+    .filter(e => e.estimate_number && !tracedSet.has(e.estimate_number))
+    .map(e => ({
+      estimateId: e.estimate_id,
+      estimateNumber: e.estimate_number,
+      clientName: e.client_name,
+      clientId: e.client_id,
+      amount: Number(e.amount || 0),
+      quoteDate: e.quote_date,
+    }));
 }
 
 // ── Renewal detection ───────────────────────────────────────────
@@ -856,6 +910,8 @@ export async function runCommissionEngine({ quarter } = {}) {
         service_names: jobDetails.serviceNames,
         estimate_number: jobDetails.estimateNumber,
         estimate_date: jobDetails.estimateDate,
+        invoice_number: jobDetails.invoiceNumber,
+        invoice_date: jobDetails.invoiceDate,
         date_completed: jobDetails.dateCompleted,
         date_paid: jobDetails.datePaid,
         renewal_flag: renewalFlag,
