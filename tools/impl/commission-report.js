@@ -176,9 +176,11 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const payableRows = payableResult.data ?? [];
   const accruedRows = accruedResult.data ?? [];
   // Section 2 is "accrued but not payable" — a row already shown (with dollars)
-  // in Section 1 this quarter doesn't need to repeat there too. accruedTotal
-  // (the summary box, below) stays the TRUE full accrual for the accountant's
-  // books and is intentionally NOT limited to this subset.
+  // in Section 1 this quarter doesn't need to repeat there too. The summary
+  // box below is labeled the same way (per Michael, 2026-08-04) and its total
+  // matches this same subset, NOT the full GAAP accrual -- the full accrual
+  // for the accountant is payableTotal + this, since the two partition every
+  // accrued row with no overlap.
   const accruedNotPayableRows = accruedRows.filter(r => Number(r.payable_commission || 0) === 0);
   const renewalPending = renewalPendingResult.data ?? [];
   const quarterLedger = quarterLedgerIdsResult.data ?? [];
@@ -198,7 +200,7 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const unconfirmedLines = unconfirmedLinesResult.data ?? [];
 
   const payableTotal = payableRows.reduce((s, r) => s + Number(r.payable_commission || 0), 0);
-  const accruedTotal = accruedRows.reduce((s, r) => s + Number(r.accrued_commission || 0), 0);
+  const accruedTotal = accruedNotPayableRows.reduce((s, r) => s + Number(r.accrued_commission || 0), 0);
 
   // unplannedJobs/unassignedJobs come from a company-wide engine run across
   // every employee, not just commission-eligible PMs — since only Jarrett has
@@ -273,7 +275,7 @@ ${!isFinal ? alertBox('#f0f4ff', '#1a1a2e', 'Quarter Still In Progress', `<p sty
   </td>
   <td style="padding:14px 16px;text-align:center;border-right:1px solid #d8e0f0;">
     <p style="margin:0;font-size:20px;font-weight:bold;color:#1a1a2e;">${f$(accruedTotal)}</p>
-    <p style="margin:2px 0 0;font-size:11px;color:#555577;text-transform:uppercase;letter-spacing:0.6px;">Newly Accrued</p>
+    <p style="margin:2px 0 0;font-size:11px;color:#555577;text-transform:uppercase;letter-spacing:0.6px;">Accrued But Not Payable</p>
   </td>
   <td style="padding:14px 16px;text-align:center;">
     <p style="margin:0;font-size:20px;font-weight:bold;color:${reviewItems.length ? '#b35900' : '#333'};">${reviewItems.length}</p>
