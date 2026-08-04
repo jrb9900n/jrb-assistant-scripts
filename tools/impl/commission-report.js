@@ -117,11 +117,11 @@ function sortByClientThenInvoiceDate(rows) {
 
 const GRID_BORDER = '1px solid #d5dae3';
 
-function ledgerTable(rows, amountKey) {
+function ledgerTable(rows, amountKey, labelOverrides = {}) {
   if (!rows.length) return `<p style="margin:0 0 10px;font-size:13px;color:#888888;font-style:italic;">None this run.</p>`;
   const sorted = sortByClientThenInvoiceDate(rows);
   const bandColors = bandColorsByRow(sorted);
-  const headerCells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#ffffff;background-color:#3a3f5c;text-transform:uppercase;border:${GRID_BORDER};">${c.label}</td>`).join('')
+  const headerCells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#ffffff;background-color:#3a3f5c;text-transform:uppercase;border:${GRID_BORDER};">${labelOverrides[c.label] ?? c.label}</td>`).join('')
     + `<td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#ffffff;background-color:#3a3f5c;text-transform:uppercase;text-align:right;border:${GRID_BORDER};">Commission Amount</td>`;
   const body = sorted.map((r, i) => {
     const rowColor = bandColors[i];
@@ -242,7 +242,7 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const waitingListRows = unmatchedEstimates.map(e => ({
     client_name: e.clientName,
     category: 'self_performed',
-    line_item_names: null,
+    line_item_names: e.lineItemName ?? null,
     estimate_number: e.estimateNumber,
     estimate_date: e.quoteDate,
     invoice_number: null,
@@ -323,7 +323,7 @@ ${!isFinal ? alertBox('#f0f4ff', '#1a1a2e', 'Quarter Still In Progress', `<p sty
   }
 
   html += sectionHeader('Waiting List — Work Won But Not Performed', waitingListRows.length);
-  html += ledgerTable(waitingListRows, 'projected_commission');
+  html += ledgerTable(waitingListRows, 'projected_commission', { 'Invoice Amount': 'Job Amount' });
   if (waitingListRows.length) {
     html += `<p style="margin:-4px 0 14px;font-size:11px;color:#888888;">Estimate amount shown in place of Invoice Amount (nothing's been invoiced yet). Commission Amount here is a projection at the self-performed rate, not a booked figure — nothing is accrued or payable until the job is actually invoiced.</p>`;
   }
