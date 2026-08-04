@@ -127,7 +127,7 @@ function reviewList(items) {
 
 export async function generateCommissionReport({ quarter, engineResult, isFinal = true, isDraft = false } = {}) {
   const targetQuarter = quarter || currentQuarter();
-  const result = engineResult || await runCommissionEngine({ quarter: targetQuarter });
+  const result = engineResult || await runCommissionEngine({ quarter: targetQuarter, isFinal });
 
   const [payableResult, accruedResult, renewalPendingResult, quarterLedgerIdsResult, unconfirmedPmResult] = await Promise.all([
     fleetops.from('commission_ledger').select('*').eq('quarter', targetQuarter).gt('payable_commission', 0).order('employee_name'),
@@ -203,7 +203,9 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const unmatchedEstimates = unmatchedEstimatesByEmployee.flat();
 
   const reviewItems = [
-    ...unmatchedEstimates.map(e => `${e.clientName ?? '—'} — won estimate #${e.estimateNumber} (${f$(e.amount)}, quoted ${fD(e.quoteDate)}) has no traced invoice/commission entry yet — confirm the job hasn't been invoiced, or that the match against it is failing`),
+    ...unmatchedEstimates.map(e => e.inProgressNote
+      ? `${e.clientName ?? '—'} — won estimate #${e.estimateNumber} (${f$(e.amount)}, quoted ${fD(e.quoteDate)}): ${e.inProgressNote}`
+      : `${e.clientName ?? '—'} — won estimate #${e.estimateNumber} (${f$(e.amount)}, quoted ${fD(e.quoteDate)}) has no traced invoice/commission entry yet — confirm the job hasn't been invoiced, or that the match against it is failing`),
     ...renewalPending.map(r => `${clientLabel(r) ?? r.sa_reference} — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
     ...unconfirmedPmRows.map(r => `${clientLabel(r) ?? r.sa_reference} — PM attribution is a best-effort guess (no direct job or manual record confirms ${r.employee_name} sold this) — commission is accruing but payable is withheld until confirmed`),
     ...relevantFlags.map(f => {
