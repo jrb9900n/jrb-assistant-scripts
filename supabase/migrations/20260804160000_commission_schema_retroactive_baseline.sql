@@ -10,6 +10,10 @@
 -- is a safe no-op; its purpose is to give a fresh clone of this repo a way
 -- to reconstruct the schema, not to change anything that already exists.
 
+-- Finding #2: Ensure uuid-ossp extension exists before any table that uses
+-- uuid_generate_v4() as a default; a fresh database clone will not have it.
+create extension if not exists "uuid-ossp";
+
 create table if not exists commission_plans (
   id uuid primary key default uuid_generate_v4(),
   employee_name text not null,
@@ -21,6 +25,11 @@ create table if not exists commission_plans (
   active boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+-- Finding #1: Enable RLS on all new tables so that if a client-side or anon
+-- key ever reaches these tables, commission data is not fully exposed.
+-- Server-side code using the service role key bypasses RLS as before.
+alter table commission_plans enable row level security;
 
 create table if not exists pm_job_assignments (
   id uuid primary key default uuid_generate_v4(),
@@ -34,6 +43,7 @@ create table if not exists pm_job_assignments (
   notes text,
   confidence text
 );
+alter table pm_job_assignments enable row level security;
 
 create table if not exists commission_ledger (
   id uuid primary key default uuid_generate_v4(),
@@ -66,6 +76,7 @@ create table if not exists commission_ledger (
   pm_attribution_confirmed boolean not null default true,
   constraint commission_ledger_sa_reference_quarter_key unique (sa_reference, quarter)
 );
+alter table commission_ledger enable row level security;
 
 create table if not exists commission_ledger_lines (
   id uuid primary key default uuid_generate_v4(),
@@ -83,6 +94,7 @@ create table if not exists commission_ledger_lines (
   bill_date date,
   created_at timestamptz not null default now()
 );
+alter table commission_ledger_lines enable row level security;
 
 create table if not exists commission_report_drafts (
   id uuid primary key default uuid_generate_v4(),
@@ -96,6 +108,7 @@ create table if not exists commission_report_drafts (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+alter table commission_report_drafts enable row level security;
 
 create table if not exists commission_sub_bill_flags (
   id uuid primary key default uuid_generate_v4(),
@@ -109,3 +122,4 @@ create table if not exists commission_sub_bill_flags (
   created_at timestamptz not null default now(),
   constraint commission_sub_bill_flags_ledger_bill_unique unique (ledger_id, qbo_bill_id)
 );
+alter table commission_sub_bill_flags enable row level security;
