@@ -63,6 +63,7 @@ function alertBox(color, borderColor, title, rows) {
 }
 
 const f_pct = n => `${(Number(n || 0) * 100).toFixed(1)}%`;
+const round2 = n => Number(n.toFixed(2));
 
 // No PM/employee column — Jarrett is currently the only employee with an active
 // commission plan, so every row is his and a repeated name is just noise (per
@@ -219,17 +220,44 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   // won but hasn't yet produced a traced commission_ledger row (this is how
   // the Sterling Pharma enhancement job went unreported for a full cycle).
   const { data: activePlans, error: activePlansError } = await fleetops
-    .from('commission_plans').select('employee_name').eq('active', true);
+    .from('commission_plans').select('employee_name, self_performed_rate').eq('active', true);
   if (activePlansError) throw new Error(`generateCommissionReport activePlans query failed: ${activePlansError.message}`);
   const unmatchedEstimatesByEmployee = await Promise.all(
-    (activePlans ?? []).map(p => findUnmatchedWonEstimates({ employeeName: p.employee_name }))
+    (activePlans ?? []).map(async p => (await findUnmatchedWonEstimates({ employeeName: p.employee_name }))
+      .map(e => ({ ...e, employeeName: p.employee_name, rate: Number(p.self_performed_rate) })))
   );
   const unmatchedEstimates = unmatchedEstimatesByEmployee.flat();
 
+  // Section 3, "Waiting List — Work Won But Not Performed" (per Michael,
+  // 2026-08-04): a won estimate with no invoice yet -- e.g. the Dolsky job,
+  // sold but not completed -- shown with the same columns as the ledger
+  // tables above. Most of those columns are necessarily blank (nothing's
+  // been invoiced), and there's no real category/rate signal on an estimate
+  // alone -- self_performed is the only category an individual one-off
+  // estimate like this is ever seen to map to in practice, so it's used as
+  // the default rather than left unlabeled. Commission Amount here is a
+  // PROJECTION (rate × estimate amount) for visibility into upcoming
+  // liability, not a booked figure -- nothing is accrued or payable until
+  // it's actually invoiced.
+  const waitingListRows = unmatchedEstimates.map(e => ({
+    client_name: e.clientName,
+    category: 'self_performed',
+    line_item_names: null,
+    estimate_number: e.estimateNumber,
+    estimate_date: e.quoteDate,
+    invoice_number: null,
+    invoice_date: null,
+    invoiced_amount: e.amount,
+    date_paid: null,
+    paid_amount: 0,
+    involves_subcontractor: false,
+    unconfirmed_subcontracted_fraction: 0,
+    commission_rate: e.rate,
+    projected_commission: round2(e.rate * e.amount),
+    inProgressNote: e.inProgressNote,
+  }));
+
   const reviewItems = [
-    ...unmatchedEstimates.map(e => e.inProgressNote
-      ? `${e.clientName ?? '—'} — won estimate #${e.estimateNumber} (${f$(e.amount)}, quoted ${fD(e.quoteDate)}): ${e.inProgressNote}`
-      : `${e.clientName ?? '—'} — won estimate #${e.estimateNumber} (${f$(e.amount)}, quoted ${fD(e.quoteDate)}) has no traced invoice/commission entry yet — confirm the job hasn't been invoiced, or that the match against it is failing`),
     ...renewalPending.map(r => `${clientLabel(r) ?? r.sa_reference} — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
     ...unconfirmedPmRows.map(r => `${clientLabel(r) ?? r.sa_reference} — PM attribution is a best-effort guess (no direct job or manual record confirms ${r.employee_name} sold this) — commission is accruing but payable is withheld until confirmed`),
     ...relevantFlags.map(f => {
@@ -294,12 +322,18 @@ ${!isFinal ? alertBox('#f0f4ff', '#1a1a2e', 'Quarter Still In Progress', `<p sty
     html += `<p style="margin:-4px 0 14px;font-size:11px;color:#888888;">${accruedRows.length - accruedNotPayableRows.length} additional row${accruedRows.length - accruedNotPayableRows.length !== 1 ? 's' : ''} accrued this quarter but ${accruedRows.length - accruedNotPayableRows.length !== 1 ? 'are' : 'is'} already shown above in Commissions Payable — not repeated here.</p>`;
   }
 
+  html += sectionHeader('Waiting List — Work Won But Not Performed', waitingListRows.length);
+  html += ledgerTable(waitingListRows, 'projected_commission');
+  if (waitingListRows.length) {
+    html += `<p style="margin:-4px 0 14px;font-size:11px;color:#888888;">Estimate amount shown in place of Invoice Amount (nothing's been invoiced yet). Commission Amount here is a projection at the self-performed rate, not a booked figure — nothing is accrued or payable until the job is actually invoiced.</p>`;
+  }
+
   if (reviewItems.length) {
     html += sectionHeader('Needs Review', reviewItems.length);
     html += alertBox('#fff3cd', '#e6a817', `${reviewItems.length} item${reviewItems.length !== 1 ? 's' : ''} pending confirmation`, reviewList(reviewItems));
   }
 
-  if (!payableRows.length && !accruedRows.length && !reviewItems.length) {
+  if (!payableRows.length && !accruedRows.length && !waitingListRows.length && !reviewItems.length) {
     html += `<p style="margin:16px 0;font-size:14px;color:#888888;">No commission activity this run.</p>`;
   }
 
