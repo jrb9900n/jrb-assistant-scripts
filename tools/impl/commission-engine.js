@@ -341,8 +341,12 @@ async function fetchJobDetails(job, { qboPaymentIndex } = {}) {
   // falls back to description only when no item name exists at all. QBO's
   // item names are full category paths ("Landscape:Landscape
   // Enhancements:Topsoil") — only the last segment is the actual item.
+  // $0 lines are excluded (real case, Sterling Pharma: a "Landscape
+  // Restoration" line at $0 alongside the real $5,500 "Landscape
+  // Installation" line — listing both implied two paid items when only one
+  // actually had value).
   const computedLineItemNames = [...new Set(
-    lineItems.map(l => (l.itemName || l.description).split(':').pop().trim()).filter(Boolean)
+    lineItems.filter(l => l.amount !== 0).map(l => (l.itemName || l.description).split(':').pop().trim()).filter(Boolean)
   )].join(', ') || null;
 
   const [jobsResult, estimateResult, paymentAppsResult, invoicesResult, lineItemOverrideResult] = await Promise.all([
@@ -665,7 +669,7 @@ export async function findUnmatchedWonEstimates({ employeeName, lookbackDays = L
     // for every row checked so far, so SA gives no reliable won/lost signal.
     // estimate_resolutions is where a human records that once (see its own
     // migration) instead of re-explaining the same estimate every cycle.
-    fleetops.from('estimate_resolutions').select('estimate_number, resolution, note').in('estimate_number', estimateNumbers),
+    fleetops.from('estimate_resolutions').select('estimate_number, resolution, note, line_item_name').in('estimate_number', estimateNumbers),
   ]);
   if (tracedResult.error) throw new Error(`findUnmatchedWonEstimates ledger query failed: ${tracedResult.error.message}`);
   if (resolutionsResult.error) throw new Error(`findUnmatchedWonEstimates resolutions query failed: ${resolutionsResult.error.message}`);
@@ -687,6 +691,7 @@ export async function findUnmatchedWonEstimates({ employeeName, lookbackDays = L
       amount: Number(e.amount || 0),
       quoteDate: e.quote_date,
       inProgressNote: e.resolution?.note ?? null,
+      lineItemName: e.resolution?.line_item_name ?? null,
     }));
 }
 
