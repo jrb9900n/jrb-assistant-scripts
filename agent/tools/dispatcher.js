@@ -125,6 +125,7 @@ const HANDLERS = {
   sa_fuzzy_match_client:   (i) => fuzzyMatch.runFuzzyMatchClient(i),
   sa_get_client_profile:   (i) => sa.getClientProfile(i),
   sa_get_client_notes:     (i) => sa.getClientNotes(i),
+  sa_get_audit_trail:      (i) => sa.getAuditTrail(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),
