@@ -39,11 +39,11 @@ function fD(d) {
   return parsed.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// Exact terms from the Accountability Agreement's Salary/Commission Structure
-// section, not the internal category enum, so the commission basis is obvious.
+// Shortened per Michael's spec, 2026-08-04 (was the full Accountability
+// Agreement phrasing — accurate but too long for a table column).
 const CATEGORY_LABEL = {
-  maintenance_snow: 'Landscape Maintenance & Snow Removal Contract',
-  self_performed: 'Self-Performed Asphalt, Concrete, or Landscape Project',
+  maintenance_snow: 'Contract',
+  self_performed: 'Project',
 };
 
 function subcontractorLabel(r) {
@@ -73,6 +73,7 @@ const f_pct = n => `${(Number(n || 0) * 100).toFixed(1)}%`;
 const LEDGER_COLUMNS = [
   { label: 'Client', render: r => r.client_name ?? '—' },
   { label: 'Category', render: r => CATEGORY_LABEL[r.category] ?? r.category },
+  { label: 'Line Item', render: r => r.line_item_names ?? '—' },
   { label: 'Estimate #', render: r => r.estimate_number ?? '—' },
   { label: 'Estimate Date', render: r => fD(r.estimate_date) },
   { label: 'Invoice #', render: r => r.invoice_number ?? '—' },
@@ -91,6 +92,20 @@ const LEDGER_COLUMNS = [
   { label: 'Commission Rate', render: r => f_pct(r.commission_rate) },
 ];
 
+// Excel-style banding: same client keeps the same shade across however many
+// rows it has (Heather Kehr's 3 rows, Jason Carver's 4, etc.) instead of a
+// plain alternating-by-row-index stripe, which visually chopped a single
+// client's block up for no reason. Rows are already sorted by client first,
+// so the band only needs to flip when client_name actually changes.
+const BAND_COLORS = ['#ffffff', '#eef2f9'];
+function bandColorsByRow(sortedRows) {
+  let band = 0;
+  return sortedRows.map((r, i) => {
+    if (i > 0 && r.client_name !== sortedRows[i - 1].client_name) band = 1 - band;
+    return BAND_COLORS[band];
+  });
+}
+
 function sortByClientThenInvoiceDate(rows) {
   return [...rows].sort((a, b) => {
     const clientCmp = (a.client_name ?? '').localeCompare(b.client_name ?? '');
@@ -99,25 +114,32 @@ function sortByClientThenInvoiceDate(rows) {
   });
 }
 
+const GRID_BORDER = '1px solid #d5dae3';
+
 function ledgerTable(rows, amountKey) {
   if (!rows.length) return `<p style="margin:0 0 10px;font-size:13px;color:#888888;font-style:italic;">None this run.</p>`;
   const sorted = sortByClientThenInvoiceDate(rows);
-  const headerCells = LEDGER_COLUMNS.map(c => `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">${c.label}</td>`).join('')
-    + `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;text-align:right;">Commission Amount</td>`;
+  const bandColors = bandColorsByRow(sorted);
+  const headerCells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#ffffff;background-color:#3a3f5c;text-transform:uppercase;border:${GRID_BORDER};">${c.label}</td>`).join('')
+    + `<td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#ffffff;background-color:#3a3f5c;text-transform:uppercase;text-align:right;border:${GRID_BORDER};">Commission Amount</td>`;
   const body = sorted.map((r, i) => {
-    const cells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:13px;color:#333333;">${c.render(r)}</td>`).join('');
-    return `<tr style="background-color:${i % 2 ? '#f8f8f8' : '#ffffff'};">${cells}<td style="padding:5px 8px;font-size:13px;color:#1a1a2e;font-weight:bold;text-align:right;white-space:nowrap;">${f$(r[amountKey])}</td></tr>`;
+    const rowColor = bandColors[i];
+    const cells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:13px;color:#333333;background-color:${rowColor};border:${GRID_BORDER};">${c.render(r)}</td>`).join('');
+    // Commission Amount gets its own tint (like a calculated column in Excel)
+    // instead of following the client band, so it stands out as the number
+    // that matters on every row regardless of which client it's on.
+    return `<tr>${cells}<td style="padding:5px 8px;font-size:13px;color:#1a1a2e;font-weight:bold;text-align:right;white-space:nowrap;background-color:#dcecdc;border:${GRID_BORDER};">${f$(r[amountKey])}</td></tr>`;
   }).join('');
   const total = sorted.reduce((s, r) => s + Number(r[amountKey] || 0), 0);
-  return `<div style="overflow-x:auto;"><table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:6px;border-collapse:collapse;white-space:nowrap;">
+  return `<div style="overflow-x:auto;"><table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:6px;border-collapse:collapse;white-space:nowrap;border:${GRID_BORDER};">
     <tr>${headerCells}</tr>
     ${body}
     <tr style="background-color:#1a1a2e;">
-      <td colspan="${LEDGER_COLUMNS.length}" style="padding:8px;font-size:13px;color:#aaaacc;">Total</td>
-      <td style="padding:8px;font-size:15px;color:#ffffff;font-weight:bold;text-align:right;">${f$(total)}</td>
+      <td colspan="${LEDGER_COLUMNS.length}" style="padding:8px;font-size:13px;color:#aaaacc;border:${GRID_BORDER};">Total</td>
+      <td style="padding:8px;font-size:15px;color:#ffffff;font-weight:bold;text-align:right;border:${GRID_BORDER};">${f$(total)}</td>
     </tr>
   </table></div>
-  <p style="margin:2px 0 14px;font-size:11px;color:#888888;">Estimate #/Date are a best-effort match (no direct link exists from invoice to estimate) — flag if one looks wrong. Invoice Date/Paid Date can show "—" when the underlying record hasn't synced from Service Autopilot yet — that's a display gap only; "Paid Amount" is the actual amount collected against the invoice and is what determines whether a row is payable. "Subcontracted?" reflects what's been auto-flagged from QBO vendor bills so far; reply to confirm, reject, or add one I missed.</p>`;
+  <p style="margin:2px 0 14px;font-size:11px;color:#888888;">Estimate #/Date are a best-effort match (no direct link exists from invoice to estimate) — flag if one looks wrong. Invoice Date/Paid Date can show "—" when the underlying record hasn't synced from Service Autopilot yet — that's a display gap only; "Paid Amount" is the actual amount collected against the invoice and is what determines whether a row is payable. "Subcontracted?" reflects what's been auto-flagged from QBO vendor bills so far; reply to confirm, reject, or add one I missed. Invoice Amount/Paid Amount exclude sales tax.</p>`;
 }
 
 function reviewList(items) {
