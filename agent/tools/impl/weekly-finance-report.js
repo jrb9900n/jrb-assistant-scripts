@@ -296,6 +296,24 @@ async function gatherUnrecordedPayments() {
   return unrecorded;
 }
 
+// QB payments with no matching SA record — inbound money (ACH, check, card) that
+// landed in QB but was never recorded in SA. Reads the dedicated payment-matching
+// engine's output (matching/payment-matching-engine.js -> payment_matches table)
+// rather than re-deriving matching logic here — that engine already does proper
+// Levenshtein name matching + exact-amount + date-window scoring. This table only
+// stays fresh if `match:payments` actually runs (wired into the Monday 12:01 AM
+// ame_weekly_sync cron step list as of 2026-08-05 — previously missing entirely).
+async function gatherUnmatchedQBPayments() {
+  const { data, error } = await supabase
+    .from('payment_matches')
+    .select('qb_payment_id, qb_customer, qb_amount, qb_payment_date, payment_method')
+    .eq('match_status', 'unmatched_qb')
+    .gt('qb_amount', 0)
+    .order('qb_payment_date', { ascending: false });
+  if (error) { logger.warn('Unmatched QB payments query failed', { err: error.message }); return []; }
+  return data ?? [];
+}
+
 // ── Formatting helpers ──────────────────────────────────────────────────────
 
 const f$ = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -377,7 +395,7 @@ function buildAuditCSV(auditIssues, ameMatches) {
 
 // ── HTML email builder ──────────────────────────────────────────────────────
 
-function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, freshness, unrecordedPayments, activeCards, delayed = false, delayMinutes = 0 }) {
+function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, freshness, unrecordedPayments, unmatchedQBPayments, activeCards, delayed = false, delayMinutes = 0 }) {
   const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
   const totalAR        = arAging.total;
 
@@ -498,6 +516,14 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
       `<p style="margin:3px 0;font-size:13px;color:#c0392b;">${i.description}</p>`
     ).join('');
     html += alertBox('#fff5f5', '#c0392b', `${highIssues.length} High-Priority Reconciliation Issue${highIssues.length > 1 ? 's' : ''}`, issRows);
+  }
+  if (unmatchedQBPayments.length) {
+    const total = unmatchedQBPayments.reduce((s, p) => s + Number(p.qb_amount ?? 0), 0);
+    const rows = unmatchedQBPayments.slice(0, 5).map(p =>
+      `<p style="margin:3px 0;font-size:13px;color:#c0392b;">${fD(p.qb_payment_date)} &mdash; ${p.qb_customer || '—'} &mdash; <strong>${f$(p.qb_amount)}</strong>${p.payment_method ? ` (${p.payment_method})` : ''}</p>`
+    ).join('');
+    html += alertBox('#fff5f5', '#c0392b', `${unmatchedQBPayments.length} Inbound QB Payment${unmatchedQBPayments.length > 1 ? 's' : ''} Not Recorded in SA (${f$(total)})`, rows +
+      `<p style="margin:6px 0 0;font-size:12px;color:#888888;">See Section 5 for the full list.</p>`);
   }
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -863,10 +889,37 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
   }
 
   // ══════════════════════════════════════════════════════════════════════════
-  // SECTION 5 — SA PAYMENTS NOT IN QB
+  // SECTION 5 — PAYMENT RECONCILIATION (BOTH DIRECTIONS)
   // ══════════════════════════════════════════════════════════════════════════
-  html += sectionHeader('Section 5 — SA Payments Not in QB (Unexplained Cash Inflows)');
+  html += sectionHeader('Section 5 — Payment Reconciliation');
 
+  html += `<p style="margin:0 0 8px;font-size:13px;font-weight:bold;color:${unmatchedQBPayments.length ? '#c0392b' : '#1a6e1a'};">Inbound QB Payments Not in SA${unmatchedQBPayments.length ? '' : ' — none'}</p>`;
+  if (!unmatchedQBPayments.length) {
+    html += `<p style="margin:0 0 16px;font-size:13px;color:#1a6e1a;font-style:italic;">Every QB payment on record has a matching SA payment. This is the check that catches ACH/check/card deposits QB received but SA never recorded — e.g. a client paying directly without notifying us.</p>`;
+  } else {
+    const unmatchedQBTotal = unmatchedQBPayments.reduce((s, p) => s + Number(p.qb_amount ?? 0), 0);
+    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">${unmatchedQBPayments.length} QB payment${unmatchedQBPayments.length > 1 ? 's' : ''} (${f$(unmatchedQBTotal)} total) exist in QuickBooks with no corresponding SA payment record. These are real inbound funds — verify they're applied to the right invoice/client in QB, and check whether SA needs a manual payment entry.</p>`;
+    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
+    <tr style="background-color:#f8f8f8;">
+      <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Date</td>
+      <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Client (QB)</td>
+      <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Method</td>
+      <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;text-align:right;">Amount</td>
+    </tr>`;
+    for (let i = 0; i < unmatchedQBPayments.length; i++) {
+      const p = unmatchedQBPayments[i];
+      html += `<tr style="background-color:${i % 2 ? '#f8f8f8' : '#ffffff'};">
+        <td style="padding:5px 8px;font-size:13px;color:#888888;white-space:nowrap;">${fD(p.qb_payment_date)}</td>
+        <td style="padding:5px 8px;font-size:13px;color:#333333;">${p.qb_customer || '—'}</td>
+        <td style="padding:5px 8px;font-size:12px;color:#888888;">${p.payment_method || '—'}</td>
+        <td style="padding:5px 8px;font-size:13px;font-weight:bold;color:#c0392b;text-align:right;white-space:nowrap;">${f$(p.qb_amount)}</td>
+      </tr>`;
+    }
+    html += `</table>`;
+    html += `<p style="margin:0 0 16px;font-size:12px;color:#888888;font-style:italic;">Source: matching/payment-matching-engine.js (payment_matches table). Note: an inbound ACH that lands in the bank feed but hasn't been categorized into a QB Payment/Deposit yet is invisible even to this check — that gap can currently only be caught by reviewing QB's own Banking &quot;for review&quot; queue directly, since QB's API doesn't expose it.</p>`;
+  }
+
+  html += `<p style="margin:16px 0 8px;font-size:13px;font-weight:bold;color:#444444;">SA Payments Not in QB (Unexplained Cash Inflows)</p>`;
   if (!unrecordedPayments.length) {
     html += `<p style="margin:0 0 16px;font-size:13px;color:#1a6e1a;font-style:italic;">All SA payments from the last 90 days have a matching QB record.</p>`;
   } else {
@@ -919,7 +972,7 @@ export async function generateAndSendWeeklyFinanceReport({ delayed = false, dela
   const { start, end, weekLabel, displayRange } = getPriorWeekRange();
   logger.info('weekly_finance_report: gathering data', { weekLabel, start, end });
 
-  const [payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, unrecordedPayments, activeCards, freshness] = await Promise.all([
+  const [payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, unrecordedPayments, unmatchedQBPayments, activeCards, freshness] = await Promise.all([
     gatherSAPaymentsForWeek(start, end),
     gatherSAARaging(),
     gatherQBInvoicesForWeek(start, end),
@@ -928,6 +981,7 @@ export async function generateAndSendWeeklyFinanceReport({ delayed = false, dela
     gatherAuditIssues(),
     gatherAMEMatches(),
     gatherUnrecordedPayments(),
+    gatherUnmatchedQBPayments(),
     gatherActiveCards(),
     gatherFreshnessStatus(),
   ]);
@@ -943,10 +997,11 @@ export async function generateAndSendWeeklyFinanceReport({ delayed = false, dela
     saDataStale: freshness.stale,
     saDataAgeHours: freshness.ageHours,
     unrecordedPayments: unrecordedPayments.length,
+    unmatchedQBPayments: unmatchedQBPayments.length,
     activeCards: activeCards.length,
   });
 
-  const body = buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, freshness, unrecordedPayments, activeCards, delayed, delayMinutes });
+  const body = buildEmail({ weekLabel, displayRange, payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, freshness, unrecordedPayments, unmatchedQBPayments, activeCards, delayed, delayMinutes });
   const totalCollected = payments.reduce((s, p) => s + p.amount, 0);
   const delayNote = delayed ? ` (delayed ${delayMinutes}m — awaited AME)` : '';
 
