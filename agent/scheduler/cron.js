@@ -1251,7 +1251,8 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
         { script: 'sync:payments',     label: 'SA Payments',     isSA: true },
         { script: 'sync:applications', label: 'SA Applications', isSA: true },
         { script: 'sync:qb',           label: 'QB Sync',         isQB: true },
-        { script: 'match',             label: 'Matching Engine'              },
+        { script: 'match',             label: 'Invoice Matching Engine'       },
+        { script: 'match:payments',    label: 'Payment Matching Engine'       },
       ];
 
       const passed = [], failed = [], skipped = [];
