@@ -19,7 +19,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { sendEmail, draftEmail, getEmail, createReplyDraft, sendDraft } from './m365.js';
-import { runCommissionEngine, currentQuarter, findUnmatchedWonEstimates } from './commission-engine.js';
+import { runCommissionEngine, currentQuarter, findUnmatchedWonEstimates, findWaitingListJobs } from './commission-engine.js';
 import { sendProactiveMessage } from '../../teams/notify.js';
 import { logger } from '../../core/logger.js';
 
@@ -228,34 +228,71 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   );
   const unmatchedEstimates = unmatchedEstimatesByEmployee.flat();
 
+  // sa_waiting_list (2026-08-05, per Michael: "you will be able to tell what
+  // it is [from the waiting list]") turned out to be a MORE reliable second
+  // source than sa_accepted_estimates for this same section -- it carries a
+  // real sales_rep field (ground truth, not a date-proximity guess) and
+  // caught a real gap: a repeat Celia Shaughnessy weed-removal visit with no
+  // formal estimate behind it at all, which findUnmatchedWonEstimates could
+  // never have found. Merged with the estimate-based list rather than
+  // replacing it -- deduped by client+amount (the only correlation available,
+  // no direct FK) so the same job (e.g. Dolsky, present in both sources)
+  // doesn't appear twice.
+  const waitingListJobsByEmployee = await Promise.all(
+    (activePlans ?? []).map(async p => (await findWaitingListJobs({ employeeName: p.employee_name }))
+      .map(j => ({ ...j, employeeName: p.employee_name, rate: Number(p.self_performed_rate) })))
+  );
+  const dedupeKey = (client, amount) => `${client}|${amount.toFixed(2)}`;
+  const estimateKeys = new Set(unmatchedEstimates.map(e => dedupeKey(e.clientName, e.amount)));
+  const waitingListJobs = waitingListJobsByEmployee.flat()
+    .filter(j => !estimateKeys.has(dedupeKey(j.clientName, j.amount)));
+
   // Section 3, "Waiting List — Work Won But Not Performed" (per Michael,
-  // 2026-08-04): a won estimate with no invoice yet -- e.g. the Dolsky job,
-  // sold but not completed -- shown with the same columns as the ledger
-  // tables above. Most of those columns are necessarily blank (nothing's
-  // been invoiced), and there's no real category/rate signal on an estimate
-  // alone -- self_performed is the only category an individual one-off
-  // estimate like this is ever seen to map to in practice, so it's used as
-  // the default rather than left unlabeled. Commission Amount here is a
-  // PROJECTION (rate × estimate amount) for visibility into upcoming
-  // liability, not a booked figure -- nothing is accrued or payable until
-  // it's actually invoiced.
-  const waitingListRows = unmatchedEstimates.map(e => ({
-    client_name: e.clientName,
-    category: 'self_performed',
-    line_item_names: e.lineItemName ?? null,
-    estimate_number: e.estimateNumber,
-    estimate_date: e.quoteDate,
-    invoice_number: null,
-    invoice_date: null,
-    invoiced_amount: e.amount,
-    date_paid: null,
-    paid_amount: 0,
-    involves_subcontractor: false,
-    unconfirmed_subcontracted_fraction: 0,
-    commission_rate: e.rate,
-    projected_commission: round2(e.rate * e.amount),
-    inProgressNote: e.inProgressNote,
-  }));
+  // 2026-08-04): a won job with no invoice yet -- e.g. the Dolsky job, sold
+  // but not completed -- shown with the same columns as the ledger tables
+  // above. Most of those columns are necessarily blank (nothing's been
+  // invoiced), and there's no real category/rate signal on an individual
+  // won job alone -- self_performed is the only category either source is
+  // ever seen to map to in practice, so it's used as the default rather
+  // than left unlabeled. Commission Amount here is a PROJECTION (rate ×
+  // amount) for visibility into upcoming liability, not a booked figure --
+  // nothing is accrued or payable until it's actually invoiced.
+  const waitingListRows = [
+    ...unmatchedEstimates.map(e => ({
+      client_name: e.clientName,
+      category: 'self_performed',
+      line_item_names: e.lineItemName ?? null,
+      estimate_number: e.estimateNumber,
+      estimate_date: e.quoteDate,
+      invoice_number: null,
+      invoice_date: null,
+      invoiced_amount: e.amount,
+      date_paid: null,
+      paid_amount: 0,
+      involves_subcontractor: false,
+      unconfirmed_subcontracted_fraction: 0,
+      commission_rate: e.rate,
+      projected_commission: round2(e.rate * e.amount),
+      inProgressNote: e.inProgressNote,
+    })),
+    ...waitingListJobs.map(j => ({
+      client_name: j.clientName,
+      category: 'self_performed',
+      line_item_names: j.lineItemName,
+      estimate_number: null,
+      estimate_date: j.dateAdded,
+      invoice_number: null,
+      invoice_date: null,
+      invoiced_amount: j.amount,
+      date_paid: null,
+      paid_amount: 0,
+      involves_subcontractor: false,
+      unconfirmed_subcontracted_fraction: 0,
+      commission_rate: j.rate,
+      projected_commission: round2(j.rate * j.amount),
+      inProgressNote: j.targetDate ? `Target date ${fD(j.targetDate)} per SA Waiting List.` : null,
+    })),
+  ];
 
   const reviewItems = [
     ...renewalPending.map(r => `${clientLabel(r) ?? r.sa_reference} — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
