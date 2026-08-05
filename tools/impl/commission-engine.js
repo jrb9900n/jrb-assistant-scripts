@@ -409,11 +409,19 @@ async function fetchJobDetails(job, { qboPaymentIndex } = {}) {
     datePaid = overrides?.as_of_date ?? null;
   }
 
+  // Prefer an exact-amount match (see findEstimateByAmount) over the
+  // date-proximity guess above for DISPLAY purposes too — same reasoning as
+  // its use in resolvePM. Only used when unique for this client/amount.
+  const amountMatches = await findEstimateByAmount(job.saClientId, job.invoicedAmount);
+  const bestEstimate = amountMatches.length === 1
+    ? { estimate_number: amountMatches[0].estimate_number, quote_date: amountMatches[0].quote_date }
+    : estimateResult.data;
+
   return {
     serviceNames,
     lineItemNames,
-    estimateNumber: estimateResult.data?.estimate_number ?? null,
-    estimateDate: estimateResult.data?.quote_date ?? null,
+    estimateNumber: bestEstimate?.estimate_number ?? null,
+    estimateDate: bestEstimate?.quote_date ?? null,
     invoiceNumber: invoicesResult.data?.invoice_number ?? null,
     invoiceDate: invoicesResult.data?.date ?? null,
     dateCompleted,
@@ -558,7 +566,29 @@ async function buildAttributionIndexes() {
 // (the fallible date-proximity guess, caught wrong 3 times against real data:
 // Sterling Pharma, Celia Shaughnessy, Lori Pegelow) withholds payable
 // commission pending human confirmation; everything else is trusted.
-async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, isContractJob, fuzzyCandidateCache, assignmentIndex, estimatesByClient }) {
+// ── Exact-amount estimate match (2026-08-05) ────────────────────────────────
+// sa_estimates_2026 carries per-estimate estimated_value AND per-line
+// amounts/service names (sa_accepted_estimates has neither) -- a real
+// improvement over date-proximity guessing found after yet another
+// misattribution (Mary Jo Smith's Tree Trimming job: matched by date to
+// estimate #5424, a DIFFERENT $1,000 estimate for the same client, when the
+// real one was #5426 -- which turned out to be missing from
+// sa_accepted_estimates entirely, not just picked wrong). Matching on the
+// invoice's own pretax amount against estimated_value is far less likely to
+// collide than "whichever estimate happens to be nearby in time," though a
+// same-client estimate at the exact same dollar amount is still possible in
+// principle -- callers only trust this when exactly one candidate matches.
+async function findEstimateByAmount(clientId, amount) {
+  if (!clientId) return [];
+  const { data, error } = await fleetops
+    .from('sa_estimates_2026')
+    .select('estimate_number, salesperson, quote_date, estimated_value, line_items')
+    .eq('client_id', clientId);
+  if (error) { logger.warn('findEstimateByAmount query failed', { err: error.message, clientId }); return []; }
+  return (data ?? []).filter(e => Math.abs(Number(e.estimated_value || 0) - amount) < 0.01);
+}
+
+async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, invoicedAmount, isContractJob, fuzzyCandidateCache, assignmentIndex, estimatesByClient }) {
   const manualMatch =
     (invoiceSaId && assignmentIndex.byInvoice.get(invoiceSaId)) ||
     (contractId && assignmentIndex.byContract.get(contractId)) ||
@@ -589,7 +619,31 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
     }
   }
 
-  // No job-level signal either — scrape the rep off the estimate that
+  // No job-level signal either — try an exact-amount match against
+  // sa_estimates_2026 before falling back to pure date-proximity guessing
+  // (see findEstimateByAmount). Only trusted when the amount is unique to a
+  // single estimate for this client; a tie falls through to the weaker
+  // date-proximity tier below rather than guessing between them.
+  if (invoicedAmount != null) {
+    const amountMatches = await findEstimateByAmount(saClientId, invoicedAmount);
+    if (amountMatches.length === 1 && amountMatches[0].salesperson) {
+      const est = amountMatches[0];
+      const scopeCols = (contractId || invoiceSaId)
+        ? { sa_contract_id: contractId ?? null, sa_invoice_sa_id: invoiceSaId ?? null }
+        : { sa_client_id: saClientId };
+      const { error: insertError } = await fleetops.from('pm_job_assignments').insert({
+        ...scopeCols,
+        employee_name: est.salesperson,
+        source: 'sa_signal',
+        confidence: 'estimate_amount_match',
+        notes: `Matched estimate #${est.estimate_number} by exact invoiced amount ($${invoicedAmount}) via sa_estimates_2026`,
+      });
+      if (insertError) logger.warn('pm_job_assignments estimate_amount_match insert failed', { err: insertError.message });
+      return { employeeName: est.salesperson, confidence: 'estimate_amount_match' };
+    }
+  }
+
+  // No unique amount match either — scrape the rep off the estimate that
   // actually preceded (and could plausibly have won) THIS job, not just
   // "whichever estimate is most recent for the client overall."
   // Fixed 2026-07-29 after a real misattribution: Sterling Pharma's March 2026
@@ -964,6 +1018,7 @@ export async function runCommissionEngine({ quarter, isFinal = true } = {}) {
       contractId: job.contractId,
       invoiceSaId: job.invoiceSaId,
       earliestDate: job.earliestDate,
+      invoicedAmount: job.invoicedAmount,
       isContractJob: job.category === 'maintenance_snow',
       fuzzyCandidateCache,
       assignmentIndex,
