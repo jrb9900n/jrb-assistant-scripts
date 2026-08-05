@@ -695,6 +695,54 @@ export async function findUnmatchedWonEstimates({ employeeName, lookbackDays = L
     }));
 }
 
+// ── SA's own Waiting List (2026-08-05) ──────────────────────────────────────
+// sa_waiting_list turned out to be a MORE reliable source than
+// sa_accepted_estimates for "won but not yet performed" work — it carries a
+// real sales_rep field (ground truth, not a date-proximity guess) and, per
+// its name, is SA's own tracking of exactly this: jobs sold and waiting to be
+// scheduled/dispatched. Real gap found checking Michael Dolsky's job here
+// (2026-08-05): a recurring weed-removal visit for Celia Shaughnessy (added
+// to the waiting list 2026-08-01) has NO corresponding sa_accepted_estimates
+// row at all — a repeat visit under an existing arrangement, not a fresh
+// formal estimate — so findUnmatchedWonEstimates could never have found it.
+// Cross-referenced against commission_ledger by client name + amount (no
+// direct FK exists) rather than quarter-scoped, since a waiting-list item
+// invoiced in an earlier run should stay excluded permanently, not just for
+// the quarter that happened to catch it.
+export async function findWaitingListJobs({ employeeName }) {
+  const { data: items, error } = await fleetops
+    .from('sa_waiting_list')
+    .select('client_name, amount, date_added, target_date')
+    .eq('sales_rep', employeeName);
+  if (error) throw new Error(`findWaitingListJobs sa_waiting_list query failed: ${error.message}`);
+  if (!items?.length) return [];
+
+  const { data: ledgerRows, error: ledgerError } = await fleetops
+    .from('commission_ledger').select('client_name, invoiced_amount').eq('employee_name', employeeName);
+  if (ledgerError) throw new Error(`findWaitingListJobs commission_ledger query failed: ${ledgerError.message}`);
+  const alreadyInvoiced = (client, amount) => (ledgerRows ?? []).some(
+    r => r.client_name === client && Math.abs(Number(r.invoiced_amount) - amount) < 0.02
+  );
+
+  // sa_waiting_list.category turned out to be a BTA business-categorization
+  // field, NOT a service/line-item description (real case, 2026-08-05: it
+  // read "Commercial Asphalt Maintenance" for a job that's actually
+  // "Sealcoating - Res. 1 Coat") -- not used as a line-item guess. No
+  // per-item override mechanism exists here yet (unlike estimate_resolutions
+  // for the estimate-sourced list above) since this table has no natural key
+  // to hang one off of besides client+amount, which is already the dedup
+  // key -- left blank rather than guessing wrong again.
+  return items
+    .filter(i => !alreadyInvoiced(i.client_name, Number(i.amount || 0)))
+    .map(i => ({
+      clientName: i.client_name,
+      amount: Number(i.amount || 0),
+      lineItemName: null,
+      dateAdded: i.date_added,
+      targetDate: i.target_date,
+    }));
+}
+
 // ── Renewal detection ───────────────────────────────────────────
 // Heuristic only — SA has no native renewal flag. A different contract_id for
 // the same customer_id in the prior-year window is treated as a likely renewal
