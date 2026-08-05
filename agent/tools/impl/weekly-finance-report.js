@@ -304,11 +304,19 @@ async function gatherUnrecordedPayments() {
 // stays fresh if `match:payments` actually runs (wired into the Monday 12:01 AM
 // ame_weekly_sync cron step list as of 2026-08-05 — previously missing entirely).
 async function gatherUnmatchedQBPayments() {
+  // 90-day window, matching gatherUnrecordedPayments' cutoff — without this, every
+  // historical gap the matcher has ever found (hundreds, going back to 2023) would
+  // render into the email every single week, burying anything actually new.
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() - 90);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+
   const { data, error } = await supabase
     .from('payment_matches')
     .select('qb_payment_id, qb_customer, qb_amount, qb_payment_date, payment_method')
     .eq('match_status', 'unmatched_qb')
     .gt('qb_amount', 0)
+    .gte('qb_payment_date', cutoffStr)
     .order('qb_payment_date', { ascending: false });
   if (error) { logger.warn('Unmatched QB payments query failed', { err: error.message }); return []; }
   return data ?? [];
@@ -895,10 +903,10 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
 
   html += `<p style="margin:0 0 8px;font-size:13px;font-weight:bold;color:${unmatchedQBPayments.length ? '#c0392b' : '#1a6e1a'};">Inbound QB Payments Not in SA${unmatchedQBPayments.length ? '' : ' — none'}</p>`;
   if (!unmatchedQBPayments.length) {
-    html += `<p style="margin:0 0 16px;font-size:13px;color:#1a6e1a;font-style:italic;">Every QB payment on record has a matching SA payment. This is the check that catches ACH/check/card deposits QB received but SA never recorded — e.g. a client paying directly without notifying us.</p>`;
+    html += `<p style="margin:0 0 16px;font-size:13px;color:#1a6e1a;font-style:italic;">Every QB payment from the last 90 days has a matching SA payment. This is the check that catches ACH/check/card deposits QB received but SA never recorded — e.g. a client paying directly without notifying us.</p>`;
   } else {
     const unmatchedQBTotal = unmatchedQBPayments.reduce((s, p) => s + Number(p.qb_amount ?? 0), 0);
-    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">${unmatchedQBPayments.length} QB payment${unmatchedQBPayments.length > 1 ? 's' : ''} (${f$(unmatchedQBTotal)} total) exist in QuickBooks with no corresponding SA payment record. These are real inbound funds — verify they're applied to the right invoice/client in QB, and check whether SA needs a manual payment entry.</p>`;
+    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">${unmatchedQBPayments.length} QB payment${unmatchedQBPayments.length > 1 ? 's' : ''} from the last 90 days (${f$(unmatchedQBTotal)} total) exist in QuickBooks with no corresponding SA payment record. These are real inbound funds — verify they're applied to the right invoice/client in QB, and check whether SA needs a manual payment entry.</p>`;
     html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">
     <tr style="background-color:#f8f8f8;">
       <td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">Date</td>
