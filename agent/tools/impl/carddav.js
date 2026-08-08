@@ -122,17 +122,14 @@ async function getContacts() {
     if (key && emp.phone) dirPhoneByName.set(key, emp.phone);
   }
 
-  // Build phone + email sets from all QBO entities for cross-source dedup
-  // Include employees so their personal numbers don't create duplicate SA-only entries
-  const qboPhones = new Set();
-  const qboEmails = new Set();
-  for (const e of [...customers, ...vendors, ...qboEmployees]) {
-    for (const num of [e.PrimaryPhone?.FreeFormNumber, e.Mobile?.FreeFormNumber, e.AlternatePhone?.FreeFormNumber]) {
+  // Employee personal phones — excluded from the merge pool below so an employee's
+  // own SA/QBO record never gets pulled in as if it were a separate customer contact.
+  const employeePhones = new Set();
+  for (const e of qboEmployees) {
+    for (const num of [e.PrimaryPhone?.FreeFormNumber, e.Mobile?.FreeFormNumber]) {
       const n = normalizePhone(num);
-      if (n.length >= 7) qboPhones.add(n);
+      if (n.length >= 7) employeePhones.add(n);
     }
-    const em = e.PrimaryEmailAddr?.Address?.toLowerCase();
-    if (em) qboEmails.add(em);
   }
 
   // Build SA lookup maps (address overlay + SA-only detection)
@@ -169,20 +166,27 @@ async function getContacts() {
       .map(c => String(c.Id))
   );
 
-  const qboVcards = customers
+  // One candidate per top-level QBO customer, with sub-customers' phones/emails/addresses
+  // folded in (rather than emitted as separate contacts) so a parent + its jobs appear
+  // as one entry with everything on it.
+  const customerCandidates = customers
     .filter(c => !childIds.has(String(c.Id)))
     .map(c => {
       const children = byParent.get(String(c.Id)) ?? [];
-      const extraAddrs = children.flatMap(child => {
-        const sa = saAddrFor(child);
-        if (sa?.Line1) return [sa];
-        const qbo = (child.ShipAddr?.Line1 ? child.ShipAddr : child.BillAddr) ?? {};
-        return qbo.Line1
-          ? [{ Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode }]
-          : [];
-      });
-      return entityToVCard(c, 'customer', saAddrFor(c), extraAddrs);
+      const phones = qboPhoneList(c);
+      const emails = qboEmailList(c);
+      const addresses = qboAddressList(c, saAddrFor(c), 'customer');
+      for (const child of children) {
+        phones.push(...qboPhoneList(child));
+        emails.push(...qboEmailList(child));
+        addresses.push(...qboAddressList(child, saAddrFor(child), 'customer'));
+      }
+      return makeQboCandidate(c, 'customer', phones, emails, addresses);
     });
+
+  const vendorCandidates = vendors.map(v =>
+    makeQboCandidate(v, 'vendor', qboPhoneList(v), qboEmailList(v), qboAddressList(v, null, 'vendor'))
+  );
 
   // SA-only contacts: in SA but not matched to any active QBO customer by name.
   // SA's QboID sync is not configured, so we name-match instead of ID-match.
@@ -246,8 +250,11 @@ async function getContacts() {
   // All SA-only contacts, not just those within the phone-fetch cap.
   // Within-cap: API phone+address (may be null/empty); beyond-cap: bulk-list data.
   // API address takes priority over bulk-list address when both exist.
-  // Drop only if no phone AND no address; drop if phone duplicates a QBO contact.
-  const saOnlyDeduped = saOnlyRaw
+  // These no longer get silently dropped when a phone matches a QBO contact — instead
+  // they're fed into the same merge pool as QBO customers/vendors below, so any phone,
+  // address, or email SA has that QBO doesn't gets folded into the merged contact
+  // instead of being discarded.
+  const saCandidates = saOnlyRaw
     .map(c => {
       const detail = saDetailById.get(c.clientId);
       const apiAddr = detail?.address || null;
@@ -260,10 +267,9 @@ async function getContacts() {
       const workPhone  = detail?.workPhone  || null;
       const otherPhone = detail?.otherPhone || null;
       const effectiveHomePhone = homePhone || (!(cellPhone || workPhone || otherPhone) ? (c.phone || null) : null);
-      const phone = effectiveHomePhone || cellPhone || workPhone || otherPhone || null;
       return {
         ...c,
-        homePhone: effectiveHomePhone, cellPhone, workPhone, otherPhone, phone,
+        homePhone: effectiveHomePhone, cellPhone, workPhone, otherPhone,
         address: apiAddr || c.address || null,
         city:    apiAddr ? detail.city : c.city,
         state:   apiAddr ? detail.state : c.state,
@@ -271,17 +277,21 @@ async function getContacts() {
       };
     })
     .filter(c => {
-      if (!c.phone && !c.address) return false;
-      // Drop if any phone matches a QBO contact (same person — QBO is authoritative)
+      if (!c.homePhone && !c.cellPhone && !c.workPhone && !c.otherPhone && !c.address) return false;
+      // An employee's own personal number shouldn't surface as a separate customer contact
       for (const ph of [c.homePhone, c.cellPhone, c.workPhone, c.otherPhone]) {
-        if (ph) {
-          const n = normalizePhone(ph);
-          if (n.length >= 7 && qboPhones.has(n)) return false;
-        }
+        if (ph && employeePhones.has(normalizePhone(ph))) return false;
       }
       return true;
-    });
-  const saOnlyVcards = saOnlyDeduped.map(saClientToVCard);
+    })
+    .map(makeSaCandidate);
+
+  // Merge candidates that represent the same real-world entity — whether that's a QBO
+  // customer + vendor record for the same business, or an SA client whose phone/name
+  // matches a QBO contact — into one vCard carrying every phone, email, address, and
+  // company name found across all matched source records.
+  const mergedVcards = groupCandidates([...customerCandidates, ...vendorCandidates, ...saCandidates])
+    .map(mergeCandidateGroup);
 
   // Build employee vCards: QBO active employees + SharePoint directory phone overlay
   const employeeVcards = qboEmployees.map(emp => {
@@ -290,21 +300,15 @@ async function getContacts() {
     return employeeToVCard(emp, dirPhone);
   });
 
-  _cache = [
-    ...qboVcards,
-    ...vendors.map(v => entityToVCard(v, 'vendor', null)),
-    ...saOnlyVcards,
-    ...employeeVcards,
-  ];
+  _cache = [...mergedVcards, ...employeeVcards];
   _cacheTime = Date.now();
   _cacheEtag = crypto.createHash('md5').update(String(_cacheTime)).digest('hex');
   logger.info('CardDAV: cache refreshed', {
-    qboCustomers: qboVcards.length,
-    vendors: vendors.length,
-    saAccounts: saAccounts.length,
+    customers: customerCandidates.length,
+    vendors: vendorCandidates.length,
+    saCandidates: saCandidates.length,
     saOnlyRaw: saOnlyRaw.length,
-    saOnly: saOnlyVcards.length,
-    saOnlyDropped: saOnlyRaw.length - saOnlyDeduped.length,
+    mergedContacts: mergedVcards.length,
     employees: employeeVcards.length,
   });
   return _cache;
@@ -316,120 +320,194 @@ function escapeVCard(s) {
   return (s ?? '').replace(/\\/g, '\\\\').replace(/,/g, '\\,').replace(/;/g, '\\;').replace(/\n/g, '\\n');
 }
 
-function entityToVCard(entity, type, saAddr, extraAddrs = []) {
-  const uid = `JRB-${type.toUpperCase()}-${entity.Id}@jrboehlke.com`;
-  const givenName  = escapeVCard(entity.GivenName  ?? '');
-  const familyName = escapeVCard(entity.FamilyName ?? '');
-  const company    = escapeVCard(entity.CompanyName ?? '');
-  // FN: prefer "First Last" when structured name is available so iOS Contacts
-  // shows the person's name, with company appearing in the separate ORG field.
-  // Fall back to DisplayName (which may be the company name) only when no
-  // individual name parts exist.
-  const name = (givenName || familyName)
-    ? escapeVCard([entity.GivenName, entity.FamilyName].filter(Boolean).join(' '))
-    : escapeVCard(entity.DisplayName || entity.CompanyName || 'Unknown');
+// A "candidate" is one source record (QBO customer, QBO vendor, or SA client) normalized
+// into a common shape so records representing the same real-world entity — the same
+// business listed as both a QBO customer and vendor, or an SA client that matches a QBO
+// contact by phone or name — can be found and merged into a single vCard below.
 
-  const primaryPhone = entity.PrimaryPhone?.FreeFormNumber ?? '';
-  const mobilePhone  = entity.Mobile?.FreeFormNumber ?? '';
-  const altPhone     = entity.AlternatePhone?.FreeFormNumber ?? '';
-  const faxPhone     = entity.Fax?.FreeFormNumber ?? '';
-
-  const email = entity.PrimaryEmailAddr?.Address ?? '';
-
-  // Primary address: SA service address takes priority over QBO ShipAddr/BillAddr
-  let primaryAddr;
-  if (saAddr?.Line1) {
-    primaryAddr = saAddr;
-  } else {
-    const qbo = (type === 'customer' ? (entity.ShipAddr?.Line1 ? entity.ShipAddr : entity.BillAddr) : entity.BillAddr) ?? {};
-    primaryAddr = qbo.Line1 ? { Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode } : null;
-  }
-
-  // Collect all unique addresses (primary + sub-customer extras)
-  const allAddrs = [];
-  const seenAddrs = new Set();
-  for (const a of [primaryAddr, ...extraAddrs]) {
-    if (a?.Line1 && !seenAddrs.has(a.Line1)) {
-      allAddrs.push(a);
-      seenAddrs.add(a.Line1);
-    }
-  }
-
-  const category = type === 'customer' ? 'JRB Customer' : 'JRB Vendor';
-
-  // Deduplicate phone entries so the same number doesn't appear twice
-  const seen = new Set();
-  function tel(number, telType) {
-    const n = (number || '').trim();
-    if (!n || seen.has(n)) return null;
-    seen.add(n);
-    return `TEL;TYPE=${telType}:${escapeVCard(n)}`;
-  }
-
-  const lines = [
-    'BEGIN:VCARD',
-    'VERSION:3.0',
-    `UID:${uid}`,
-    `FN:${name}`,
-    `N:${familyName};${givenName};;;`,
-    company ? `ORG:${company}` : null,
-    tel(primaryPhone, 'WORK,VOICE'),
-    tel(mobilePhone, 'CELL,VOICE'),
-    tel(altPhone, 'WORK,VOICE'),
-    tel(faxPhone, 'WORK,FAX'),
-    email ? `EMAIL;TYPE=WORK:${escapeVCard(email)}` : null,
-    ...allAddrs.map(a => `ADR;TYPE=WORK:;;${escapeVCard(a.Line1)};${escapeVCard(a.City ?? '')};${escapeVCard(a.State ?? '')};${escapeVCard(a.Zip ?? '')};US`),
-    `CATEGORIES:${category}`,
-    `NOTE:${uid}`,
-    'END:VCARD',
-  ].filter(Boolean).join('\r\n');
-
-  const etag = crypto.createHash('md5').update(uid + name + primaryPhone + mobilePhone + altPhone + email + allAddrs.map(a => a.Line1).join('|')).digest('hex');
-  return { uid, etag, vcard: lines };
+function qboPhoneList(entity) {
+  return [
+    [entity.PrimaryPhone?.FreeFormNumber, 'WORK,VOICE'],
+    [entity.Mobile?.FreeFormNumber, 'CELL,VOICE'],
+    [entity.AlternatePhone?.FreeFormNumber, 'WORK,VOICE'],
+    [entity.Fax?.FreeFormNumber, 'WORK,FAX'],
+  ]
+    .filter(([number]) => number)
+    .map(([number, telType]) => ({ number, telType }));
 }
 
-function saClientToVCard(client) {
-  const uid = `JRB-SA-${client.clientId}@jrboehlke.com`;
-  // SA stores names as "Last, First" — reformat to "First Last" for FN field
+function qboEmailList(entity) {
+  return entity.PrimaryEmailAddr?.Address ? [entity.PrimaryEmailAddr.Address] : [];
+}
+
+function qboAddressList(entity, saAddr, type) {
+  // SA service address takes priority over QBO ShipAddr/BillAddr
+  if (saAddr?.Line1) return [saAddr];
+  const qbo = (type === 'customer' ? (entity.ShipAddr?.Line1 ? entity.ShipAddr : entity.BillAddr) : entity.BillAddr) ?? {};
+  return qbo.Line1 ? [{ Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode }] : [];
+}
+
+function makeQboCandidate(entity, source, phones, emails, addresses) {
+  const givenName = entity.GivenName ?? '';
+  const familyName = entity.FamilyName ?? '';
+  const personName = [givenName, familyName].filter(Boolean).join(' ');
+  const displayName = entity.DisplayName ?? '';
+  // CompanyName is the authoritative company field. When it's blank but DisplayName is
+  // clearly not just the contact person's name (e.g. QBO customer "City of Oconomowoc"
+  // with GivenName/FamilyName "Heath"/"Brozovich"), treat DisplayName as the company name
+  // so it still reaches the ORG field instead of being lost.
+  const companyName = entity.CompanyName
+    || (personName && displayName && normalizeName(displayName) !== normalizeName(personName) ? displayName : '');
+  return { key: `${source}:${entity.Id}`, source, id: entity.Id, givenName, familyName, personName, displayName, companyName, phones, emails, addresses };
+}
+
+function makeSaCandidate(client) {
+  // SA stores individuals as "Last, First"; company-only accounts are stored as a plain name.
   const raw = client.name || '';
   const parts = raw.split(',');
-  let givenName = '', familyName = '', fn;
+  let givenName = '', familyName = '', companyName = '';
   if (parts.length === 2) {
-    familyName = escapeVCard(parts[0].trim());
-    givenName  = escapeVCard(parts[1].trim());
-    fn = escapeVCard(`${parts[1].trim()} ${parts[0].trim()}`);
+    familyName = parts[0].trim();
+    givenName = parts[1].trim();
   } else {
-    fn = escapeVCard(raw);
+    companyName = raw.trim();
+  }
+  const personName = [givenName, familyName].filter(Boolean).join(' ');
+  const phones = [
+    [client.homePhone, 'HOME,VOICE'],
+    [client.cellPhone, 'CELL,VOICE'],
+    [client.workPhone, 'WORK,VOICE'],
+    [client.otherPhone, 'VOICE'],
+  ]
+    .filter(([number]) => number)
+    .map(([number, telType]) => ({ number, telType }));
+  const addresses = client.address ? [{ Line1: client.address, City: client.city, State: client.state, Zip: client.zip }] : [];
+  return { key: `sa:${client.clientId}`, source: 'sa', id: client.clientId, givenName, familyName, personName, displayName: raw, companyName, phones, emails: [], addresses };
+}
+
+// Union-find so any number of candidates chained together by a shared phone number or
+// a matching name all end up in one group, not just pairs.
+class UnionFind {
+  constructor(n) { this.parent = Array.from({ length: n }, (_, i) => i); }
+  find(x) { while (this.parent[x] !== x) { this.parent[x] = this.parent[this.parent[x]]; x = this.parent[x]; } return x; }
+  union(a, b) { const ra = this.find(a), rb = this.find(b); if (ra !== rb) this.parent[ra] = rb; }
+}
+
+function groupCandidates(candidates) {
+  const uf = new UnionFind(candidates.length);
+  const byPhone = new Map();
+  const byName = new Map();
+  candidates.forEach((cand, i) => {
+    for (const { number } of cand.phones) {
+      const n = normalizePhone(number);
+      if (n.length < 7) continue;
+      if (byPhone.has(n)) uf.union(i, byPhone.get(n)); else byPhone.set(n, i);
+    }
+    // Require 2+ words before matching by name — a single generic token ("Kevin") is too
+    // common to safely identify one real-world entity and would merge unrelated customers
+    // who happen to share a first name with no phone number to disambiguate them.
+    const nameKey = normalizeName(cand.personName || cand.companyName || cand.displayName || '');
+    if (nameKey && nameKey.includes(' ')) {
+      if (byName.has(nameKey)) uf.union(i, byName.get(nameKey)); else byName.set(nameKey, i);
+    }
+  });
+  const groups = new Map();
+  candidates.forEach((cand, i) => {
+    const root = uf.find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(cand);
+  });
+  return [...groups.values()];
+}
+
+// QBO customer records win ties for identity fields (name, UID) since QBO is the
+// authoritative source; vendor, then SA, fill in gaps.
+const SOURCE_PRIORITY = { customer: 0, vendor: 1, sa: 2 };
+
+function mergeCandidateGroup(members) {
+  const sorted = [...members].sort((a, b) =>
+    (SOURCE_PRIORITY[a.source] - SOURCE_PRIORITY[b.source]) || String(a.id).localeCompare(String(b.id))
+  );
+  const primary = sorted[0];
+  const uid = `JRB-${primary.source.toUpperCase()}-${primary.id}@jrboehlke.com`;
+
+  const withPersonName = sorted.find(m => m.personName);
+  const givenName = withPersonName?.givenName ?? '';
+  const familyName = withPersonName?.familyName ?? '';
+  const personName = withPersonName?.personName ?? '';
+
+  const companyName = sorted.map(m => m.companyName).find(Boolean) ?? '';
+  const fn = personName || companyName || sorted.find(m => m.displayName)?.displayName || 'Unknown';
+
+  const phones = [];
+  const seenPhone = new Set();
+  for (const m of sorted) for (const p of m.phones) {
+    const n = normalizePhone(p.number);
+    if (!n || seenPhone.has(n)) continue;
+    seenPhone.add(n);
+    phones.push(p);
   }
 
-  const tel = (num, type) => num ? `TEL;TYPE=${type}:${escapeVCard(num)}` : null;
-  const seen = new Set();
-  const telLine = (num, type) => {
-    if (!num) return null;
-    const n = normalizePhone(num);
-    if (seen.has(n)) return null;
-    seen.add(n);
-    return tel(num, type);
-  };
+  const emails = [];
+  const seenEmail = new Set();
+  for (const m of sorted) for (const e of m.emails) {
+    const key = e.toLowerCase();
+    if (!key || seenEmail.has(key)) continue;
+    seenEmail.add(key);
+    emails.push(e);
+  }
+
+  const addresses = [];
+  const seenAddr = new Set();
+  for (const m of sorted) for (const a of m.addresses) {
+    if (a?.Line1 && !seenAddr.has(a.Line1)) { seenAddr.add(a.Line1); addresses.push(a); }
+  }
+
+  const category = sorted.some(m => m.source === 'customer') ? 'JRB Customer'
+    : sorted.some(m => m.source === 'vendor') ? 'JRB Vendor'
+    : 'JRB Customer';
+
+  // Lists every source record folded into this contact — makes it possible to trace,
+  // for a given phone number, which QBO/SA records fed into what the phone displays.
+  const sourceUids = sorted.map(m => `JRB-${m.source.toUpperCase()}-${m.id}`);
+
+  return buildVCard({ uid, fn, givenName, familyName, companyName, phones, emails, addresses, category, sourceUids });
+}
+
+function buildVCard({ uid, fn, givenName, familyName, companyName, phones, emails, addresses, category, sourceUids }) {
+  const seenTel = new Set();
+  const telLines = phones
+    .map(({ number, telType }) => {
+      const n = (number || '').trim();
+      if (!n || seenTel.has(n)) return null;
+      seenTel.add(n);
+      return `TEL;TYPE=${telType}:${escapeVCard(n)}`;
+    })
+    .filter(Boolean);
+
+  const emailLines = emails.map(e => `EMAIL;TYPE=WORK:${escapeVCard(e)}`);
+  const addrLines = addresses.map(a =>
+    `ADR;TYPE=WORK:;;${escapeVCard(a.Line1)};${escapeVCard(a.City ?? '')};${escapeVCard(a.State ?? '')};${escapeVCard(a.Zip ?? '')};US`
+  );
 
   const lines = [
     'BEGIN:VCARD',
     'VERSION:3.0',
     `UID:${uid}`,
-    `FN:${fn}`,
-    `N:${familyName};${givenName};;;`,
-    telLine(client.homePhone,  'HOME,VOICE'),
-    telLine(client.cellPhone,  'CELL,VOICE'),
-    telLine(client.workPhone,  'WORK,VOICE'),
-    telLine(client.otherPhone, 'VOICE'),
-    client.address ? `ADR;TYPE=WORK:;;${escapeVCard(client.address)};${escapeVCard(client.city ?? '')};${escapeVCard(client.state ?? '')};${escapeVCard(client.zip ?? '')};US` : null,
-    'CATEGORIES:JRB Customer',
-    `NOTE:${uid}`,
+    `FN:${escapeVCard(fn)}`,
+    `N:${escapeVCard(familyName)};${escapeVCard(givenName)};;;`,
+    companyName ? `ORG:${escapeVCard(companyName)}` : null,
+    ...telLines,
+    ...emailLines,
+    ...addrLines,
+    `CATEGORIES:${category}`,
+    `NOTE:${sourceUids.join(', ')}`,
     'END:VCARD',
   ].filter(Boolean).join('\r\n');
 
-  const allPhones = [client.homePhone, client.cellPhone, client.workPhone, client.otherPhone].filter(Boolean).join('|');
-  const etag = crypto.createHash('md5').update(uid + fn + allPhones + (client.address ?? '')).digest('hex');
+  const etag = crypto.createHash('md5')
+    .update(uid + fn + companyName + telLines.join('|') + emailLines.join('|') + addrLines.join('|'))
+    .digest('hex');
   return { uid, etag, vcard: lines };
 }
 
