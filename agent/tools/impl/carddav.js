@@ -82,7 +82,10 @@ function normalizeName(s) {
 }
 
 function normalizePhone(p) {
-  return (p || '').replace(/\D/g, '');
+  const digits = (p || '').replace(/\D/g, '');
+  // Strip a leading US country code so "12622439924" and "2622439924" match as the
+  // same number instead of silently missing a cross-source duplicate.
+  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
 }
 
 async function getContacts() {
@@ -126,7 +129,7 @@ async function getContacts() {
   // own SA/QBO record never gets pulled in as if it were a separate customer contact.
   const employeePhones = new Set();
   for (const e of qboEmployees) {
-    for (const num of [e.PrimaryPhone?.FreeFormNumber, e.Mobile?.FreeFormNumber]) {
+    for (const num of [e.PrimaryPhone?.FreeFormNumber, e.Mobile?.FreeFormNumber, e.AlternatePhone?.FreeFormNumber]) {
       const n = normalizePhone(num);
       if (n.length >= 7) employeePhones.add(n);
     }
@@ -361,12 +364,18 @@ function makeQboCandidate(entity, source, phones, emails, addresses) {
   return { key: `${source}:${entity.Id}`, source, id: entity.Id, givenName, familyName, personName, displayName, companyName, phones, emails, addresses };
 }
 
+// Business names can contain exactly one comma too (e.g. "Smith, Jones & Associates",
+// "A-1 Roofing, Inc") — treat a comma-split as a person only when neither side carries
+// a business marker, so those aren't misparsed into a spurious "person name" that could
+// then trigger a false name-match merge against an unrelated real person.
+const BUSINESS_MARKER = /\b(llc|inc|corp|co|company|associates|group|partners|services|enterprises|holdings|ltd)\b|&/i;
+
 function makeSaCandidate(client) {
   // SA stores individuals as "Last, First"; company-only accounts are stored as a plain name.
   const raw = client.name || '';
   const parts = raw.split(',');
   let givenName = '', familyName = '', companyName = '';
-  if (parts.length === 2) {
+  if (parts.length === 2 && !BUSINESS_MARKER.test(parts[0]) && !BUSINESS_MARKER.test(parts[1])) {
     familyName = parts[0].trim();
     givenName = parts[1].trim();
   } else {
@@ -506,7 +515,7 @@ function buildVCard({ uid, fn, givenName, familyName, companyName, phones, email
   ].filter(Boolean).join('\r\n');
 
   const etag = crypto.createHash('md5')
-    .update(uid + fn + companyName + telLines.join('|') + emailLines.join('|') + addrLines.join('|'))
+    .update(uid + fn + companyName + telLines.join('|') + emailLines.join('|') + addrLines.join('|') + category + sourceUids.join('|'))
     .digest('hex');
   return { uid, etag, vcard: lines };
 }
