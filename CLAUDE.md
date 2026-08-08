@@ -15,7 +15,7 @@ These rules define what you may and may not do without asking:
 
 ### You MAY do autonomously:
 - Read any file in `C:\Users\Assistant\JRBAgent\`
-- Write or edit files in `C:\Users\Assistant\JRBAgent\`
+- Write or edit files in `C:\Users\Assistant\JRBAgent\` — but see the Worktree Convention below: never change which branch is checked out here
 - Run `node`, `npm`, `git`, and PowerShell commands in the project directory
 - Create new branches following the `claude/description-of-change` naming convention
 - Commit changes to any `claude/` branch
@@ -33,6 +33,43 @@ These rules define what you may and may not do without asking:
 - Changing credentials or anything in Windows Credential Manager
 - Running destructive database operations (DROP, DELETE without WHERE, truncate)
 - Making changes that affect the live Teams bot or email channel mid-session
+
+---
+
+## Worktree Convention (Required)
+
+`C:\Users\Assistant\JRBAgent` is the live deployment target — Task Scheduler
+tasks (`JRB Scheduler`, `JRB Teams Bot`, and the watchdogs) run code directly
+from this exact directory. **It must always stay checked out on `main`.**
+
+Multiple Claude Code sessions share this machine concurrently. A session that
+switches branches here — even briefly — can leave the live directory on the
+wrong branch, mid-corruption, or missing files that only exist on `main`,
+breaking production for every other session and for the live bot/scheduler.
+This already happened more than once (missing `email-guardrail.js` crashed
+the Teams Bot; a reverted `m365.js` silently dropped features; the Scheduler
+task failed to launch twice from the same class of drift).
+
+**Never run `git checkout`, `git switch`, or anything else that changes the
+checked-out branch/HEAD in `C:\Users\Assistant\JRBAgent` itself.** Do all
+feature work in an isolated worktree instead:
+
+```powershell
+git -C C:\Users\Assistant\JRBAgent worktree add C:\Users\Assistant\.worktrees\<short-name> -b claude/<branch-name> origin/main
+```
+
+Branch, commit, push, and open the PR from inside that worktree path — not
+from `C:\Users\Assistant\JRBAgent`. Once the PR merges (or the branch is
+abandoned), remove the worktree:
+
+```powershell
+git -C C:\Users\Assistant\JRBAgent worktree remove C:\Users\Assistant\.worktrees\<short-name>
+```
+
+A `branch_drift_check` scheduled task runs every 15 minutes specifically to
+catch and safely auto-correct any violation of this rule (see
+`agent/scheduler/cron.js`) — but that's a safety net, not a substitute for
+following it.
 
 ---
 

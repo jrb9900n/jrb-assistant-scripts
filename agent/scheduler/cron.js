@@ -390,14 +390,18 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Every 6 hours — checked-out branch drift check. A stale/wrong branch
+    // Every 15 minutes — checked-out branch drift check. A stale/wrong branch
     // silently missing merged features (found 2026-07-30: this machine was
     // running an old unmerged branch, missing qb_reauth_reminder and
     // crackfill_reconciliation with zero indication anything was wrong) is
-    // exactly the kind of failure that goes unnoticed for a long time.
+    // exactly the kind of failure that goes unnoticed for a long time —
+    // tightened from every 6 hours after that blind spot let drift go
+    // undetected for hours across multiple incidents on 2026-08-08. This
+    // check is cheap (one fetch + two metadata reads), so 15 min is safe.
     // Alerts once when drift is detected and once when it clears, not on
-    // every check.
-    schedule: '0 */6 * * *',
+    // every check — except when it can safely auto-correct (see below),
+    // which always reports what it did.
+    schedule: '*/15 * * * *',
     name: 'branch_drift_check',
     run: async () => {
       const REPO_DIR = 'C:\\Users\\Assistant\\JRBAgent';
@@ -418,13 +422,47 @@ const SCHEDULED_TASKS = [
 
         if (drifted) {
           logger.warn('branch_drift_check: drift detected', { branch, behind });
+
+          // Auto-correct only when the working tree is clean — the exact same
+          // safety check applied manually all night before stashing other
+          // sessions' WIP prior to any branch switch on this shared checkout.
+          // A clean tree means checking out main can't lose anyone's work.
+          // Matches any tracked-file change (modified, staged, staged+further
+          // modified "MM", added, deleted, renamed...) — only excludes "??"
+          // untracked files, which `git checkout` can't lose (it only ever
+          // touches tracked paths; if main happens to already have a file at
+          // an untracked path here, checkout errors out cleanly instead of
+          // silently overwriting it, and that error is caught below).
+          const dirtyFiles = execSync('git status --short', { cwd: REPO_DIR, encoding: 'utf8', timeout: 10_000 })
+            .split('\n')
+            .filter(line => line.trim() && !line.startsWith('??'))
+            .map(line => line.slice(3).trim());
+
+          if (dirtyFiles.length === 0) {
+            try {
+              if (branch !== 'main') execSync('git checkout main', { cwd: REPO_DIR, timeout: 15_000 });
+              execSync('git pull origin main --quiet', { cwd: REPO_DIR, timeout: 20_000 });
+              logger.info('branch_drift_check: auto-corrected', { previousBranch: branch, wasBehind: behind });
+              await sendProactiveMessage(`🔧 JRBAgent deployment had drifted (${branch !== 'main' ? `was checked out on "${branch}"` : `${behind} commit${behind === 1 ? '' : 's'} behind origin/main`}) — working tree was clean, so this was automatically corrected: now on main and up to date. No action needed. Restart the scheduler/bot if either was running stale code.`).catch(() => {});
+              branchWasDrifted = false;
+              saveBranchDriftState(false);
+              return;
+            } catch (fixErr) {
+              logger.warn('branch_drift_check: auto-correct attempt failed, falling back to alert', { err: fixErr.message });
+              // fall through to the alert path below
+            }
+          }
+
           if (!branchWasDrifted) {
             branchWasDrifted = true;
             saveBranchDriftState(true);
             const detail = branch !== 'main'
               ? `checked out on "${branch}"${behind > 0 ? `, ${behind} commit${behind === 1 ? '' : 's'} behind origin/main` : ''}`
               : `${behind} commit${behind === 1 ? '' : 's'} behind origin/main`;
-            await sendProactiveMessage(`⚠️ JRBAgent deployment is ${detail}. Deployed code may be missing merged features — this exact issue caused qb_reauth_reminder to silently stop running for weeks. Check out main and restart the scheduler/bot when convenient.`).catch(() => {});
+            const dirtyNote = dirtyFiles.length > 0
+              ? `\n\nAuto-correction was skipped because the working tree has uncommitted changes (${dirtyFiles.slice(0, 5).join(', ')}${dirtyFiles.length > 5 ? `, +${dirtyFiles.length - 5} more` : ''}) — whoever's session left those needs to commit or stash them first.`
+              : '';
+            await sendProactiveMessage(`⚠️ JRBAgent deployment is ${detail}. Deployed code may be missing merged features — this exact issue caused qb_reauth_reminder to silently stop running for weeks. Check out main and restart the scheduler/bot when convenient.${dirtyNote}`).catch(() => {});
           }
         } else if (branchWasDrifted) {
           branchWasDrifted = false;
