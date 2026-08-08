@@ -1346,18 +1346,21 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
     },
   },
   {
-    // 6 AM on the 1st of every month. Payment terms are still quarterly per the
-    // Accountability Agreement — this cadence is for visibility only, so Michael
-    // can see how things are tracking and the accountant can accrue more
-    // granularly than once a quarter.
-    // Jan/Apr/Jul/Oct 1 — "first payroll following quarter end" — finalize the
-    // quarter that JUST ended (isFinal: true, same as before).
+    // 6 AM on the 3rd of every month -- 3 days after month-end, per Michael
+    // 2026-08-08 (was the 1st; gives SA/QBO a few extra days to sync before
+    // the run, which several real misattributions this quarter traced back
+    // to). Payment terms are still quarterly per the Accountability
+    // Agreement — this cadence is for visibility only, so Michael can see
+    // how things are tracking and the accountant can accrue more granularly
+    // than once a quarter.
+    // Jan/Apr/Jul/Oct 3 — "first payroll following quarter end" — finalize
+    // the quarter that JUST ended (isFinal: true, same as before).
     // Every other month — snapshot the quarter still IN PROGRESS (isFinal:
     // false), so payable reflects quarter-to-date cash collected, not a final
     // payout number.
     // Every run (monthly and quarterly) goes out as a DRAFT first — see
     // commission-report-reply.js for the reply-driven approval loop.
-    schedule: '0 6 1 * *',
+    schedule: '0 6 3 * *',
     name: 'pm_commission_report',
     run: async () => {
       try {
