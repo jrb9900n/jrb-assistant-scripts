@@ -79,6 +79,16 @@ try { branchWasDrifted = JSON.parse(readFileSync(BRANCH_DRIFT_STATE_FILE, 'utf8'
 function saveBranchDriftState(drifted) {
   try { writeFileSync(BRANCH_DRIFT_STATE_FILE, JSON.stringify({ drifted }), 'utf8'); } catch {}
 }
+// Throttles repeat "still stuck" notifications during an ongoing drift
+// episode to once/hour, while the actual auto-correct attempt itself still
+// retries silently on every 15-min tick underneath. Separate timers per
+// failure reason so a dirty-tree note firing doesn't suppress a *different*
+// git-error note (or vice versa) for the rest of that hour if the failure
+// mode changes mid-episode. Deliberately NOT persisted to disk like
+// branchWasDrifted above — a scheduler restart just resets these to 0,
+// causing at most one earlier-than-usual repeat note.
+let lastDirtyNoteAt = 0;
+let lastFailureNoteAt = 0;
 
 const SCHEDULED_TASKS = [
   {
@@ -390,14 +400,18 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Every 6 hours — checked-out branch drift check. A stale/wrong branch
+    // Every 15 minutes — checked-out branch drift check. A stale/wrong branch
     // silently missing merged features (found 2026-07-30: this machine was
     // running an old unmerged branch, missing qb_reauth_reminder and
     // crackfill_reconciliation with zero indication anything was wrong) is
-    // exactly the kind of failure that goes unnoticed for a long time.
+    // exactly the kind of failure that goes unnoticed for a long time —
+    // tightened from every 6 hours after that blind spot let drift go
+    // undetected for hours across multiple incidents on 2026-08-08. This
+    // check is cheap (one fetch + two metadata reads), so 15 min is safe.
     // Alerts once when drift is detected and once when it clears, not on
-    // every check.
-    schedule: '0 */6 * * *',
+    // every check — except when it can safely auto-correct (see below),
+    // which always reports what it did.
+    schedule: '*/15 * * * *',
     name: 'branch_drift_check',
     run: async () => {
       const REPO_DIR = 'C:\\Users\\Assistant\\JRBAgent';
@@ -418,13 +432,65 @@ const SCHEDULED_TASKS = [
 
         if (drifted) {
           logger.warn('branch_drift_check: drift detected', { branch, behind });
-          if (!branchWasDrifted) {
+
+          if (branchWasDrifted) {
+            // Grace period already satisfied (this isn't the first tick a
+            // drift was seen — the first-alert branch below handles that).
+            // From here on, ALWAYS re-attempt on every tick rather than
+            // trying once and giving up: a transient git failure (e.g. a
+            // lock held by a concurrent operation) should self-heal on the
+            // next 15-min tick, and a tree that was dirty but has since been
+            // committed/stashed should get corrected the moment it's safe —
+            // neither should require a scheduler restart to recover from.
+            // Repeat notifications for an unchanged outcome are throttled to
+            // once an hour (below) so this doesn't spam every 15 min.
+            // Matches any tracked-file change (modified, staged, staged+further
+            // modified "MM", added, deleted, renamed...) — only excludes "??"
+            // untracked files, which `git checkout` can't lose (it only ever
+            // touches tracked paths; if main happens to already have a file at
+            // an untracked path here, checkout errors out cleanly instead of
+            // silently overwriting it, and that error is caught below).
+            const dirtyFiles = execSync('git status --short', { cwd: REPO_DIR, encoding: 'utf8', timeout: 10_000 })
+              .split('\n')
+              .filter(line => line.trim() && !line.startsWith('??'))
+              .map(line => line.slice(3).trim());
+
+            if (dirtyFiles.length === 0) {
+              try {
+                if (branch !== 'main') execSync('git checkout main', { cwd: REPO_DIR, timeout: 15_000 });
+                execSync('git pull origin main --quiet', { cwd: REPO_DIR, timeout: 20_000 });
+                logger.info('branch_drift_check: auto-corrected', { previousBranch: branch, wasBehind: behind });
+                await sendProactiveMessage(`🔧 JRBAgent deployment had drifted (${branch !== 'main' ? `was checked out on "${branch}"` : `${behind} commit${behind === 1 ? '' : 's'} behind origin/main`}) — working tree was clean, so this was automatically corrected: now on main and up to date. No action needed. Restart the scheduler/bot if either was running stale code.`).catch(() => {});
+                branchWasDrifted = false;
+                lastDirtyNoteAt = 0;
+                lastFailureNoteAt = 0;
+                saveBranchDriftState(false);
+              } catch (fixErr) {
+                // Distinct timer from the dirty-tree case below — this is a
+                // real git failure (e.g. a linked worktree already has main
+                // checked out), not just "skipped for safety". Using a
+                // separate throttle so a failure note firing doesn't suppress
+                // a later dirty-tree note (or vice versa) if the failure mode
+                // changes mid-episode. Surfaces stderr when available since
+                // execSync's `.message` alone can be an uninformative wrapper.
+                const detail = fixErr.stderr?.toString().trim() || fixErr.message;
+                logger.warn('branch_drift_check: auto-correct attempt failed', { err: detail });
+                if (Date.now() - lastFailureNoteAt > 60 * 60 * 1000) {
+                  lastFailureNoteAt = Date.now();
+                  await sendProactiveMessage(`⚠️ JRBAgent deployment auto-correction is failing: ${detail.slice(0, 300)}. Still checked out on "${branch}" — will keep retrying automatically every 15 min; check out main and restart the scheduler/bot manually if this doesn't clear on its own.`).catch(() => {});
+                }
+              }
+            } else if (Date.now() - lastDirtyNoteAt > 60 * 60 * 1000) {
+              lastDirtyNoteAt = Date.now();
+              await sendProactiveMessage(`⚠️ JRBAgent deployment is still checked out on "${branch}". Auto-correction is on hold because the working tree has uncommitted changes (${dirtyFiles.slice(0, 5).join(', ')}${dirtyFiles.length > 5 ? `, +${dirtyFiles.length - 5} more` : ''}) — whoever's session left those needs to commit or stash them first; it'll self-correct automatically (checked every 15 min) once the tree is clean.`).catch(() => {});
+            }
+          } else {
             branchWasDrifted = true;
             saveBranchDriftState(true);
             const detail = branch !== 'main'
               ? `checked out on "${branch}"${behind > 0 ? `, ${behind} commit${behind === 1 ? '' : 's'} behind origin/main` : ''}`
               : `${behind} commit${behind === 1 ? '' : 's'} behind origin/main`;
-            await sendProactiveMessage(`⚠️ JRBAgent deployment is ${detail}. Deployed code may be missing merged features — this exact issue caused qb_reauth_reminder to silently stop running for weeks. Check out main and restart the scheduler/bot when convenient.`).catch(() => {});
+            await sendProactiveMessage(`⚠️ JRBAgent deployment is ${detail}. Deployed code may be missing merged features — this exact issue caused qb_reauth_reminder to silently stop running for weeks. Check out main and restart the scheduler/bot when convenient. If the working tree is clean, this will auto-correct on its own in ~15 min.`).catch(() => {});
           }
         } else if (branchWasDrifted) {
           branchWasDrifted = false;
