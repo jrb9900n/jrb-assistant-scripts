@@ -7,6 +7,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
+import { sendProactiveMessage } from '../teams/notify.js';
 
 function acquireRunLock(taskName, ttlMs = 60_000) {
   const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
@@ -685,6 +686,41 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
       }
 
       if (failed.length > 0) throw new Error(`AME steps failed: ${failed.join(', ')}`);
+    },
+  },
+  {
+    // 6 AM on the 3rd of every month -- 3 days after month-end, per Michael
+    // 2026-08-08 (was the 1st; gives SA/QBO a few extra days to sync before
+    // the run, which several real misattributions this quarter traced back
+    // to). Payment terms are still quarterly per the Accountability
+    // Agreement — this cadence is for visibility only, so Michael can see
+    // how things are tracking and the accountant can accrue more granularly
+    // than once a quarter.
+    // Jan/Apr/Jul/Oct 3 — "first payroll following quarter end" — finalize
+    // the quarter that JUST ended (isFinal: true, same as before).
+    // Every other month — snapshot the quarter still IN PROGRESS (isFinal:
+    // false), so payable reflects quarter-to-date cash collected, not a final
+    // payout number.
+    // Every run (monthly and quarterly) goes out as a DRAFT first — see
+    // commission-report-reply.js for the reply-driven approval loop.
+    schedule: '0 6 3 * *',
+    name: 'pm_commission_report',
+    run: async () => {
+      try {
+        const { previousQuarter, currentQuarter } = await import('../tools/impl/commission-engine.js');
+        const { sendDraftForApproval } = await import('../tools/impl/commission-report.js');
+        const isQuarterEndMonth = [0, 3, 6, 9].includes(new Date().getUTCMonth()); // Jan/Apr/Jul/Oct
+        const quarter = isQuarterEndMonth ? previousQuarter() : currentQuarter();
+        const result = await sendDraftForApproval({ quarter, isFinal: isQuarterEndMonth });
+        logger.info('pm_commission_report: draft sent', result);
+      } catch (err) {
+        logger.error('pm_commission_report: FAILED', { err: err.message });
+        try {
+          await sendProactiveMessage(`PM Commission Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('pm_commission_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
     },
   },
 ];
