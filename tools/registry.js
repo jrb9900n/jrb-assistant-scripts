@@ -253,6 +253,18 @@ const QB_TOOLS = [
       required: ['query'],
     },
   },
+  {
+    name: 'backfill_expenses_from_qbo',
+    description: 'Fallback for gaps in Chase-poller coverage (outage, expired session, etc): pulls credit card Purchase transactions from QBO\'s bank feed for a date range and creates expense_reports + sends the SMS receipt link for any not already captured. QBO\'s bank feed lags Chase by 1-3 days, so only use this for dates far enough in the past that QBO has likely caught up (not for "right now"). Safe to re-run over the same range -- dedupes against existing expense_reports by card + date + amount, same rule the live poller uses.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        startDate: { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+        endDate:   { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+      },
+      required: ['startDate', 'endDate'],
+    },
+  },
 ];
 
 const FILE_TOOLS = [

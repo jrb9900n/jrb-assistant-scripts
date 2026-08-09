@@ -2,8 +2,9 @@
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
-import { getPurchase, uploadReceiptToQbo } from './quickbooks.js';
+import { getPurchase, uploadReceiptToQbo, query as qbQuery } from './quickbooks.js';
 import { sendEmail } from './m365.js';
+import twilio from 'twilio';
 
 const supabase = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
@@ -11,6 +12,30 @@ const supabase = createClient(
 );
 
 const PORTAL_BASE = 'https://fieldops.jrboehlke.com';
+
+// ── Twilio SMS ────────────────────────────────────────────────
+// CLAUDE.md documents Twilio as the current SMS approach (replacing the
+// email-to-carrier-gateway path below), but that migration was never
+// actually committed to main -- confirmed 2026-08-08 while building the
+// QBO backfill fallback, which needs to send a real SMS link. Adding it
+// here rather than routing through sendExpenseSms's gateway path since
+// that path is unverified against Twilio's current per-employee numbers.
+
+function toE164(phone) {
+  const digits = String(phone).replace(/\D/g, '');
+  return digits.startsWith('1') ? `+${digits}` : `+1${digits}`;
+}
+
+async function sendSms(phoneNumber, message) {
+  const accountSid = process.env.TWILIO_ACCOUNT_SID;
+  const authToken  = process.env.TWILIO_AUTH_TOKEN;
+  const fromPhone  = process.env.TWILIO_FROM_PHONE;
+  if (!accountSid || !authToken || !fromPhone) throw new Error('TWILIO_ACCOUNT_SID / TWILIO_AUTH_TOKEN / TWILIO_FROM_PHONE not configured');
+  const client = twilio(accountSid, authToken);
+  const msg = await client.messages.create({ body: message, from: fromPhone, to: toE164(phoneNumber) });
+  if (msg.errorCode) throw new Error(`Twilio error ${msg.errorCode}: ${msg.errorMessage}`);
+  return msg;
+}
 
 // Categories that trigger Section 3 (asset required)
 const ASSET_CATEGORIES = new Set([
@@ -690,4 +715,117 @@ function detectRedFlags(reports) {
 
 function formatDollar(n) {
   return '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// ── QBO backfill fallback ────────────────────────────────────────
+
+// Recurring/administrative postings that show up in QBO's Purchase feed but
+// aren't a receipt-needing purchase (subscriptions, ad platform billing,
+// interest, fees, internal transfers). Found 2026-08-08 after a QBO backfill
+// texted 94 charges to two employees and ~40% turned out to be this kind of
+// noise -- some going back to May, meaning the live Chase-poller path
+// (a separate codebase, C:\Users\Assistant\ChasePoller) has silently had the
+// same problem for months. Kept in sync with the matching pattern there.
+const NON_RECEIPT_VENDOR_PATTERN = /anthropic|openai|\bintuit\b|godaddy|google\s*\*?\s*ads|facebk|hp\s*\*instant ink|indeed us|intermedia\.net|service autopilot|spectrum mobile|techfektor|webshare|interest cha|transaction fee|int txfr/i;
+
+/**
+ * Fallback for when the Chase poller has missed a stretch of charges (outage,
+ * expired session, etc). QBO's bank feed carries the same card purchases but
+ * typically lags Chase by 1-3 days, so this backfills a date range rather
+ * than replacing the live poller. Matches each Purchase's payment account
+ * (e.g. "Chase Visa:CC - Michael R") to a credit_cards row by first name +
+ * last initial, then creates expense_reports + sends the SMS link for any
+ * charge not already captured -- same dedup rule as the Chase poller (card +
+ * date +/-1 day + amount +/-$0.02), so re-running this or overlapping with
+ * live Chase captures never double-texts an employee.
+ */
+export async function backfillExpensesFromQbo({ startDate, endDate }) {
+  const { data: cards, error: cardsErr } = await supabase
+    .from('credit_cards')
+    .select('last_four, employee_name, phone_number, sms_gateway, profile_id, is_active')
+    .eq('is_active', true);
+  if (cardsErr) throw new Error(`Failed to load credit_cards: ${cardsErr.message}`);
+
+  const res = await qbQuery({ query: `SELECT * FROM Purchase WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 1000` });
+  const purchases = res?.Purchase ?? [];
+
+  function matchCard(accountName) {
+    if (!accountName) return null;
+    const name = accountName.toLowerCase();
+    return cards.find(c => {
+      const [first, last] = c.employee_name.trim().split(/\s+/);
+      if (!first || !last) return false;
+      return name.includes(first.toLowerCase()) && name.includes(` ${last[0].toLowerCase()}`);
+    }) ?? null;
+  }
+
+  const created = [];
+  const unmatchedAccounts = new Set();
+  const skippedNonReceipt = [];
+
+  for (const p of purchases) {
+    if (p.PaymentType !== 'CreditCard') continue; // skip checking-account debits, ACH, etc.
+    const card = matchCard(p.AccountRef?.name);
+    if (!card) { if (p.AccountRef?.name) unmatchedAccounts.add(p.AccountRef.name); continue; }
+
+    const amount = Number(p.TotalAmt ?? 0);
+    const date = p.TxnDate;
+    const vendor = p.PrivateNote || p.Line?.[0]?.Description || 'Unknown';
+    if (!(amount > 0) || !date) continue;
+    if (NON_RECEIPT_VENDOR_PATTERN.test(vendor)) { skippedNonReceipt.push({ vendor, amount, date }); continue; }
+
+    const d = new Date(`${date}T12:00:00`);
+    const dayBefore = new Date(d); dayBefore.setDate(d.getDate() - 1);
+    const dayAfter  = new Date(d); dayAfter.setDate(d.getDate() + 1);
+    const { data: dup } = await supabase
+      .from('expense_reports')
+      .select('id')
+      .eq('card_last_four', card.last_four)
+      .gte('transaction_date', dayBefore.toISOString().slice(0, 10))
+      .lte('transaction_date', dayAfter.toISOString().slice(0, 10))
+      .gte('amount', amount - 0.02)
+      .lte('amount', amount + 0.02)
+      .maybeSingle();
+    if (dup) continue;
+
+    const { data: report, error } = await supabase
+      .from('expense_reports')
+      .insert({
+        card_last_four: card.last_four,
+        employee_name: card.employee_name,
+        phone_number: card.phone_number,
+        sms_gateway: card.sms_gateway,
+        profile_id: card.profile_id ?? null,
+        amount,
+        vendor,
+        transaction_date: date,
+        qbo_transaction_id: p.Id,
+        status: 'pending_employee',
+      })
+      .select()
+      .single();
+    if (error) { logger.error('backfillExpensesFromQbo: insert failed', { err: error.message }); continue; }
+
+    if (card.phone_number) {
+      const fmtAmount = `$${amount.toFixed(2)}`;
+      const fmtDate = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+      const link = `${PORTAL_BASE}/expense/${report.id}`;
+      const message = `JRB: New charge on card ...${card.last_four}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link}`;
+      try {
+        await sendSms(card.phone_number, message);
+        await supabase.from('expense_reports').update({ sms_sent_at: new Date().toISOString() }).eq('id', report.id);
+      } catch (e) {
+        logger.error('backfillExpensesFromQbo: SMS failed', { err: e.message, reportId: report.id });
+      }
+    }
+    created.push({ id: report.id, employee: card.employee_name, cardLastFour: card.last_four, amount, vendor, date });
+  }
+
+  logger.info('backfillExpensesFromQbo complete', {
+    startDate, endDate,
+    created: created.length,
+    skippedNonReceipt: skippedNonReceipt.length,
+    unmatchedAccounts: [...unmatchedAccounts],
+  });
+  return { created, skippedNonReceipt, unmatchedAccounts: [...unmatchedAccounts] };
 }
