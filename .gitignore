@@ -5,3 +5,6 @@ scheduler/logs/
 teams/logs/
 core/logs/
 *.backup-*
+sa-session-cache.json
+sa-incapsula-backoff.json
+qbo-sync-watchdog-state.json

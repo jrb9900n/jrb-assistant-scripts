@@ -58,30 +58,30 @@ $nodeProcs = Get-WmiObject Win32_Process -Filter "name='node.exe'" |
 $restartsNeeded = [System.Collections.Generic.HashSet[string]]::new()
 
 foreach ($proc in $nodeProcs) {
-    $pid = $proc.ProcessId
+    $procId = $proc.ProcessId
     $cmd = if ($proc.CommandLine) { $proc.CommandLine } else { "" }
 
     # 1. PM2 daemon — should never be running; the PM2 era is over
     if ($cmd -like "*pm2*Daemon*" -or $cmd -like "*pm2/lib/Daemon*" -or $cmd -like "*pm2\lib\Daemon*") {
-        & taskkill /f /pid $pid | Out-Null
-        Write-KillLog $pid "pm2-daemon" $cmd
+        & taskkill /f /pid $procId | Out-Null
+        Write-KillLog $procId "pm2-daemon" $cmd
         continue
     }
 
     # 2. Orphan scheduler — a cron.js that lost the PID-file race
     if ($cmd -like "*cron.js*") {
-        if ($legitimatePid -and ($pid -ne $legitimatePid)) {
-            & taskkill /f /pid $pid | Out-Null
-            Write-KillLog $pid "orphan-scheduler" $cmd
+        if ($legitimatePid -and ($procId -ne $legitimatePid)) {
+            & taskkill /f /pid $procId | Out-Null
+            Write-KillLog $procId "orphan-scheduler" $cmd
             continue
         }
     }
 
     # 3. Orphan bot — a bot.js not on port 3978
     if ($cmd -like "*bot.js*") {
-        if ($legitimateBotPid -and ($pid -ne $legitimateBotPid)) {
-            & taskkill /f /pid $pid | Out-Null
-            Write-KillLog $pid "orphan-bot" $cmd
+        if ($legitimateBotPid -and ($procId -ne $legitimateBotPid)) {
+            & taskkill /f /pid $procId | Out-Null
+            Write-KillLog $procId "orphan-bot" $cmd
             continue
         }
     }
@@ -105,8 +105,8 @@ foreach ($proc in $nodeProcs) {
         $scriptMtime = (Get-Item $scriptPath).LastWriteTime
         if ($scriptMtime -gt $procStarted) {
             $scriptName = [System.IO.Path]::GetFileName($scriptPath)
-            & taskkill /f /pid $pid | Out-Null
-            Write-KillLog $pid "stale-code:$scriptName" $cmd
+            & taskkill /f /pid $procId | Out-Null
+            Write-KillLog $procId "stale-code:$scriptName" $cmd
 
             # Queue a restart for continuously-running processes
             if ($cmd -like "*cron.js*") { $null = $restartsNeeded.Add("scheduler") }
