@@ -456,6 +456,46 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // 7:15 AM / 1:15 PM / 7:15 PM daily — SA<->QBO sync-error watchdog.
+    // Cadence reasoning: the recurring 401-cluster burst this job chases happens once a
+    // morning (~6:30-6:31 AM per SA's own error timestamps), and SA's own sync batch runs
+    // on a ~30 min cadence, so a few checks a day is plenty. Times are chosen to land
+    // *between* the other SA-touching jobs in this file (sa_nightly_sync, sa_weekly_sync,
+    // qb_weekly_sync, overnight_sa_report 6 AM) rather than on top of any of them —
+    // running concurrent SA-touching scripts is a known landmine (session/proxy
+    // contention can leave a record half-toggled if a call fails mid-operation).
+    schedule: '15 7,13,19 * * *',
+    name: 'qbo_sync_watchdog',
+    run: async () => {
+      if (!acquireRunLock('qbo_sync_watchdog', 10 * 60_000)) {
+        logger.debug('qbo_sync_watchdog: skipped (another instance still running)');
+        return;
+      }
+      try {
+        const { runQboSyncWatchdog } = await import('../tools/impl/qbo-sync-watchdog.js');
+        const result = await runQboSyncWatchdog();
+        logger.info('qbo_sync_watchdog complete', result);
+      } finally {
+        releaseRunLock('qbo_sync_watchdog');
+      }
+    },
+  },
+  {
+    // Every hour — check fleetops auth sequence drift and auto-fix.
+    // Ported 2026-08-08 from the dead root-level scheduler/cron.js (this job's tool file,
+    // tools/impl/fleetops-healthcheck.js, was always correctly live here — only the cron
+    // registration itself was missing from this file, meaning the job has never actually
+    // run in production since whatever point the app was split into this agent/ subtree).
+    // Original: PR #94, "feat: hourly fleetops auth sequence health check with auto-fix".
+    schedule: '0 * * * *',
+    name: 'fleetops_healthcheck',
+    run: async () => {
+      const { runFleetopsHealthcheck } = await import('../tools/impl/fleetops-healthcheck.js');
+      const result = await runFleetopsHealthcheck();
+      logger.info('fleetops_healthcheck complete', result);
+    },
+  },
+  {
     // 8 AM daily — warn if QB refresh token is within 14 days of its 101-day expiry
     schedule: '0 8 * * *',
     name: 'qb_reauth_reminder',
