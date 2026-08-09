@@ -522,6 +522,31 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
         });
         logger.info(`Email poller: replied to ${email.from}`);
       }
+
+      // ── michael@jrboehlke.com's own inbox: vendor e-receipts ──
+      // Separate from the assistant@ loop above (different mailbox, different
+      // matching strategy) -- vendor receipts (Amazon, Menards, etc.) rarely
+      // quote the "card ...1234: $X" SMS text processEmailedReceipt relies on
+      // and often have no attachment at all. See processVendorEmailReceipt.
+      try {
+        const { processVendorEmailReceipt } = await import('../tools/impl/expense.js');
+        const michaelEmail = 'michael@jrboehlke.com';
+        const michaelEmails = await listEmails({ folder: 'Inbox', limit: 10, unread_only: true, userEmail: michaelEmail });
+        for (const email of michaelEmails) {
+          try {
+            const handled = await processVendorEmailReceipt(
+              email,
+              { listEmailAttachments, getEmailAttachmentBytes, getEmail },
+              michaelEmail
+            );
+            if (handled) await markEmailRead({ email_id: email.id, userEmail: michaelEmail });
+          } catch (err) {
+            logger.warn('Vendor email receipt check failed', { err: err.message, from: email.from });
+          }
+        }
+      } catch (err) {
+        logger.warn('michael@ inbox receipt poll failed', { err: err.message });
+      }
       } finally {
         releaseRunLock('email_poller');
       }
