@@ -47,11 +47,12 @@ const USER = () => process.env.M365_USER_EMAIL;
 
 // ── Email ─────────────────────────────────────────────────────
 
-export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = false }) {
+export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = false, userEmail } = {}) {
+  const user = userEmail ?? USER();
   const filter = unread_only ? '&$filter=isRead eq false' : '';
   const data = await graph(
     'GET',
-    `/users/${USER()}/mailFolders/${folder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview${filter}`
+    `/users/${user}/mailFolders/${folder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview${filter}`
   );
   return data.value.map(m => ({
     id:       m.id,
@@ -62,8 +63,9 @@ export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = f
   }));
 }
 
-export async function getEmail({ email_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}?$select=id,subject,from,body,receivedDateTime`);
+export async function getEmail({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${email_id}?$select=id,subject,from,body,receivedDateTime`);
   return {
     id:      data.id,
     from:    data.from?.emailAddress?.address,
@@ -158,16 +160,18 @@ export async function listOneDrive({ folder }) {
   }));
 }
 
-export async function markEmailRead({ email_id }) {
-  await graph('PATCH', `/users/${USER()}/messages/${email_id}`, { isRead: true });
+export async function markEmailRead({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  await graph('PATCH', `/users/${user}/messages/${email_id}`, { isRead: true });
   return { marked_read: true, email_id };
 }
 
 /**
  * List attachments on an email. Returns metadata only (no content bytes).
  */
-export async function listEmailAttachments({ email_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}/attachments?$select=id,name,contentType,size`);
+export async function listEmailAttachments({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${email_id}/attachments?$select=id,name,contentType,size`);
   return (data.value ?? []).map(a => ({
     id:          a.id,
     name:        a.name,
@@ -180,8 +184,9 @@ export async function listEmailAttachments({ email_id }) {
  * Download a single attachment as a Buffer.
  * Graph returns contentBytes as base64 for small files (< 3 MB).
  */
-export async function getEmailAttachmentBytes({ email_id, attachment_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}/attachments/${attachment_id}`);
+export async function getEmailAttachmentBytes({ email_id, attachment_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${email_id}/attachments/${attachment_id}`);
   if (!data.contentBytes) throw new Error('Attachment has no content bytes (may be a reference attachment)');
   return Buffer.from(data.contentBytes, 'base64');
 }

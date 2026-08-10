@@ -296,8 +296,9 @@ async function uploadReceiptToQboAsync(reportId, qboTransactionId, storagePath) 
     const fileBuffer  = Buffer.from(arrayBuffer);
     const fileName    = storagePath.split('/').pop();
     const ext         = fileName.split('.').pop().toLowerCase();
-    const contentType = ext === 'pdf' ? 'application/pdf'
-                      : ext === 'png' ? 'image/png'
+    const contentType = ext === 'pdf'  ? 'application/pdf'
+                      : ext === 'png'  ? 'image/png'
+                      : ext === 'html' ? 'text/html'
                       : 'image/jpeg';
 
     const attachableId = await uploadReceiptToQbo(qboTransactionId, fileBuffer, contentType, fileName);
@@ -426,6 +427,102 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
 <p><a href="${portalUrl}" style="display:inline-block;background:#1d4ed8;color:#fff;padding:10px 20px;border-radius:6px;text-decoration:none;font-weight:bold">Complete Expense Report →</a></p>
 <p><em>— JRB Assistant</em></p>`,
   });
+
+  return true;
+}
+
+/**
+ * Called by the email poller for michael@jrboehlke.com's own inbox (and any
+ * inbox forwards land in, since forwards are ordinary new emails): catches
+ * vendor e-receipts (Amazon order confirmations, Menards receipts, etc.)
+ * that never quote the "card ...1234: $X" SMS text and often have no
+ * attachment at all -- so it can't reuse processEmailedReceipt's card-number
+ * matching. Matches by amount + date window + vendor-name overlap against
+ * pending_employee expense_reports instead (same idea as the QBO backfill's
+ * account-name matching). Skips known non-receipt vendors (ads/subscriptions)
+ * so a "Your Google Ads receipt" email doesn't get treated as a purchase
+ * receipt -- see NON_RECEIPT_VENDOR_PATTERN.
+ */
+export async function processVendorEmailReceipt(email, { listEmailAttachments, getEmailAttachmentBytes, getEmail }, userEmail) {
+  const searchText = `${email.subject ?? ''} ${email.from ?? ''} ${email.snippet ?? ''}`;
+  if (NON_RECEIPT_VENDOR_PATTERN.test(searchText)) return false;
+
+  let amount = parseCardAndAmount(searchText).amount;
+  let bodyText = '';
+  if (amount === null) {
+    const full = await getEmail({ email_id: email.id, userEmail });
+    bodyText = (full.body ?? '').replace(/<[^>]+>/g, ' ');
+    amount = parseCardAndAmount(bodyText).amount;
+  }
+  if (amount === null) return false; // no dollar figure anywhere -- not a receipt we can match
+
+  const emailDate = new Date(email.date ?? Date.now());
+  const windowStart = new Date(emailDate); windowStart.setDate(emailDate.getDate() - 5);
+  const windowEnd   = new Date(emailDate); windowEnd.setDate(emailDate.getDate() + 1);
+
+  const { data: candidates } = await supabase
+    .from('expense_reports')
+    .select('*')
+    .eq('status', 'pending_employee')
+    .is('receipt_path', null)
+    .gte('amount', amount - 0.02)
+    .lte('amount', amount + 0.02)
+    .gte('transaction_date', windowStart.toISOString().slice(0, 10))
+    .lte('transaction_date', windowEnd.toISOString().slice(0, 10));
+
+  if (!candidates?.length) return false;
+
+  let report = candidates[0];
+  if (candidates.length > 1) {
+    const norm = s => (s ?? '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const searchNorm = norm(`${email.from} ${email.subject}`);
+    const vendorMatch = candidates.find(c => {
+      const v = norm(c.vendor);
+      return v && v.length > 3 && searchNorm.includes(v.slice(0, Math.min(v.length, 8)));
+    });
+    if (!vendorMatch) {
+      logger.warn('processVendorEmailReceipt: ambiguous amount match, skipping', { amount, candidateCount: candidates.length, from: email.from });
+      return false;
+    }
+    report = vendorMatch;
+  }
+
+  // Prefer an actual attachment (PDF/image) if the vendor sent one; otherwise save the HTML body as the receipt.
+  const attachments = await listEmailAttachments({ email_id: email.id, userEmail });
+  const receiptAttachment = attachments.find(a => RECEIPT_MIME_TYPES.has(a.contentType?.toLowerCase()));
+
+  let storagePath;
+  if (receiptAttachment) {
+    const bytes = await getEmailAttachmentBytes({ email_id: email.id, attachment_id: receiptAttachment.id, userEmail });
+    const ext = receiptAttachment.name?.split('.').pop() || 'jpg';
+    storagePath = `${report.id}/${Date.now()}-vendor-email.${ext}`;
+    const { error: uploadErr } = await supabase.storage
+      .from('expense-receipts')
+      .upload(storagePath, bytes, { contentType: receiptAttachment.contentType, upsert: false });
+    if (uploadErr) { logger.error('processVendorEmailReceipt: attachment upload failed', { err: uploadErr.message, reportId: report.id }); return true; }
+  } else {
+    if (!bodyText) {
+      const full = await getEmail({ email_id: email.id, userEmail });
+      bodyText = full.body ?? '';
+    }
+    storagePath = `${report.id}/${Date.now()}-vendor-email.html`;
+    const { error: uploadErr } = await supabase.storage
+      .from('expense-receipts')
+      .upload(storagePath, Buffer.from(bodyText, 'utf8'), { contentType: 'text/html', upsert: false });
+    if (uploadErr) { logger.error('processVendorEmailReceipt: body upload failed', { err: uploadErr.message, reportId: report.id }); return true; }
+  }
+
+  await supabase.from('expense_reports').update({ receipt_path: storagePath }).eq('id', report.id);
+  if (report.qbo_transaction_id) uploadReceiptToQboAsync(report.id, report.qbo_transaction_id, storagePath);
+
+  logger.info('Vendor email receipt matched', { reportId: report.id, vendor: report.vendor, amount, from: email.from });
+
+  if (report.phone_number) {
+    const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
+    const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
+    await sendSms(report.phone_number, `JRB: Found a receipt email for your ${fmtAmount} charge at ${report.vendor || 'a recent purchase'} and attached it. Please complete the form: ${portalUrl}`)
+      .catch(err => logger.warn('processVendorEmailReceipt: confirmation SMS failed', { err: err.message, reportId: report.id }));
+  }
 
   return true;
 }
