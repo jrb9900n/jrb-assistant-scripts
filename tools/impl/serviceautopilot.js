@@ -1118,6 +1118,94 @@ export async function getClientQboLink({ clientId }) {
 }
 
 /**
+ * Read-only fetch of a client's raw Email field (as stored — may be malformed, e.g.
+ * multiple addresses joined by ";"). Needed to inspect the current value before
+ * deciding how to clean it up via saveClientFields, without the extra unnecessary
+ * write a saveClientFields({overrides:{}}) round-trip would otherwise cause.
+ */
+export async function getClientEmail({ clientId }) {
+  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getClientEmail: no data returned for clientId ${clientId}`);
+  return { clientId, email: d.Email || '' };
+}
+
+/**
+ * SA's own "QuickBooks Online Sync Errors" report (Settings gear -> Accounting ->
+ * Integrations -> QuickBooks, or directly at /QBOSyncErrors.aspx — not linked from the
+ * Accounting or Reports top-nav menus, which is why it took live network capture of
+ * QBOSyncErrors.aspx + its page script (scripts/QBoSyncErrors.js) to find). Reverse-
+ * engineered 2026-08-08. Real endpoint, confirmed via live capture — not a guess.
+ *
+ * `Import` on each raw row indicates direction from SA's point of view: `false` means
+ * SA pushed the record out ("Sent to QuickBooks Online"); `true` means QBO pushed data
+ * back into SA ("Sent to Service Autopilot"). SA's own UI (QBoSyncErrors.js) computes
+ * the human-readable direction string exactly this way — mirrored here.
+ *
+ * `max` follows the UI's own off-by-one convention (it sends `MaxRows: PageSize - 1`).
+ * Returns rows newest-ish first (SA's own default sort), each with a stable `id`
+ * (QBOSyncErrorID guid) plus the fields needed to classify and act on it.
+ */
+export async function getQboSyncErrors({ max = 500 } = {}) {
+  const res = await post('/webservices/QBOSyncErrorsWs.asmx/GetQBOSyncErrors',
+    { Input: { StartRow: 1, MaxRows: Math.max(0, max - 1) } }, 'QBOSyncErrors.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA getQboSyncErrors: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  if (d.Errors?.length > 0) {
+    throw new Error(`SA getQboSyncErrors errors: ${JSON.stringify(d.Errors)}`);
+  }
+  const rows = (d.QBOSyncErrorList || []).map(e => ({
+    id:            e.QBOSyncErrorID,
+    name:          e.EntityName || '',
+    type:          e.EntityTypeName || String(e.EntityType ?? ''),
+    entityType:    e.EntityType,
+    entityId:      e.EntityID,
+    message:       e.ErrorMessage || '',
+    // Mirrors QBOSyncErrors.js's SyncErrorModel.Direction exactly (Import === false => SA -> QBO).
+    direction:     e.Import === false ? 'Sent to QuickBooks Online' : 'Sent to Service Autopilot',
+    errorDateTime: e.DateCreated ?? null,
+    qboErrorCode:  e.QBOErrorCode ?? null,
+  }));
+  return {
+    rows,
+    total: d.QBOSyncErrorsTotal ?? rows.length,
+    lastSyncDate: d.LastSyncDate ?? null,
+  };
+}
+
+/**
+ * SA's real "Actions -> Re-Send" action on the QuickBooks Online Sync Errors report
+ * (`self.ReSendSyncEntity` / `ReSendSyncEntityConfirmed` in QBoSyncErrors.js — this IS
+ * the button Michael saw in the screenshot, not an approximation). Accepts one or more
+ * `QBOSyncErrorID`s (the `id` field from getQboSyncErrors rows).
+ *
+ * IMPORTANT: a clean response here only means SA *accepted the resend request* — it
+ * does NOT mean the underlying sync succeeded. SA's own UI just reloads the error list
+ * (self.ReQuery) on success; it never asserts the error actually cleared. Callers must
+ * re-check via getQboSyncErrors after SA's own ~30 min batch cycle to see whether the
+ * same signature is still present.
+ */
+export async function resendQboSyncErrors({ ids }) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error('SA resendQboSyncErrors: ids must be a non-empty array of QBOSyncErrorID values');
+  }
+  const res = await post('/webservices/QBOSyncErrorsWs.asmx/ReSendSyncEntity',
+    { QBOSyncErrorIDs: ids }, 'QBOSyncErrors.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA resendQboSyncErrors: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  if (d.Errors?.length > 0) {
+    throw new Error(`SA resendQboSyncErrors errors: ${JSON.stringify(d.Errors)}`);
+  }
+  logger.info('SA: resendQboSyncErrors accepted', { count: ids.length });
+  return { requested: ids.length, accepted: true };
+}
+
+/**
  * Fetch the full editable record for an SA invoice, via the InvoiceOverlay.asmx
  * service (distinct from ClientViewWs.asmx / ClientEditOverlayWs.asmx — invoices
  * have their own overlay service). Endpoint/payload shape confirmed 2026-07-31

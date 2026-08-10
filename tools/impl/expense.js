@@ -5,6 +5,7 @@ import { logger } from '../../core/logger.js';
 import { getPurchase, uploadReceiptToQbo, createQBCCSubAccount, query as qbQuery } from './quickbooks.js';
 import { sendEmail } from './m365.js';
 import twilio from 'twilio';
+import { sendProactiveMessage } from '../../teams/notify.js';
 
 const supabase = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
@@ -116,6 +117,29 @@ async function processNewPurchase(purchaseId) {
     return;
   }
 
+  // Reconcile with a Chase-alert stub created before QBO settled
+  const dayBefore = new Date(`${date}T12:00:00`); dayBefore.setDate(dayBefore.getDate() - 1);
+  const dayAfter  = new Date(`${date}T12:00:00`); dayAfter.setDate(dayAfter.getDate() + 1);
+  const { data: alertStub } = await supabase
+    .from('expense_reports')
+    .select('id, receipt_path, qbo_attachment_id')
+    .eq('card_last_four', cardLastFour)
+    .is('qbo_transaction_id', null)
+    .gte('transaction_date', dayBefore.toISOString().slice(0, 10))
+    .lte('transaction_date', dayAfter.toISOString().slice(0, 10))
+    .gte('amount', amount - 0.02)
+    .lte('amount', amount + 0.02)
+    .maybeSingle();
+
+  if (alertStub) {
+    await supabase.from('expense_reports').update({ qbo_transaction_id: purchaseId }).eq('id', alertStub.id);
+    if (alertStub.receipt_path && !alertStub.qbo_attachment_id) {
+      uploadReceiptToQboAsync(alertStub.id, purchaseId, alertStub.receipt_path);
+    }
+    logger.info('QBO purchase reconciled with Chase alert stub', { reportId: alertStub.id, purchaseId });
+    return;
+  }
+
   const { data: report, error } = await supabase
     .from('expense_reports')
     .insert({
@@ -138,14 +162,14 @@ async function processNewPurchase(purchaseId) {
     return;
   }
 
-  if (card.sms_gateway) {
-    await sendExpenseSms(card.sms_gateway, { report, amount, vendor, date, cardLastFour });
+  if (card.phone_number) {
+    await sendExpenseSms(card.phone_number, { report, amount, vendor, date, cardLastFour });
     await supabase
       .from('expense_reports')
       .update({ sms_sent_at: new Date().toISOString() })
       .eq('id', report.id);
   } else {
-    logger.warn('Cardholder has no SMS gateway', { card: cardLastFour });
+    logger.warn('Cardholder has no phone number for SMS', { card: cardLastFour });
   }
 
   logger.info('Expense report created', { reportId: report.id, employee: card.employee_name, vendor, amount });
@@ -166,16 +190,19 @@ function parsePurchase(purchase) {
   return { amount, vendor, date, cardLastFour };
 }
 
-// ── SMS via email-to-carrier gateway ──────────────────────────
-
-async function sendExpenseSms(gateway, { report, amount, vendor, date, cardLastFour }) {
+async function sendExpenseSms(phoneNumber, { report, amount, vendor, date, cardLastFour }) {
   const fmtAmount = `$${Number(amount).toFixed(2)}`;
   const fmtDate   = new Date(`${date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
   const link      = `${PORTAL_BASE}/expense/${report.id}`;
-  const text      = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link} Or email photo to assistant@jrboehlke.com (include card/amount in subject).`;
+  const message   = `JRB: New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}. Submit receipt: ${link}`;
 
-  await sendEmail({ to: [gateway], subject: '', body: text, contentType: 'Text' });
-  logger.info('SMS sent via gateway', { gateway, reportId: report.id });
+  await sendSms(phoneNumber, message);
+  logger.info('SMS sent via Twilio', { phone: phoneNumber, reportId: report.id });
+
+  const teamsMsg = `New charge on card ...${cardLastFour}: ${fmtAmount} at ${vendor} on ${fmtDate}\nSubmit receipt: ${link}`;
+  sendProactiveMessage(teamsMsg).catch(err =>
+    logger.warn('Teams expense notification failed', { err: err.message, reportId: report.id })
+  );
 }
 
 // ── Expense Data (read) ────────────────────────────────────────
@@ -312,6 +339,47 @@ async function uploadReceiptToQboAsync(reportId, qboTransactionId, storagePath) 
   }
 }
 
+// ── Maintenance Log Portal ─────────────────────────────────────
+
+export async function getMaintenanceLogData(logId) {
+  const { data: log, error } = await supabase
+    .from('maintenance_logs')
+    .select('*, assets(id, name, year, make, model)')
+    .eq('id', logId)
+    .single();
+
+  if (error || !log) return null;
+
+  const { data: report } = await supabase
+    .from('expense_reports')
+    .select('id, status, employee_name, submitted_at')
+    .eq('maintenance_log_id', logId)
+    .single();
+
+  return { log, report };
+}
+
+export async function completeMaintenanceLog(logId) {
+  const { data: report, error } = await supabase
+    .from('expense_reports')
+    .select('id, status')
+    .eq('maintenance_log_id', logId)
+    .single();
+
+  if (error || !report) return { error: 'Maintenance log not found' };
+  if (report.status === 'complete') return { success: true, already_complete: true };
+
+  const { error: updateErr } = await supabase
+    .from('expense_reports')
+    .update({ status: 'complete' })
+    .eq('id', report.id);
+
+  if (updateErr) return { error: 'Failed to update status' };
+
+  logger.info('Maintenance log completed', { logId, reportId: report.id });
+  return { success: true };
+}
+
 function inferMaintenanceType(category) {
   if (category.includes('Repair')) return 'corrective';
   if (category.includes('fuel') || category.includes('Fuel')) return 'preventive';
@@ -412,10 +480,12 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
   const fmtVendor = report.vendor || 'your recent charge';
   const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
 
-  // Confirmation SMS to the cardholder via gateway
-  if (report.sms_gateway) {
+  // Confirmation SMS to the cardholder
+  if (report.phone_number) {
     const confirmText = `JRB: Got your receipt for ${fmtAmount} at ${fmtVendor}. Please complete the form: ${portalUrl}`;
-    await sendEmail({ to: [report.sms_gateway], subject: '', body: confirmText, contentType: 'Text' });
+    await sendSms(report.phone_number, confirmText).catch(err =>
+      logger.warn('Confirmation SMS failed', { err: err.message, reportId: report.id })
+    );
   }
 
   // Reply email (back to whoever sent it)
@@ -429,6 +499,217 @@ export async function processEmailedReceipt(email, { listEmailAttachments, getEm
   });
 
   return true;
+}
+
+// ── Chase Transaction Alert Processing ────────────────────────
+
+/**
+ * Called by the email poller for every unread email before the michael-only filter.
+ * Detects forwarded/auto-forwarded Chase transaction alerts, creates an expense
+ * report stub immediately (days before QBO settles the charge), and sends the
+ * receipt request SMS.
+ *
+ * Returns true if handled as a Chase alert, false to fall through to normal processing.
+ *
+ * NOTE: Chase email formats vary. The parser handles the known patterns as of
+ * 2026-05-20. Update parseChaseAlert() once real Chase emails are observed.
+ */
+export async function processChaseAlert(email, { getEmail, sendEmail }) {
+  // Quick pre-filter — avoid fetching body for every email
+  const fromAddr = (email.from || '').toLowerCase();
+  const subject  = (email.subject || '').toLowerCase();
+
+  const isFromChase = /chase\.com/.test(fromAddr);
+  // Match: direct Chase alerts, "You made a $X.XX transaction", or any "$X.XX ... transaction" subject
+  const subjectLooksLikeAlert =
+    (subject.includes('chase') && /alert|transaction|purchase|charge/.test(subject)) ||
+    /you made a .{0,20}\$[\d,]+\.\d{2}/.test(subject) ||
+    (/\$[\d,]+\.\d{2}/.test(subject) && subject.includes('transaction'));
+
+  if (!isFromChase && !subjectLooksLikeAlert) return false;
+
+  // Fetch full body for parsing; fall back to snippet if Graph returns an error
+  let bodyText = '';
+  let snippetFallback = false;
+  try {
+    const full = await getEmail({ email_id: email.id });
+    bodyText = (full.body || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 4000);
+  } catch (err) {
+    logger.warn('Chase alert: getEmail failed, falling back to snippet', { err: err.message, subject: email.subject });
+    bodyText = (email.snippet || '');
+    snippetFallback = true;
+  }
+  const searchText = `${email.subject || ''} ${bodyText}`;
+
+  // If not directly from Chase, confirm the body also looks like a Chase alert
+  if (!isFromChase && !/chase|card ending|ink business|sapphire|freedom/i.test(searchText)) {
+    return false;
+  }
+
+  const parsed = parseChaseAlert(searchText);
+  if (!parsed) {
+    if (snippetFallback) {
+      // Card pattern likely appears past the 200-char snippet — can't parse safely.
+      // Return true so the email isn't routed to CRM; alert Michael to review manually.
+      logger.warn('Chase alert: getEmail unavailable and snippet too short to parse — manual review needed', { subject: email.subject });
+      sendProactiveMessage(
+        `⚠️ Chase alert detected but could not be parsed (email body unavailable).\nSubject: "${email.subject}"\nCheck your Chase app and submit the expense manually at https://fieldops.jrboehlke.com`
+      ).catch(() => {});
+      return true;
+    }
+    logger.warn('Chase alert: could not parse transaction details — will need format update', { subject: email.subject });
+    return false;
+  }
+
+  const { cardLastFour, amount, merchant, transactionDate } = parsed;
+
+  const { data: card } = await supabase
+    .from('credit_cards')
+    .select('*')
+    .eq('last_four', cardLastFour)
+    .eq('is_active', true)
+    .maybeSingle();
+
+  if (!card) {
+    await handleUnknownCard({ cardLastFour, amount, merchant, transactionDate });
+    return true;
+  }
+
+  // Dedup: existing report within ±1 day with same card + amount
+  const dayBefore = new Date(`${transactionDate}T12:00:00`); dayBefore.setDate(dayBefore.getDate() - 1);
+  const dayAfter  = new Date(`${transactionDate}T12:00:00`); dayAfter.setDate(dayAfter.getDate() + 1);
+  const { data: dup } = await supabase
+    .from('expense_reports')
+    .select('id')
+    .eq('card_last_four', cardLastFour)
+    .gte('transaction_date', dayBefore.toISOString().slice(0, 10))
+    .lte('transaction_date', dayAfter.toISOString().slice(0, 10))
+    .gte('amount', amount - 0.02)
+    .lte('amount', amount + 0.02)
+    .maybeSingle();
+
+  if (dup) {
+    logger.info('Chase alert: duplicate report already exists, skipping', { reportId: dup.id });
+    return true;
+  }
+
+  const { data: report, error } = await supabase
+    .from('expense_reports')
+    .insert({
+      card_last_four: cardLastFour,
+      employee_name: card.employee_name,
+      phone_number: card.phone_number,
+      sms_gateway: card.sms_gateway,
+      profile_id: card.profile_id ?? null,
+      amount,
+      vendor: merchant,
+      transaction_date: transactionDate,
+      status: 'pending_employee',
+    })
+    .select()
+    .single();
+
+  if (error) {
+    logger.error('Chase alert: failed to create expense report', { err: error.message });
+    return true;
+  }
+
+  if (card.phone_number) {
+    await sendExpenseSms(card.phone_number, { report, amount, vendor: merchant, date: transactionDate, cardLastFour });
+    await supabase.from('expense_reports').update({ sms_sent_at: new Date().toISOString() }).eq('id', report.id);
+  }
+
+  // Trigger Menards rebate immediately at charge time — don't wait for portal submission
+  // so the rebate form is generated even if Michael never fills the portal for his own charges.
+  // triggerMenardsRebate() deduplicates, so a later portal submission won't double-fire.
+  if (merchant?.toLowerCase().includes('menard')) {
+    import('./menards.js')
+      .then(m => m.triggerMenardsRebate(report.id))
+      .catch(err => logger.error('Menards rebate trigger (Chase alert) failed', { err: err.message }));
+  }
+
+  logger.info('Chase alert: expense report created', { reportId: report.id, employee: card.employee_name, merchant, amount });
+  return true;
+}
+
+// ── Unknown card handling ──────────────────────────────────────
+
+async function handleUnknownCard({ cardLastFour, amount, merchant, transactionDate }) {
+  logger.warn('Chase alert: unknown card', { cardLastFour, merchant, amount });
+
+  // Dedup: same guard as the known-card path — skip if a stub already exists ±1 day
+  const dayBefore = new Date(`${transactionDate}T12:00:00`); dayBefore.setDate(dayBefore.getDate() - 1);
+  const dayAfter  = new Date(`${transactionDate}T12:00:00`); dayAfter.setDate(dayAfter.getDate() + 1);
+  const { data: dup } = await supabase
+    .from('expense_reports')
+    .select('id')
+    .eq('card_last_four', cardLastFour)
+    .gte('transaction_date', dayBefore.toISOString().slice(0, 10))
+    .lte('transaction_date', dayAfter.toISOString().slice(0, 10))
+    .gte('amount', amount - 0.02)
+    .lte('amount', amount + 0.02)
+    .maybeSingle();
+  if (dup) {
+    logger.info('Chase alert: duplicate unknown-card stub already exists, skipping', { reportId: dup.id });
+    return;
+  }
+
+  let reportId = null;
+  try {
+    const { data } = await supabase
+      .from('expense_reports')
+      .insert({
+        card_last_four: cardLastFour,
+        amount,
+        vendor: merchant,
+        transaction_date: transactionDate,
+        status: 'pending_identification',
+      })
+      .select('id')
+      .single();
+    reportId = data?.id;
+  } catch (err) {
+    logger.warn('Unknown card: failed to create expense stub', { err: err.message });
+  }
+
+  const amountStr = `$${Number(amount).toFixed(2)}`;
+  sendProactiveMessage(
+    `\u{1F6A8} Unknown card **${cardLastFour}** charged ${amountStr} at ${merchant} on ${transactionDate}.\n` +
+    (reportId ? `Expense stub created (ID: ${reportId}).\n` : '') +
+    `Reply: \`identify card ${cardLastFour} as [Employee Name]\` to register this card and route the expense.`
+  ).catch(() => {});
+}
+
+function parseChaseAlert(text) {
+  // Card last four: "card ending in 1234", "card ...1234", "XXXX1234"
+  const cardMatch = text.match(/card\s*(?:ending\s*(?:in)?)?\s*\.{0,4}\s*(\d{4})\b/i) ||
+                    text.match(/ending\s*in\s*(\d{4})/i);
+  if (!cardMatch) return null;
+  const cardLastFour = cardMatch[1];
+
+  // Amount: "$45.99", "$1,234.56"
+  const amountMatch = text.match(/\$\s*([\d,]+\.\d{2})/);
+  if (!amountMatch) return null;
+  const amount = parseFloat(amountMatch[1].replace(/,/g, ''));
+
+  // Merchant: "at MERCHANT NAME" or "to MERCHANT NAME" — stop at common trailing words
+  const merchantMatch = text.match(/\b(?:at|to)\s+([A-Z0-9][A-Z0-9 &'.\-\*]{1,40}?)(?:\s+on\b|\s+was\b|\.|,|$)/i);
+  const merchant = merchantMatch ? merchantMatch[1].trim() : 'Unknown Merchant';
+
+  // Date: "on 05/20/2026", "on May 20", or default to today
+  const dateMatch = text.match(/on\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i) ||
+                    text.match(/on\s+([A-Z][a-z]+ \d{1,2},?\s*\d{0,4})/i);
+  let transactionDate;
+  if (dateMatch) {
+    const parsed = new Date(dateMatch[1]);
+    transactionDate = isNaN(parsed.getTime())
+      ? new Date().toISOString().slice(0, 10)
+      : parsed.toISOString().slice(0, 10);
+  } else {
+    transactionDate = new Date().toISOString().slice(0, 10);
+  }
+
+  return { cardLastFour, amount, merchant, transactionDate };
 }
 
 /**
@@ -554,7 +835,7 @@ export async function sendExpenseReminders() {
 
   const { data: reports, error } = await supabase
     .from('expense_reports')
-    .select('id, amount, vendor, transaction_date, card_last_four, sms_gateway, sms_sent_at, reminder_count, last_reminder_sent_at')
+    .select('id, amount, vendor, transaction_date, card_last_four, phone_number, sms_sent_at, reminder_count, last_reminder_sent_at')
     .eq('status', 'pending_employee')
     .not('sms_sent_at', 'is', null)
     .lt('reminder_count', MAX_REMINDERS);
@@ -571,8 +852,8 @@ export async function sendExpenseReminders() {
 
     if (hoursSince < waitHours) continue;
 
-    const gateway = report.sms_gateway;
-    if (!gateway) continue;
+    const phoneNumber = report.phone_number;
+    if (!phoneNumber) continue;
 
     const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
     const fmtDate   = report.transaction_date
@@ -580,10 +861,10 @@ export async function sendExpenseReminders() {
       : 'recent';
     const portalUrl = `${PORTAL_BASE}/expense/${report.id}`;
 
-    const message = `The expense report for the ${fmtAmount} charge ${fmtDate} is not complete. Please follow this link to complete: ${portalUrl}`;
+    const message = `JRB: Reminder — the expense report for your ${fmtAmount} charge on ${fmtDate} is not complete. Submit here: ${portalUrl}`;
 
     try {
-      await sendEmail({ to: [gateway], subject: '', body: message, contentType: 'Text' });
+      await sendSms(phoneNumber, message);
       await supabase
         .from('expense_reports')
         .update({
