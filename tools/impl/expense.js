@@ -2,7 +2,7 @@
 import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
-import { getPurchase, uploadReceiptToQbo, query as qbQuery } from './quickbooks.js';
+import { getPurchase, uploadReceiptToQbo, createQBCCSubAccount, query as qbQuery } from './quickbooks.js';
 import { sendEmail } from './m365.js';
 import twilio from 'twilio';
 
@@ -925,4 +925,95 @@ export async function backfillExpensesFromQbo({ startDate, endDate }) {
     unmatchedAccounts: [...unmatchedAccounts],
   });
   return { created, skippedNonReceipt, unmatchedAccounts: [...unmatchedAccounts] };
+}
+
+/**
+ * Link a previously-unknown card to an employee, route pending expenses, and create a QB CC sub-account.
+ * Called by the agent in response to Michael's "identify card XXXX as Name" message.
+ */
+export async function identifyUnknownCard({ lastFour, employeeName }) {
+  if (!/^\d{4}$/.test(lastFour)) throw new Error('lastFour must be exactly 4 digits');
+
+  // Check for an existing record (placeholder or otherwise) for this employee.
+  // Use wildcards so partial names like "Steffen Jacob" match "Steffen J." in the DB.
+  const { data: existing } = await supabase
+    .from('credit_cards')
+    .select('*')
+    .ilike('employee_name', `%${employeeName}%`)
+    .maybeSingle();
+
+  let cardRecord;
+  if (existing) {
+    const { data, error } = await supabase
+      .from('credit_cards')
+      .update({ last_four: lastFour, is_active: true })
+      .eq('id', existing.id)
+      .select()
+      .single();
+    if (error) throw new Error(`Failed to update card record: ${error.message}`);
+    cardRecord = data;
+  } else {
+    const { data, error } = await supabase
+      .from('credit_cards')
+      .insert({ last_four: lastFour, employee_name: employeeName, label: employeeName, is_active: true })
+      .select()
+      .single();
+    if (error) throw new Error(`Failed to create card record: ${error.message}`);
+    cardRecord = data;
+  }
+
+  // Route pending expense stubs created while the card was unidentified
+  const { data: pending, error: pendingErr } = await supabase
+    .from('expense_reports')
+    .update({
+      employee_name: cardRecord.employee_name,
+      phone_number:  cardRecord.phone_number  ?? null,
+      sms_gateway:   cardRecord.sms_gateway   ?? null,
+      profile_id:    cardRecord.profile_id    ?? null,
+      status: 'pending_employee',
+    })
+    .eq('card_last_four', lastFour)
+    .eq('status', 'pending_identification')
+    .select('id, amount, vendor, transaction_date');
+
+  if (pendingErr) {
+    logger.warn('identifyUnknownCard: failed to route pending stubs', { err: pendingErr.message, lastFour });
+  }
+
+  if (cardRecord.phone_number) {
+    for (const report of (pending ?? [])) {
+      try {
+        const fmtAmount = `$${Number(report.amount).toFixed(2)}`;
+        const fmtDate   = new Date(`${report.transaction_date}T12:00:00`).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const link      = `${PORTAL_BASE}/expense/${report.id}`;
+        await sendSms(cardRecord.phone_number, `JRB: New charge on card ...${lastFour}: ${fmtAmount} at ${report.vendor} on ${fmtDate}. Submit receipt: ${link}`);
+        await supabase.from('expense_reports')
+          .update({ sms_sent_at: new Date().toISOString() })
+          .eq('id', report.id);
+      } catch (err) {
+        logger.warn('identifyUnknownCard: SMS failed for report', { reportId: report.id, err: err.message });
+      }
+    }
+  }
+
+  // Create QB CC sub-account under the Chase parent
+  let qbAccount = null;
+  try {
+    qbAccount = await createQBCCSubAccount(cardRecord.employee_name, lastFour);
+  } catch (err) {
+    logger.warn('identifyUnknownCard: QB sub-account creation failed', { err: err.message });
+  }
+
+  logger.info('Unknown card identified', {
+    lastFour,
+    employee: cardRecord.employee_name,
+    expensesRouted: (pending ?? []).length,
+    qbAccount: qbAccount?.name,
+  });
+
+  return {
+    card: { id: cardRecord.id, employee_name: cardRecord.employee_name, last_four: lastFour },
+    expensesRouted: (pending ?? []).length,
+    qbAccount,
+  };
 }
