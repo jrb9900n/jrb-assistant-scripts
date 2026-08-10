@@ -11,7 +11,7 @@ qbo-sync-watchdog-state.json
 
 # Runtime state (not source)
 data/
-teams/self-heal-queue.json
+self-heal-queue.json
 
 # Ad hoc diagnostic/investigation scripts and scratch working dirs — never
 # meant to be committed; see .archive/ on the live machine for past batches
