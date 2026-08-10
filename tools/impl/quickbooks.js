@@ -11,24 +11,6 @@ const BASE = `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REAL
 
 const getToken = getQBAccessToken;
 
-// ── Customer create ───────────────────────────────────────────
-
-/**
- * Create a QBO customer. Pass parentId for a sub-customer (Job).
- */
-export async function createCustomer({ displayName, parentId }) {
-  const token = await getToken();
-  const payload = { DisplayName: displayName };
-  if (parentId) {
-    payload.ParentRef = { value: parentId };
-    payload.Job = true;
-  }
-  const res = await axios.post(`${BASE}/customer`, payload, {
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' },
-  });
-  return res.data.Customer;
-}
-
 // ── Query ─────────────────────────────────────────────────────
 
 /**
@@ -444,4 +426,22 @@ export function matchBillsToJob(job, bills) {
     }
   }
   return matches;
+}
+
+/**
+ * Create a new QBO customer, optionally as a sub-customer/job under an
+ * existing parent (used for the deleted-customer-ref remediation pattern:
+ * recreating an SA↔QBO link after a customer record was removed on QBO's side).
+ */
+export async function createCustomer({ displayName, parentId }) {
+  const token = await getToken();
+  const payload = { DisplayName: displayName };
+  if (parentId) {
+    payload.ParentRef = { value: parentId };
+    payload.Job = true;
+  }
+  const res = await axios.post(`${BASE}/customer`, payload, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' },
+  });
+  return res.data.Customer;
 }

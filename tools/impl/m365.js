@@ -2,6 +2,7 @@
 // Covers email, calendar, OneDrive, and SharePoint.
 
 import axios from 'axios';
+import XLSX from 'xlsx';
 import { logger } from '../../core/logger.js';
 import { createClient } from '@supabase/supabase-js';
 
@@ -39,19 +40,26 @@ async function getToken() {
 async function graph(method, path, data) {
   const token = await getToken();
   const url = path.startsWith('http') ? path : `${GRAPH}${path}`;
-  const res = await axios({ method, url, data, headers: { Authorization: `Bearer ${token}` } });
-  return res.data;
+  try {
+    const res = await axios({ method, url, data, headers: { Authorization: `Bearer ${token}` } });
+    return res.data;
+  } catch (err) {
+    const body = err.response?.data;
+    const msg = body?.error?.message ?? body?.error?.code ?? JSON.stringify(body) ?? err.message;
+    throw new Error(`Graph ${method} ${path.slice(0, 80)} → ${err.response?.status ?? err.code ?? 'network'}: ${msg}`);
+  }
 }
 
 const USER = () => process.env.M365_USER_EMAIL;
 
 // ── Email ─────────────────────────────────────────────────────
 
-export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = false }) {
+export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = false, userEmail } = {}) {
+  const user = userEmail ?? USER();
   const filter = unread_only ? '&$filter=isRead eq false' : '';
   const data = await graph(
     'GET',
-    `/users/${USER()}/mailFolders/${folder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview${filter}`
+    `/users/${user}/mailFolders/${folder}/messages?$top=${limit}&$select=id,subject,from,receivedDateTime,bodyPreview${filter}`
   );
   return data.value.map(m => ({
     id:       m.id,
@@ -62,14 +70,19 @@ export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = f
   }));
 }
 
-export async function getEmail({ email_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}?$select=id,subject,from,body,receivedDateTime`);
+export async function getEmail({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}?$select=id,subject,from,toRecipients,body,receivedDateTime,conversationId,hasAttachments`);
   return {
-    id:      data.id,
-    from:    data.from?.emailAddress?.address,
-    subject: data.subject,
-    date:    data.receivedDateTime,
-    body:    data.body?.content,
+    id:              data.id,
+    from:            data.from?.emailAddress?.address,
+    from_name:       data.from?.emailAddress?.name,
+    to:              (data.toRecipients ?? []).map(r => r.emailAddress?.address),
+    subject:         data.subject,
+    date:            data.receivedDateTime,
+    thread_id:       data.conversationId,
+    has_attachments: data.hasAttachments,
+    body:            data.body?.content,
   };
 }
 
@@ -85,21 +98,58 @@ export async function draftEmail({ to, subject, body, cc = [] }) {
   return { draft_id: data.id, subject, message: 'Draft created — not sent.' };
 }
 
-export async function sendEmail({ draft_id, to, subject, body, contentType = 'HTML' }) {
+export async function sendEmail({ draft_id, to, subject, body, contentType = 'HTML', attachments = [] }) {
   if (draft_id) {
-    await graph('POST', `/users/${USER()}/messages/${draft_id}/send`);
+    await graph('POST', `/users/${USER()}/messages/${encodeURIComponent(draft_id)}/send`);
     return { sent: true, draft_id };
   }
-  const message = {
-    message: {
-      subject: subject ?? '',
-      body: { contentType, content: body },
-      toRecipients: to.map(a => ({ emailAddress: { address: a } })),
-    },
-    saveToSentItems: false,
-  };
-  await graph('POST', `/users/${USER()}/sendMail`, message);
-  return { sent: true };
+
+  if (attachments.length === 0) {
+    await graph('POST', `/users/${USER()}/sendMail`, {
+      message: {
+        subject: subject ?? '',
+        body: { contentType, content: body },
+        toRecipients: to.map(a => ({ emailAddress: { address: a } })),
+      },
+      saveToSentItems: false,
+    });
+    return { sent: true };
+  }
+
+  // With attachments: create draft, upload each via upload session (raw bytes, no
+  // base64 JSON encoding), then send. This avoids Exchange corruption of large binaries.
+  const draft = await graph('POST', `/users/${USER()}/messages`, {
+    subject: subject ?? '',
+    body: { contentType, content: body },
+    toRecipients: to.map(a => ({ emailAddress: { address: a } })),
+  });
+  const draftId = draft.id;
+
+  try {
+    for (const a of attachments) {
+      const buf = Buffer.isBuffer(a.content) ? a.content : Buffer.from(a.content, 'base64');
+      const session = await graph(
+        'POST',
+        `/users/${USER()}/messages/${draftId}/attachments/createUploadSession`,
+        { AttachmentItem: { attachmentType: 'file', name: a.name, size: buf.length, contentType: a.contentType } }
+      );
+      // uploadUrl is pre-authenticated — do NOT add Authorization header
+      await axios.put(session.uploadUrl, buf, {
+        headers: {
+          'Content-Type': 'application/octet-stream',
+          'Content-Range': `bytes 0-${buf.length - 1}/${buf.length}`,
+        },
+        maxBodyLength: Infinity,
+        maxContentLength: Infinity,
+      });
+      logger.info('Attachment uploaded via session', { name: a.name, bytes: buf.length });
+    }
+    await graph('POST', `/users/${USER()}/messages/${draftId}/send`);
+    return { sent: true };
+  } catch (err) {
+    try { await graph('DELETE', `/users/${USER()}/messages/${draftId}`); } catch {}
+    throw err;
+  }
 }
 
 export async function createReminder({ title, due_date, notes = '' }) {
@@ -158,16 +208,18 @@ export async function listOneDrive({ folder }) {
   }));
 }
 
-export async function markEmailRead({ email_id }) {
-  await graph('PATCH', `/users/${USER()}/messages/${email_id}`, { isRead: true });
+export async function markEmailRead({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  await graph('PATCH', `/users/${user}/messages/${encodeURIComponent(email_id)}`, { isRead: true });
   return { marked_read: true, email_id };
 }
 
 /**
  * List attachments on an email. Returns metadata only (no content bytes).
  */
-export async function listEmailAttachments({ email_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}/attachments?$select=id,name,contentType,size`);
+export async function listEmailAttachments({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}/attachments?$select=id,name,contentType,size`);
   return (data.value ?? []).map(a => ({
     id:          a.id,
     name:        a.name,
@@ -180,8 +232,9 @@ export async function listEmailAttachments({ email_id }) {
  * Download a single attachment as a Buffer.
  * Graph returns contentBytes as base64 for small files (< 3 MB).
  */
-export async function getEmailAttachmentBytes({ email_id, attachment_id }) {
-  const data = await graph('GET', `/users/${USER()}/messages/${email_id}/attachments/${attachment_id}`);
+export async function getEmailAttachmentBytes({ email_id, attachment_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}/attachments/${encodeURIComponent(attachment_id)}`);
   if (!data.contentBytes) throw new Error('Attachment has no content bytes (may be a reference attachment)');
   return Buffer.from(data.contentBytes, 'base64');
 }
@@ -224,7 +277,7 @@ export async function createMailFolder({ userEmail, name, parentFolderId } = {})
 
 export async function moveEmail({ userEmail, email_id, destination_folder_id } = {}) {
   const user = userEmail ?? USER();
-  const data = await graph('POST', `/users/${user}/messages/${email_id}/move`, {
+  const data = await graph('POST', `/users/${user}/messages/${encodeURIComponent(email_id)}/move`, {
     destinationId: destination_folder_id,
   });
   return { moved: true, new_id: data.id, folder_id: destination_folder_id };
@@ -268,7 +321,7 @@ export async function searchEmails({ userEmail, query, from, subject, limit = 20
 
 export async function catalogEmail({ email_id, userEmail, category, action_taken = 'none', action_notes = '', folder_name } = {}) {
   const user = userEmail ?? USER();
-  const msg = await graph('GET', `/users/${user}/messages/${email_id}?$select=id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments,conversationId,parentFolderId`);
+  const msg = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}?$select=id,subject,from,receivedDateTime,bodyPreview,isRead,hasAttachments,conversationId,parentFolderId`);
 
   const row = {
     message_id:      msg.id,
@@ -358,6 +411,7 @@ export async function searchSharePoint({ query, fileType, siteId, limit = 20 } =
       query: { queryString: fileType ? `${query} filetype:${fileType}` : query },
       from: 0,
       size: limit,
+      region: 'NAM',
       fields: ['id', 'name', 'webUrl', 'lastModifiedDateTime', 'createdBy', 'fileSystemInfo', 'parentReference'],
     }],
   };
@@ -385,6 +439,51 @@ export async function readSharePointFile({ site_id, drive_id, item_id } = {}) {
     responseType: 'text',
   });
   return { name: meta.name, url: meta.webUrl, content: res.data };
+}
+
+export async function fetchEmployeeDirectory() {
+  const hits = await searchSharePoint({ query: 'EMPLOYEE DIRECTORY', fileType: 'xlsx', limit: 10 });
+  const file = hits.find(h => h.name?.toUpperCase().includes('EMPLOYEE DIRECTORY'));
+  if (!file) throw new Error('Employee Directory XLSX not found in SharePoint search results');
+
+  const meta = await graph('GET', `/sites/${file.site_id}/drives/${file.drive_id}/items/${file.item_id}`);
+  const token = await getToken();
+  const res = await axios.get(meta['@microsoft.graph.downloadUrl'], {
+    headers: { Authorization: `Bearer ${token}` },
+    responseType: 'arraybuffer',
+  });
+
+  const wb = XLSX.read(Buffer.from(res.data), { type: 'buffer' });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(ws, { defval: '' });
+
+  return rows
+    .map(row => {
+      const keys = Object.keys(row);
+      const firstKey = keys.find(k => /first/i.test(k) && /name/i.test(k));
+      const lastKey  = keys.find(k => /last/i.test(k)  && /name/i.test(k));
+      const nameKey  = keys.find(k => /^(name|full.?name|employee.?name|display.?name)$/i.test(k));
+      let name;
+      if (firstKey && lastKey) {
+        name = `${row[firstKey]} ${row[lastKey]}`.trim();
+      } else if (nameKey) {
+        name = String(row[nameKey]).trim();
+        // Normalize "Last, First" → "First Last" (SA and some directories use this format)
+        if (/^[^,]+,[^,]+$/.test(name)) {
+          const [last, first] = name.split(',');
+          name = `${first.trim()} ${last.trim()}`;
+        }
+      } else {
+        name = String(row[keys[0]] ?? '').trim();
+      }
+      const cellKey  = keys.find(k => /cell|mobile/i.test(k));
+      const phoneKey = keys.find(k => /phone|tel/i.test(k));
+      const phone = String(row[cellKey] ?? row[phoneKey] ?? '').trim() || null;
+      const emailKey = keys.find(k => /email/i.test(k));
+      const email = emailKey ? String(row[emailKey]).trim() || null : null;
+      return { name, phone, email };
+    })
+    .filter(r => r.name);
 }
 
 export async function listSharePointFolder({ site_id, folder_path = '/' } = {}) {
@@ -415,4 +514,68 @@ export async function listSharePointSites({ query } = {}) {
     url:         s.webUrl,
     description: s.description,
   }));
+}
+
+export async function renameMailFolder({ userEmail, folder_id, name } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('PATCH', `/users/${user}/mailFolders/${folder_id}`, { displayName: name });
+  logger.info('Mail folder renamed', { user, folder_id, name });
+  return { renamed: true, folder_id: data.id, name: data.displayName };
+}
+
+// ── Inbox assistant helpers ───────────────────────────────────────────────────
+
+export async function listSentEmails({ userEmail, limit = 30, afterDate } = {}) {
+  const user = userEmail ?? USER();
+  const after = afterDate ? `&$filter=sentDateTime ge ${new Date(afterDate).toISOString()}` : '';
+  const data = await graph(
+    'GET',
+    `/users/${user}/mailFolders/SentItems/messages?$top=${limit}&$select=id,subject,toRecipients,sentDateTime,conversationId,bodyPreview${after}&$orderby=sentDateTime desc`
+  );
+  return (data.value ?? []).map(m => ({
+    id:        m.id,
+    subject:   m.subject,
+    to:        (m.toRecipients ?? []).map(r => r.emailAddress?.address),
+    date:      m.sentDateTime,
+    thread_id: m.conversationId,
+    snippet:   m.bodyPreview?.slice(0, 200),
+  }));
+}
+
+export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph(
+    'GET',
+    `/users/${user}/messages?$filter=conversationId eq '${thread_id}'&$top=${limit}&$select=id,subject,from,sentDateTime,receivedDateTime,conversationId&$orderby=receivedDateTime desc`
+  );
+  return (data.value ?? []).map(m => ({
+    id:        m.id,
+    from:      m.from?.emailAddress?.address,
+    subject:   m.subject,
+    date:      m.receivedDateTime ?? m.sentDateTime,
+    thread_id: m.conversationId,
+  }));
+}
+
+// Creates a draft reply in Michael's mailbox, preserving the email thread.
+// Returns the draft message ID so it can be sent later or reviewed in Outlook.
+export async function createReplyDraft({ userEmail, email_id, body } = {}) {
+  const user = userEmail ?? USER();
+  // Step 1: create the reply stub (preserves thread headers, To, Subject)
+  const stub = await graph('POST', `/users/${user}/messages/${encodeURIComponent(email_id)}/createReply`, {});
+  const draftId = stub.id;
+  // Step 2: patch the body onto the draft
+  await graph('PATCH', `/users/${user}/messages/${encodeURIComponent(draftId)}`, {
+    body: { contentType: 'HTML', content: body },
+  });
+  logger.info('Reply draft created', { user, draftId, sourceMessageId: email_id });
+  return { draft_id: draftId };
+}
+
+// Send a saved draft by ID.
+export async function sendDraft({ userEmail, draft_id } = {}) {
+  const user = userEmail ?? USER();
+  await graph('POST', `/users/${user}/messages/${encodeURIComponent(draft_id)}/send`);
+  logger.info('Draft sent', { user, draft_id });
+  return { sent: true, draft_id };
 }

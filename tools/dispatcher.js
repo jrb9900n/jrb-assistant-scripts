@@ -13,12 +13,14 @@ async function webSearch({ query }) {
 import { logger } from '../core/logger.js';
 import * as m365        from './impl/m365.js';
 import * as qb          from './impl/quickbooks.js';
+import * as expense     from './impl/expense.js';
 import * as files       from './impl/files.js';
 import * as github      from './impl/github.js';
 import * as scripts     from './impl/scripts.js';
 import * as vercel      from './impl/vercel.js';
 import * as scheduling  from './impl/scheduling.js';
 import * as sa          from './impl/serviceautopilot.js';
+import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 
@@ -34,6 +36,29 @@ const HANDLERS = {
   move_email:            (i) => m365.moveEmail(i),
   catalog_email:         (i) => m365.catalogEmail(i),
   get_email_catalog:     (i) => m365.getEmailCatalog(i),
+  send_draft_reply:      (i) => m365.sendDraft({ userEmail: 'michael@jrboehlke.com', ...i }),
+
+  // Inbox assistant (on-demand)
+  run_inbox_processor: async () => {
+    const { processInbox } = await import('./impl/inbox-processor.js');
+    return processInbox();
+  },
+  get_email_triage: async ({ hours = 24, priority } = {}) => {
+    const { createClient } = await import('@supabase/supabase-js');
+    const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    let q = db.from('email_triage')
+      .select('from_name,from_address,subject,priority,category,intent,folder_moved_to,draft_id,hot_trigger,meeting_detected,action_items,processed_at')
+      .eq('mailbox', 'michael@jrboehlke.com')
+      .gte('processed_at', since)
+      .order('priority', { ascending: true })
+      .order('processed_at', { ascending: false })
+      .limit(50);
+    if (priority) q = q.eq('priority', priority);
+    const { data, error } = await q;
+    if (error) throw new Error(`email_triage query failed: ${error.message}`);
+    return data ?? [];
+  },
 
   // Calendar
   create_reminder:        (i) => m365.createReminder(i),
@@ -44,6 +69,8 @@ const HANDLERS = {
 
   // CRM / Finance
   qb_query:              (i) => qb.query(i),
+  identify_unknown_card: (i) => expense.identifyUnknownCard(i),
+  backfill_expenses_from_qbo: (i) => expense.backfillExpensesFromQbo(i),
 
   // Files / OneDrive
   save_to_onedrive:      (i) => m365.saveToOneDrive(i),
@@ -74,6 +101,12 @@ const HANDLERS = {
   web_search:           (i) => webSearch(i),
 
   // Teams
+  // NOTE: suppressSelfHeal is intentionally NOT forwarded from LLM tool input.
+  // Self-heal suppression is a security boundary — allowing the LLM to set it
+  // via tool parameters means any agent task (not just self_heal_watcher) could
+  // suppress its own error alerts, defeating the self-healing safety net.
+  // Only trusted internal call sites (e.g. cron.js's self_heal_watcher) may pass
+  // suppressSelfHeal:true, by calling sendProactiveMessage() directly.
   send_teams_message:   ({ message }) => sendProactiveMessage(message).then(() => 'Teams message sent.'),
 
   // Service Autopilot
@@ -86,6 +119,14 @@ const HANDLERS = {
   sa_add_ticket:           ({ notes, ...rest }) => sa.addTicket({ ...rest, body: notes }),
   sa_get_ticket:           (i) => sa.getTicket(i),
   sa_set_billing_defaults: (i) => sa.setClientBillingDefaults(i),
+  sa_set_crackfill:        (i) => sa.setClientCrackfill(i),
+  sa_list_resources:       ()  => sa.listSAResources(),
+  sa_dispatch_job:         (i) => sa.dispatchWaitingListJob({ wlItemId: i.wl_item_id, scheduleDate: i.schedule_date, resourceId: i.resource_id }),
+  sa_update_route_order:   (i) => sa.updateRouteOrder({ scheduleDate: i.schedule_date, jobIds: i.job_ids }),
+  sa_fuzzy_match_client:   (i) => fuzzyMatch.runFuzzyMatchClient(i),
+  sa_get_client_profile:   (i) => sa.getClientProfile(i),
+  sa_get_client_notes:     (i) => sa.getClientNotes(i),
+  sa_get_audit_trail:      (i) => sa.getAuditTrail(i),
 
   // Scheduling
   get_crews:            (i) => scheduling.getCrews(i),
@@ -94,6 +135,8 @@ const HANDLERS = {
   get_weather_forecast: (i) => scheduling.getWeatherForecast(i),
   save_schedule_draft:  (i) => scheduling.saveScheduleDraft(i),
   get_schedule_draft:   (i) => scheduling.getScheduleDraft(i),
+  record_decision:      (i) => scheduling.recordDecision(i),
+  sync_pavement_sizes:  (i) => scheduling.syncPavementSizes(i),
 };
 
 /**

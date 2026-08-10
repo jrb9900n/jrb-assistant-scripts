@@ -30,7 +30,7 @@ const HAIKU  = 'claude-haiku-4-5-20251001';
 const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 
 // These task types always use Sonnet — they involve writing, analysis, or multi-step work
-const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm']);
+const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix']);
 
 function routeModel(taskPrompt, forceModel, taskType) {
     if (forceModel) return forceModel;
@@ -45,12 +45,11 @@ function routeModel(taskPrompt, forceModel, taskType) {
         // Analysis or multi-step reasoning
         /\b(analys|strateg|compar|synthesiz|report|forecast|explain why|plan|review)\b/i.test(taskPrompt) ||
         // Anything touching external systems with side effects
-        /\b(invoice|payment|schedule|invoice|estimate|quickbooks|hubspot)\b/i.test(taskPrompt);
+        /\b(invoice|payment|schedule|estimate|quickbooks|hubspot)\b/i.test(taskPrompt);
     return isComplex ? SONNET : HAIKU;
 }
 
-async function buildSystemPrompt(memoryContext, taskType) {
-  const rulesAndPatterns = await buildContextBlock(taskType);
+async function buildSystemPrompt(memoryContext, rulesAndPatterns, taskType) {
   return `You are an AI executive assistant for J.R. Boehlke, LLC (JRB Boehlke LLC), an asphalt, concrete, landscape, and snow contractor in southeast Wisconsin and metro Milwaukee. Michael Boehlke is the owner and your primary user.
 
 ## Your role
@@ -65,7 +64,8 @@ You help Michael manage every hat he wears: bookkeeping, finance, operations, sc
 ## Tools you have
 - **Microsoft 365**: read/send email (assistant@jrboehlke.com), calendar, OneDrive files
 - **QuickBooks**: invoices, payments, AR aging, cash flow (realm: 9130357265584656)
-- **Service Autopilot**: jobs, estimates, scheduling, crew, customers
+- **Service Autopilot**: jobs, estimates, scheduling, crew, customers. When creating a new client and pavement size (sq ft) is known, call sa_set_crackfill with pavementSf after sa_set_billing_defaults to set both fields in one step.
+- **CardDAV contacts**: provision/revoke employee access to JRB contacts on their phone (carddav_provision, carddav_revoke, carddav_list)
 - **GitHub**: read/write code in jrb-assistant-scripts, FleetOps, FieldOps repos
 - **Vercel**: deploy FleetOps (prj_83cd6Wmn2WWW79uO7N6mFKd1BcFF) and FieldOps (prj_0YjCwD9qpI0uRLMqFz9OGL9aVX6b)
 - **Supabase**: jrb-assistant DB (znpahinyplccdyoekfeo) for agent memory, feedback loop, config; fleetops DB (mzywmgesulyalevtzudw) for SA/QB sync data
@@ -85,7 +85,7 @@ You help Michael manage every hat he wears: bookkeeping, finance, operations, sc
 Date/time: ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })}
 Task type: ${taskType}
 
-${memoryContext}${rulesAndPatterns}`.trim();
+${memoryContext}${rulesAndPatterns ?? ''}`.trim();
 }
 
 export async function runAgent({
@@ -96,10 +96,18 @@ export async function runAgent({
     const model = routeModel(task, forceModel, taskType);
     logger.info('Agent run started', { runId, taskType, model, task: task.slice(0, 80) });
 
-    const memoryContext = await loadContext({ topic: taskType });
     const tools = getTools(taskType);
     const messages = [...extraMessages, { role: 'user', content: task }];
-    const systemPrompt = systemPromptOverride ?? await buildSystemPrompt(memoryContext, taskType);
+    let systemPrompt;
+    if (systemPromptOverride) {
+        systemPrompt = systemPromptOverride;
+    } else {
+        const [memoryContext, rulesAndPatterns] = await Promise.all([
+            loadContext({ topic: taskType }),
+            buildContextBlock(taskType),
+        ]);
+        systemPrompt = await buildSystemPrompt(memoryContext, rulesAndPatterns, taskType);
+    }
 
     let totalInput = 0, totalOutput = 0, finalText = '';
 

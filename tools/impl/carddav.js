@@ -1,0 +1,695 @@
+// tools/impl/carddav.js — CardDAV server for JRB contacts
+// Serves QBO customers + vendors as a read-only CardDAV addressbook.
+// Employees add agent.jrboehlke.com/carddav as a CardDAV account on their phone.
+// Revoking access: set active=false or delete row in carddav_credentials table.
+// iOS:     Settings → Contacts → Accounts → Add Account → Other → Add CardDAV Account
+// Android: Open Contacts app → Settings → Add account → Other → CardDAV
+
+import axios from 'axios';
+import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
+import { logger } from '../../core/logger.js';
+import { getQBAccessToken } from './qb-token.js';
+import { getAllSAAccounts, getSAClientDetails } from './serviceautopilot.js';
+import { fetchEmployeeDirectory } from './m365.js';
+
+const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+// ── QBO data fetch ────────────────────────────────────────────
+
+async function fetchQBOEntities(entityType) {
+  let token;
+  try {
+    token = await getQBAccessToken();
+  } catch (err) {
+    logger.error('CardDAV: QB token refresh failed — re-auth required at /qb-reauth', {
+      status: err.response?.status,
+      err: err.message,
+    });
+    throw err;
+  }
+  const results = [];
+  let pos = 1;
+  while (true) {
+    let res;
+    try {
+      res = await axios.get(`${QB_BASE()}/query`, {
+        params: { query: `SELECT * FROM ${entityType} WHERE Active = true STARTPOSITION ${pos} MAXRESULTS 1000` },
+        headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+      });
+    } catch (err) {
+      logger.error('CardDAV: QBO fetch failed', {
+        entity: entityType,
+        status: err.response?.status,
+        url: err.config?.url,
+        data: err.response?.data,
+        message: err.message,
+      });
+      throw err;
+    }
+    const rows = res.data.QueryResponse?.[entityType] ?? [];
+    results.push(...rows);
+    if (rows.length < 1000) break;
+    pos += 1000;
+  }
+  return results;
+}
+
+// ── Contact cache (refreshed every 2 hours) ───────────────────
+
+let _cache = null, _cacheTime = 0, _cacheEtag = null;
+const CACHE_TTL = 2 * 60 * 60 * 1000;
+
+export function invalidateContactCache() {
+  _cache = null;
+  _cacheTime = 0;
+}
+
+const LEGAL_SUFFIXES = /\s+(inc|llc|corp|ltd|co|incorporated|corporation|limited)\s*$/;
+
+function normalizeName(s) {
+  return (s || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, '')
+    .replace(LEGAL_SUFFIXES, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normalizePhone(p) {
+  return (p || '').replace(/\D/g, '');
+}
+
+async function getContacts() {
+  if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
+
+  logger.info('CardDAV: refreshing contact cache');
+  let customers, vendors, saAccounts, qboEmployees, empDirectory;
+  try {
+    [customers, vendors, saAccounts, qboEmployees, empDirectory] = await Promise.all([
+      fetchQBOEntities('Customer'),
+      fetchQBOEntities('Vendor'),
+      getAllSAAccounts().catch(err => {
+        logger.warn('CardDAV: SA account fetch failed', { err: err.message });
+        return [];
+      }),
+      fetchQBOEntities('Employee').catch(err => {
+        logger.warn('CardDAV: QBO Employee fetch failed — employees will be omitted from this refresh', { err: err.message });
+        return [];
+      }),
+      fetchEmployeeDirectory().catch(err => {
+        logger.warn('CardDAV: Employee Directory fetch failed — employees will appear without directory phones', { err: err.message });
+        return [];
+      }),
+    ]);
+  } catch (err) {
+    if (_cache) {
+      logger.warn('CardDAV: cache refresh failed — serving stale cache', { err: err.message });
+      return _cache;
+    }
+    throw err;
+  }
+
+  // Build name→phone lookup from SharePoint Employee Directory (authoritative phone source)
+  const dirPhoneByName = new Map();
+  for (const emp of empDirectory) {
+    const key = normalizeName(emp.name);
+    if (key && emp.phone) dirPhoneByName.set(key, emp.phone);
+  }
+
+  // Build phone + email sets from all QBO entities for cross-source dedup
+  // Include employees so their personal numbers don't create duplicate SA-only entries
+  const qboPhones = new Set();
+  const qboEmails = new Set();
+  for (const e of [...customers, ...vendors, ...qboEmployees]) {
+    for (const num of [e.PrimaryPhone?.FreeFormNumber, e.Mobile?.FreeFormNumber, e.AlternatePhone?.FreeFormNumber]) {
+      const n = normalizePhone(num);
+      if (n.length >= 7) qboPhones.add(n);
+    }
+    const em = e.PrimaryEmailAddr?.Address?.toLowerCase();
+    if (em) qboEmails.add(em);
+  }
+
+  // Build SA lookup maps (address overlay + SA-only detection)
+  const saByQboId = new Map();
+  const saByName  = new Map();
+  for (const c of saAccounts) {
+    const addr = c.address ? { Line1: c.address, City: c.city, State: c.state, Zip: c.zip } : null;
+    if (!addr) continue;
+    if (c.qboId) saByQboId.set(c.qboId, addr);
+    const key = normalizeName(c.name);
+    if (key) saByName.set(key, addr);
+  }
+
+  function saAddrFor(entity) {
+    return saByQboId.get(String(entity.Id))
+      || saByName.get(normalizeName(entity.DisplayName || ''))
+      || null;
+  }
+
+  // Group QBO sub-customers under their parent so they appear as one contact
+  // with multiple addresses instead of separate duplicate entries
+  const customerIds = new Set(customers.map(c => String(c.Id)));
+  const byParent = new Map();
+  for (const c of customers) {
+    if (c.Job && c.ParentRef?.value && customerIds.has(c.ParentRef.value)) {
+      const pid = c.ParentRef.value;
+      if (!byParent.has(pid)) byParent.set(pid, []);
+      byParent.get(pid).push(c);
+    }
+  }
+  const childIds = new Set(
+    customers
+      .filter(c => c.Job && c.ParentRef?.value && customerIds.has(c.ParentRef.value))
+      .map(c => String(c.Id))
+  );
+
+  const qboVcards = customers
+    .filter(c => !childIds.has(String(c.Id)))
+    .map(c => {
+      const children = byParent.get(String(c.Id)) ?? [];
+      const extraAddrs = children.flatMap(child => {
+        const sa = saAddrFor(child);
+        if (sa?.Line1) return [sa];
+        const qbo = (child.ShipAddr?.Line1 ? child.ShipAddr : child.BillAddr) ?? {};
+        return qbo.Line1
+          ? [{ Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode }]
+          : [];
+      });
+      return entityToVCard(c, 'customer', saAddrFor(c), extraAddrs);
+    });
+
+  // SA-only contacts: in SA but not matched to any active QBO customer by name.
+  // SA's QboID sync is not configured, so we name-match instead of ID-match.
+  // SA bulk list has no phone fields — requires per-account GetClientInfo.
+  // Leads are prioritized first so they always make it within the fetch cap.
+  const qboNormalizedNames = new Set(customers.map(c => normalizeName(c.DisplayName || '')));
+  const saOnlyRaw = saAccounts
+    .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)) && !c.type.toLowerCase().includes('closed'))
+    .sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
+
+  // Fetch per-account phone numbers for the top N SA-only contacts (leads first).
+  // SA bulk list phone fields are often empty — GetClientInfo gives the definitive number.
+  // Contacts beyond the cap fall back to the bulk-list phone (if populated) or appear
+  // address-only. No contact is silently excluded just because it's past position N.
+  const PHONE_FETCH_CAP = 150;
+  const PHONE_CONCURRENCY = 5;
+  const saOnlyForPhones = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
+  // saDetailById tracks every account that was attempted via GetClientInfo so the outer map
+  // can distinguish "API returned no data" from "account was never fetched" and apply
+  // bulk-list fallbacks only to beyond-cap accounts.
+  // GetClientInfo returns both phone AND address in one call — no extra API cost.
+  const saDetailById = new Map();
+  try {
+    for (let i = 0; i < saOnlyForPhones.length; i += PHONE_CONCURRENCY) {
+      const batch = saOnlyForPhones.slice(i, i + PHONE_CONCURRENCY);
+      const batchResults = await Promise.all(
+        batch.map(async c => {
+          try {
+            const detail = await getSAClientDetails(c.clientId);
+            return [c.clientId, {
+              homePhone:  detail.homePhone  || null,
+              cellPhone:  detail.cellPhone  || null,
+              workPhone:  detail.workPhone  || null,
+              otherPhone: detail.otherPhone || null,
+              address: detail.address || null, city: detail.city, state: detail.state, zip: detail.zip,
+            }];
+          } catch {
+            // API error — fall back to bulk-list data; bulk collapses to one phone so put it in homePhone
+            return [c.clientId, {
+              homePhone: c.phone || null, cellPhone: null, workPhone: null, otherPhone: null,
+              address: c.address || null, city: c.city, state: c.state, zip: c.zip,
+            }];
+          }
+        })
+      );
+      for (const [id, detail] of batchResults) saDetailById.set(id, detail); // Store null phone/addr to mark "fetched"
+    }
+  } catch (err) {
+    logger.warn('CardDAV: SA detail fetch failed, using bulk-list data only', { err: err.message });
+    // Preserve any API-fetched entries; add bulk data only for unfetched accounts.
+    for (const c of saOnlyForPhones) {
+      if (!saDetailById.has(c.clientId)) {
+        saDetailById.set(c.clientId, {
+          homePhone: c.phone || null, cellPhone: null, workPhone: null, otherPhone: null,
+          address: c.address || null, city: c.city, state: c.state, zip: c.zip,
+        });
+      }
+    }
+  }
+
+  // All SA-only contacts, not just those within the phone-fetch cap.
+  // Within-cap: API phone+address (may be null/empty); beyond-cap: bulk-list data.
+  // API address takes priority over bulk-list address when both exist.
+  // Drop only if no phone AND no address; drop if phone duplicates a QBO contact.
+  const saOnlyDeduped = saOnlyRaw
+    .map(c => {
+      const detail = saDetailById.get(c.clientId);
+      const apiAddr = detail?.address || null;
+      // API returns all four phone fields; bulk list collapses to one phone.
+      // Fall back to bulk-list phone (in homePhone slot) when API returned no phones at all —
+      // covers beyond-cap accounts (detail undefined) and accounts whose phones are only in
+      // SA's Phone1/PhoneNumber fields that GetClientInfo doesn't check.
+      const homePhone  = detail?.homePhone  || null;
+      const cellPhone  = detail?.cellPhone  || null;
+      const workPhone  = detail?.workPhone  || null;
+      const otherPhone = detail?.otherPhone || null;
+      const effectiveHomePhone = homePhone || (!(cellPhone || workPhone || otherPhone) ? (c.phone || null) : null);
+      const phone = effectiveHomePhone || cellPhone || workPhone || otherPhone || null;
+      return {
+        ...c,
+        homePhone: effectiveHomePhone, cellPhone, workPhone, otherPhone, phone,
+        address: apiAddr || c.address || null,
+        city:    apiAddr ? detail.city : c.city,
+        state:   apiAddr ? detail.state : c.state,
+        zip:     apiAddr ? detail.zip : c.zip,
+      };
+    })
+    .filter(c => {
+      if (!c.phone && !c.address) return false;
+      // Drop if any phone matches a QBO contact (same person — QBO is authoritative)
+      for (const ph of [c.homePhone, c.cellPhone, c.workPhone, c.otherPhone]) {
+        if (ph) {
+          const n = normalizePhone(ph);
+          if (n.length >= 7 && qboPhones.has(n)) return false;
+        }
+      }
+      return true;
+    });
+  const saOnlyVcards = saOnlyDeduped.map(saClientToVCard);
+
+  // Build employee vCards: QBO active employees + SharePoint directory phone overlay
+  const employeeVcards = qboEmployees.map(emp => {
+    const nameKey = normalizeName([emp.GivenName, emp.FamilyName].filter(Boolean).join(' ') || emp.DisplayName || '');
+    const dirPhone = dirPhoneByName.get(nameKey) ?? null;
+    return employeeToVCard(emp, dirPhone);
+  });
+
+  _cache = [
+    ...qboVcards,
+    ...vendors.map(v => entityToVCard(v, 'vendor', null)),
+    ...saOnlyVcards,
+    ...employeeVcards,
+  ];
+  _cacheTime = Date.now();
+  _cacheEtag = crypto.createHash('md5').update(String(_cacheTime)).digest('hex');
+  logger.info('CardDAV: cache refreshed', {
+    qboCustomers: qboVcards.length,
+    vendors: vendors.length,
+    saAccounts: saAccounts.length,
+    saOnlyRaw: saOnlyRaw.length,
+    saOnly: saOnlyVcards.length,
+    saOnlyDropped: saOnlyRaw.length - saOnlyDeduped.length,
+    employees: employeeVcards.length,
+  });
+  return _cache;
+}
+
+// ── vCard builder ─────────────────────────────────────────────
+
+function escapeVCard(s) {
+  return (s ?? '').replace(/\\/g, '\\\\').replace(/,/g, '\\,').replace(/;/g, '\\;').replace(/\n/g, '\\n');
+}
+
+function entityToVCard(entity, type, saAddr, extraAddrs = []) {
+  const uid = `JRB-${type.toUpperCase()}-${entity.Id}@jrboehlke.com`;
+  const givenName  = escapeVCard(entity.GivenName  ?? '');
+  const familyName = escapeVCard(entity.FamilyName ?? '');
+  const company    = escapeVCard(entity.CompanyName ?? '');
+  // FN: prefer "First Last" when structured name is available so iOS Contacts
+  // shows the person's name, with company appearing in the separate ORG field.
+  // Fall back to DisplayName (which may be the company name) only when no
+  // individual name parts exist.
+  const name = (givenName || familyName)
+    ? escapeVCard([entity.GivenName, entity.FamilyName].filter(Boolean).join(' '))
+    : escapeVCard(entity.DisplayName || entity.CompanyName || 'Unknown');
+
+  const primaryPhone = entity.PrimaryPhone?.FreeFormNumber ?? '';
+  const mobilePhone  = entity.Mobile?.FreeFormNumber ?? '';
+  const altPhone     = entity.AlternatePhone?.FreeFormNumber ?? '';
+  const faxPhone     = entity.Fax?.FreeFormNumber ?? '';
+
+  const email = entity.PrimaryEmailAddr?.Address ?? '';
+
+  // Primary address: SA service address takes priority over QBO ShipAddr/BillAddr
+  let primaryAddr;
+  if (saAddr?.Line1) {
+    primaryAddr = saAddr;
+  } else {
+    const qbo = (type === 'customer' ? (entity.ShipAddr?.Line1 ? entity.ShipAddr : entity.BillAddr) : entity.BillAddr) ?? {};
+    primaryAddr = qbo.Line1 ? { Line1: qbo.Line1, City: qbo.City, State: qbo.CountrySubDivisionCode, Zip: qbo.PostalCode } : null;
+  }
+
+  // Collect all unique addresses (primary + sub-customer extras)
+  const allAddrs = [];
+  const seenAddrs = new Set();
+  for (const a of [primaryAddr, ...extraAddrs]) {
+    if (a?.Line1 && !seenAddrs.has(a.Line1)) {
+      allAddrs.push(a);
+      seenAddrs.add(a.Line1);
+    }
+  }
+
+  const category = type === 'customer' ? 'JRB Customer' : 'JRB Vendor';
+
+  // Deduplicate phone entries so the same number doesn't appear twice
+  const seen = new Set();
+  function tel(number, telType) {
+    const n = (number || '').trim();
+    if (!n || seen.has(n)) return null;
+    seen.add(n);
+    return `TEL;TYPE=${telType}:${escapeVCard(n)}`;
+  }
+
+  const lines = [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    `UID:${uid}`,
+    `FN:${name}`,
+    `N:${familyName};${givenName};;;`,
+    company ? `ORG:${company}` : null,
+    tel(primaryPhone, 'WORK,VOICE'),
+    tel(mobilePhone, 'CELL,VOICE'),
+    tel(altPhone, 'WORK,VOICE'),
+    tel(faxPhone, 'WORK,FAX'),
+    email ? `EMAIL;TYPE=WORK:${escapeVCard(email)}` : null,
+    ...allAddrs.map(a => `ADR;TYPE=WORK:;;${escapeVCard(a.Line1)};${escapeVCard(a.City ?? '')};${escapeVCard(a.State ?? '')};${escapeVCard(a.Zip ?? '')};US`),
+    `CATEGORIES:${category}`,
+    `NOTE:${uid}`,
+    'END:VCARD',
+  ].filter(Boolean).join('\r\n');
+
+  const etag = crypto.createHash('md5').update(uid + name + primaryPhone + mobilePhone + altPhone + email + allAddrs.map(a => a.Line1).join('|')).digest('hex');
+  return { uid, etag, vcard: lines };
+}
+
+function saClientToVCard(client) {
+  const uid = `JRB-SA-${client.clientId}@jrboehlke.com`;
+  // SA stores names as "Last, First" — reformat to "First Last" for FN field
+  const raw = client.name || '';
+  const parts = raw.split(',');
+  let givenName = '', familyName = '', fn;
+  if (parts.length === 2) {
+    familyName = escapeVCard(parts[0].trim());
+    givenName  = escapeVCard(parts[1].trim());
+    fn = escapeVCard(`${parts[1].trim()} ${parts[0].trim()}`);
+  } else {
+    fn = escapeVCard(raw);
+  }
+
+  const tel = (num, type) => num ? `TEL;TYPE=${type}:${escapeVCard(num)}` : null;
+  const seen = new Set();
+  const telLine = (num, type) => {
+    if (!num) return null;
+    const n = normalizePhone(num);
+    if (seen.has(n)) return null;
+    seen.add(n);
+    return tel(num, type);
+  };
+
+  const lines = [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    `UID:${uid}`,
+    `FN:${fn}`,
+    `N:${familyName};${givenName};;;`,
+    telLine(client.homePhone,  'HOME,VOICE'),
+    telLine(client.cellPhone,  'CELL,VOICE'),
+    telLine(client.workPhone,  'WORK,VOICE'),
+    telLine(client.otherPhone, 'VOICE'),
+    client.address ? `ADR;TYPE=WORK:;;${escapeVCard(client.address)};${escapeVCard(client.city ?? '')};${escapeVCard(client.state ?? '')};${escapeVCard(client.zip ?? '')};US` : null,
+    'CATEGORIES:JRB Customer',
+    `NOTE:${uid}`,
+    'END:VCARD',
+  ].filter(Boolean).join('\r\n');
+
+  const allPhones = [client.homePhone, client.cellPhone, client.workPhone, client.otherPhone].filter(Boolean).join('|');
+  const etag = crypto.createHash('md5').update(uid + fn + allPhones + (client.address ?? '')).digest('hex');
+  return { uid, etag, vcard: lines };
+}
+
+function employeeToVCard(emp, dirPhone) {
+  const uid = `JRB-EMPLOYEE-${emp.Id}@jrboehlke.com`;
+  const givenName  = escapeVCard(emp.GivenName  ?? '');
+  const familyName = escapeVCard(emp.FamilyName ?? '');
+  const name = (givenName || familyName)
+    ? escapeVCard([emp.GivenName, emp.FamilyName].filter(Boolean).join(' '))
+    : escapeVCard(emp.DisplayName || 'Unknown');
+
+  const primaryPhone = emp.PrimaryPhone?.FreeFormNumber ?? '';
+  const mobilePhone  = emp.Mobile?.FreeFormNumber ?? '';
+  const email = emp.PrimaryEmailAddr?.Address ?? '';
+
+  const addr = emp.PrimaryAddr;
+
+  const seen = new Set();
+  function tel(number, telType) {
+    const n = (number || '').trim();
+    if (!n || seen.has(n)) return null;
+    seen.add(n);
+    return `TEL;TYPE=${telType}:${escapeVCard(n)}`;
+  }
+
+  const lines = [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    `UID:${uid}`,
+    `FN:${name}`,
+    `N:${familyName};${givenName};;;`,
+    'ORG:J.R. Boehlke',
+    tel(dirPhone, 'CELL,VOICE'),
+    tel(primaryPhone, 'WORK,VOICE'),
+    tel(mobilePhone, 'CELL,VOICE'),
+    email ? `EMAIL;TYPE=WORK:${escapeVCard(email)}` : null,
+    addr?.Line1 ? `ADR;TYPE=WORK:;;${escapeVCard(addr.Line1)};${escapeVCard(addr.City ?? '')};${escapeVCard(addr.CountrySubDivisionCode ?? '')};${escapeVCard(addr.PostalCode ?? '')};US` : null,
+    'CATEGORIES:JRB Employee',
+    `NOTE:${uid}`,
+    'END:VCARD',
+  ].filter(Boolean).join('\r\n');
+
+  const etag = crypto.createHash('md5').update(uid + name + (dirPhone ?? '') + primaryPhone + mobilePhone + email + (addr?.Line1 ?? '')).digest('hex');
+  return { uid, etag, vcard: lines };
+}
+
+// ── Per-user exclusion list ───────────────────────────────────
+
+async function getUserExclusions(credentialId) {
+  const { data } = await supabase
+    .from('carddav_exclusions')
+    .select('uid')
+    .eq('credential_id', credentialId);
+  return new Set((data ?? []).map(r => r.uid));
+}
+
+// ── Credential check ──────────────────────────────────────────
+
+export async function checkCredentials(username, password) {
+  const { data } = await supabase
+    .from('carddav_credentials')
+    .select('id, name, active')
+    .eq('email', username.toLowerCase())
+    .eq('token', password)
+    .single();
+
+  if (!data || !data.active) return null;
+
+  // Update last_used async (don't await)
+  supabase.from('carddav_credentials').update({ last_used: new Date().toISOString() }).eq('id', data.id).then(() => {});
+  return data;
+}
+
+// ── XML helpers ───────────────────────────────────────────────
+
+function xmlResponse(status, body) {
+  return { status, headers: { 'Content-Type': 'application/xml; charset=utf-8' }, body: `<?xml version="1.0" encoding="utf-8"?>\n${body}` };
+}
+
+// ── CardDAV request handler ───────────────────────────────────
+// Called from teams/bot.js for requests under /carddav/
+
+export async function handleCardDAV(req, res) {
+  const method = req.method.toUpperCase();
+  const path = req.path;
+
+  // Basic auth
+  const authHeader = req.headers.authorization ?? '';
+  const [scheme, encoded] = authHeader.split(' ');
+  if (scheme?.toLowerCase() !== 'basic' || !encoded) {
+    res.set('WWW-Authenticate', 'Basic realm="JRB Contacts"');
+    return res.status(401).send('Authentication required');
+  }
+
+  const [username, ...rest] = Buffer.from(encoded, 'base64').toString('utf8').split(':');
+  const password = rest.join(':');
+  const user = await checkCredentials(username, password);
+
+  if (!user) {
+    res.set('WWW-Authenticate', 'Basic realm="JRB Contacts"');
+    return res.status(401).send('Invalid credentials');
+  }
+
+  // OPTIONS — announce CardDAV support
+  if (method === 'OPTIONS') {
+    res.set('DAV', '1, 3, addressbook');
+    res.set('Allow', 'OPTIONS, GET, HEAD, PROPFIND, REPORT, DELETE');
+    return res.status(200).send('');
+  }
+
+  // Well-known redirect → principal
+  if (method === 'GET' && path === '/carddav') {
+    return res.redirect(301, '/carddav/');
+  }
+
+  // PROPFIND on principal or root → point to addressbook home
+  if (method === 'PROPFIND' && (path === '/carddav/' || path === '/carddav')) {
+    res.set('DAV', '1, 3, addressbook');
+    const xml = `<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/carddav/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal><D:href>/carddav/principal/</D:href></D:current-user-principal>
+        <D:resourcetype><D:collection/></D:resourcetype>
+        <C:addressbook-home-set><D:href>/carddav/addressbooks/</D:href></C:addressbook-home-set>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>`;
+    return res.status(207).set('Content-Type', 'application/xml; charset=utf-8').send(`<?xml version="1.0" encoding="utf-8"?>\n${xml}`);
+  }
+
+  // PROPFIND on principal
+  if (method === 'PROPFIND' && path.startsWith('/carddav/principal')) {
+    res.set('DAV', '1, 3, addressbook');
+    const xml = `<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/carddav/principal/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:current-user-principal><D:href>/carddav/principal/</D:href></D:current-user-principal>
+        <C:addressbook-home-set><D:href>/carddav/addressbooks/</D:href></C:addressbook-home-set>
+        <D:displayname>${escapeVCard(user.name)}</D:displayname>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>`;
+    return res.status(207).set('Content-Type', 'application/xml; charset=utf-8').send(`<?xml version="1.0" encoding="utf-8"?>\n${xml}`);
+  }
+
+  // PROPFIND on addressbook home → list addressbooks
+  if (method === 'PROPFIND' && path.startsWith('/carddav/addressbooks')) {
+    res.set('DAV', '1, 3, addressbook');
+    const contacts = await getContacts();
+    const xml = `<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+  <D:response>
+    <D:href>/carddav/addressbooks/jrb/</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:resourcetype><D:collection/><C:addressbook/></D:resourcetype>
+        <D:displayname>JRB Contacts</D:displayname>
+        <D:getctag>${_cacheEtag ?? 'init'}</D:getctag>
+        <D:sync-token>/carddav/sync/${_cacheEtag ?? 'init'}</D:sync-token>
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>
+</D:multistatus>`;
+    return res.status(207).set('Content-Type', 'application/xml; charset=utf-8').send(`<?xml version="1.0" encoding="utf-8"?>\n${xml}`);
+  }
+
+  // REPORT or PROPFIND on addressbook itself — return all contact ETags + hrefs
+  if ((method === 'REPORT' || method === 'PROPFIND') && path.startsWith('/carddav/addressbooks/jrb')) {
+    // Check if this is a request for full vcard data or just props
+    const bodyStr = req.body?.toString?.() ?? '';
+    const wantsAddressData = bodyStr.includes('address-data') || bodyStr.includes('addressbook-multiget');
+
+    res.set('DAV', '1, 3, addressbook');
+    const [allContacts, exclusions] = await Promise.all([getContacts(), getUserExclusions(user.id)]);
+    const contacts = allContacts.filter(c => !exclusions.has(c.uid));
+
+    const responses = contacts.map(c => {
+      const vcardBlock = wantsAddressData
+        ? `<C:address-data>${c.vcard.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</C:address-data>`
+        : '';
+      return `  <D:response>
+    <D:href>/carddav/addressbooks/jrb/${c.uid}.vcf</D:href>
+    <D:propstat>
+      <D:prop>
+        <D:getetag>"${c.etag}"</D:getetag>
+        ${vcardBlock}
+      </D:prop>
+      <D:status>HTTP/1.1 200 OK</D:status>
+    </D:propstat>
+  </D:response>`;
+    }).join('\n');
+
+    const xml = `<D:multistatus xmlns:D="DAV:" xmlns:C="urn:ietf:params:xml:ns:carddav">
+${responses}
+</D:multistatus>`;
+    return res.status(207).set('Content-Type', 'application/xml; charset=utf-8').send(`<?xml version="1.0" encoding="utf-8"?>\n${xml}`);
+  }
+
+  // GET / DELETE individual vCard
+  const vcfMatch = path.match(/\/carddav\/addressbooks\/jrb\/(.+)\.vcf$/);
+  if (vcfMatch) {
+    const uid = decodeURIComponent(vcfMatch[1]);
+
+    // DELETE — add to this user's exclusion list so it never comes back
+    if (method === 'DELETE') {
+      await supabase
+        .from('carddav_exclusions')
+        .upsert({ credential_id: user.id, uid }, { onConflict: 'credential_id,uid' });
+      return res.status(204).send('');
+    }
+
+    if (method === 'GET') {
+      const [contacts, exclusions] = await Promise.all([getContacts(), getUserExclusions(user.id)]);
+      const contact = contacts.find(c => c.uid === uid && !exclusions.has(c.uid));
+      if (!contact) return res.status(404).send('Not found');
+      return res.status(200)
+        .set('Content-Type', 'text/vcard; charset=utf-8')
+        .set('ETag', `"${contact.etag}"`)
+        .send(contact.vcard);
+    }
+  }
+
+  return res.status(404).send('Not found');
+}
+
+// ── Credential management helpers (called from agent tools) ───
+
+export async function provisionCredential({ email, name }) {
+  const token = crypto.randomBytes(9).toString('base64url'); // 12 chars, easier to type on phone
+  const { data, error } = await supabase
+    .from('carddav_credentials')
+    .upsert({ email: email.toLowerCase(), name, token, active: true }, { onConflict: 'email' })
+    .select()
+    .single();
+  if (error) throw error;
+  return { email, name, token, server: 'https://agent.jrboehlke.com/carddav/' };
+}
+
+export async function revokeCredential(email) {
+  const { error } = await supabase
+    .from('carddav_credentials')
+    .update({ active: false })
+    .eq('email', email.toLowerCase());
+  if (error) throw error;
+  return { revoked: email };
+}
+
+export async function listCredentials() {
+  const { data, error } = await supabase
+    .from('carddav_credentials')
+    .select('email, name, active, created_at, last_used')
+    .order('name');
+  if (error) throw error;
+  return data;
+}
