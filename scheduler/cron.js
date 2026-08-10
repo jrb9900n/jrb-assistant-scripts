@@ -267,7 +267,7 @@ const SCHEDULED_TASKS = [
     schedule: '0 * * * *',
     name: 'fleetops_healthcheck',
     run: async () => {
-      const { runFleetopsHealthcheck } = await import('../agent/tools/impl/fleetops-healthcheck.js');
+      const { runFleetopsHealthcheck } = await import('../tools/impl/fleetops-healthcheck.js');
       const result = await runFleetopsHealthcheck();
       logger.info('fleetops_healthcheck complete', result);
     },
