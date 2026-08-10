@@ -948,29 +948,37 @@ export async function setClientBillingDefaults({ clientId }) {
  * no billing values, no invoice/line-item data. Never creates a new SA client.
  * Returns { clientId, previousQboId, newQboId, savedViaApi }
  */
-export async function setClientQboId({ clientId, qboId }) {
+function parseSaDate(v) {
+  if (!v) return { Month: -1, Day: -1, Year: -1 };
+  if (typeof v === 'object' && 'Month' in v && 'Day' in v && 'Year' in v) {
+    const { Month, Day, Year } = v;
+    if (Month > 0 && Day > 0 && Year > 0) {
+      const dt = new Date(Year, Month - 1, Day);
+      if (dt.getMonth() + 1 === Month && dt.getDate() === Day) return { Month, Day, Year };
+    }
+    return { Month: -1, Day: -1, Year: -1 };
+  }
+  const ms = String(v).match(/\/Date\((-?\d+)\)\//);
+  const dt = ms ? new Date(parseInt(ms[1])) : new Date(v);
+  if (isNaN(dt.getTime())) return { Month: -1, Day: -1, Year: -1 };
+  return { Month: dt.getMonth() + 1, Day: dt.getDate(), Year: dt.getFullYear() };
+}
+
+/**
+ * Read-modify-write an SA client via ClientEditOverlayWs.asmx, round-tripping
+ * the full record from GetClientInfo unchanged except for whatever's in
+ * `overrides`. Full field list confirmed from a real SaveClient capture
+ * 2026-07-31/08-03 (setClientQboId, setClientBillingDefaults). `expect` is an
+ * optional {field: expectedValue} map checked against a fresh GetClientInfo
+ * read after saving — SA returns HTTP 500 for QBO-linked clients on a known
+ * server-side post-save-sync bug even when the write succeeded, so the
+ * response status is never trusted, only a fresh read.
+ */
+export async function saveClientFields({ clientId, overrides = {}, expect = {} }) {
   const infoRes = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
     { ClientID: clientId }, 'Clients.aspx');
   const d = infoRes.data?.d;
-  if (!d) throw new Error(`SA setClientQboId: GetClientInfo failed for ${clientId}: ${infoRes.text?.slice(0, 200)}`);
-
-  function parseSaDate(v) {
-    if (!v) return { Month: -1, Day: -1, Year: -1 };
-    if (typeof v === 'object' && 'Month' in v && 'Day' in v && 'Year' in v) {
-      const { Month, Day, Year } = v;
-      if (Month > 0 && Day > 0 && Year > 0) {
-        const dt = new Date(Year, Month - 1, Day);
-        if (dt.getMonth() + 1 === Month && dt.getDate() === Day) return { Month, Day, Year };
-      }
-      return { Month: -1, Day: -1, Year: -1 };
-    }
-    const ms = String(v).match(/\/Date\((-?\d+)\)\//);
-    const dt = ms ? new Date(parseInt(ms[1])) : new Date(v);
-    if (isNaN(dt.getTime())) return { Month: -1, Day: -1, Year: -1 };
-    return { Month: dt.getMonth() + 1, Day: dt.getDate(), Year: dt.getFullYear() };
-  }
-
-  const previousQboId = d.QboID || '';
+  if (!d) throw new Error(`SA saveClientFields: GetClientInfo failed for ${clientId}: ${infoRes.text?.slice(0, 200)}`);
 
   const info = {
     ClientID: clientId, IsLead: false, saveType: 0, IsConvertingLead: false,
@@ -981,7 +989,7 @@ export async function setClientQboId({ clientId, qboId }) {
     WorkPhone: d.WorkPhone || '', OtherPhone: d.OtherPhone || '', FaxNumber: d.FaxNumber || '',
     PreferredPhoneID: d.PreferredPhoneID || '1', ClientTitle: d.ClientTitle || '',
     ListID: d.ListID || EMPTY_GUID,
-    QboID: qboId,                                                    // ← only field being changed
+    QboID: d.QboID || '',
     PropertyName: d.PropertyName || '', PropertyNameAttentionTo: d.PropertyNameAttentionTo || '',
     Address: d.Address || '', AddressTwo: d.AddressTwo || '', City: d.City || '',
     StateID: d.StateInfo?.Value || EMPTY_GUID, PostalCode: d.PostalCode || '',
@@ -1005,10 +1013,10 @@ export async function setClientQboId({ clientId, qboId }) {
     BillingDate: parseSaDate(d.BillingDate), AutoCharge: d.AutoCharge || false,
     BillingNotes: d.BillingNotes || '', PaymentMethodID: d.PaymentMethodInfo?.Value || EMPTY_GUID,
     SalesTaxRefID: d.SalesTaxInfo?.Value || EMPTY_GUID,
-    SalesTaxCodeID: d.SalesTaxCodeInfo?.Value || EMPTY_GUID,          // preserve existing tax setting exactly
+    SalesTaxCodeID: d.SalesTaxCodeInfo?.Value || EMPTY_GUID,
     InvoiceFrequencyID: d.InvoiceFrequencyInfo?.Value || EMPTY_GUID,
     StandardTermID: d.StandardTermInfo?.Value || EMPTY_GUID,
-    SendInvoiceBy: d.SendInvoiceBy || 'Email',                        // preserve existing, don't force
+    SendInvoiceBy: d.SendInvoiceBy || 'Email',
     DefaultInvoiceFormatID: d.DefaultInvoiceInfo?.Value || EMPTY_GUID,
     OfficeNotes: d.OfficeNotes || '',
     CCFirstName: d.CCFirstName || '', CCLastName: d.CCLastName || '',
@@ -1016,29 +1024,37 @@ export async function setClientQboId({ clientId, qboId }) {
     CCNumber: d.CCNumber || '', CCExpiration: d.CCExpiration || '', CCToken: d.CCToken || '',
     CCCustomerToken: d.CCCustomerToken || '', CCBrand: d.CCBrand || '',
     Geocode: false, ManualGeocode: false, UpdateManualGeocodeFlag: false,
+    ...overrides,
   };
 
   const saveRes = await post('/webservices/ClientEditOverlayWs.asmx/SaveClient', { info }, 'ClientView.aspx');
   const result = saveRes.data?.d;
   if (result?.response?.Errors?.length > 0) {
-    throw new Error(`SA setClientQboId SaveClient errors: ${JSON.stringify(result.response.Errors)}`);
+    throw new Error(`SA saveClientFields SaveClient errors: ${JSON.stringify(result.response.Errors)}`);
   }
 
-  // Verify via a fresh GetClientInfo read rather than trusting the SaveClient response —
-  // SA returns 500 for QBO-linked clients due to a known server-side post-save sync bug
-  // (see setClientBillingDefaults), even when the underlying field write succeeded.
   const verifyRes = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
     { ClientID: clientId }, 'Clients.aspx');
-  const verifiedQboId = verifyRes.data?.d?.QboID || '';
+  const verify = verifyRes.data?.d || {};
   const savedViaApi = saveRes.status !== 500;
   if (!savedViaApi) {
     logger.warn('SA: SaveClient returned 500 (known SA QBO-sync bug) — verified via GetClientInfo instead', { clientId });
   }
-  if (verifiedQboId !== qboId) {
-    throw new Error(`SA setClientQboId: verification failed — expected QboID ${qboId}, GetClientInfo shows "${verifiedQboId}"`);
+  for (const [field, expected] of Object.entries(expect)) {
+    if (verify[field] !== expected) {
+      throw new Error(`SA saveClientFields: verification failed — expected ${field}="${expected}", GetClientInfo shows "${verify[field]}"`);
+    }
   }
-  logger.info('SA: QboID set and verified', { clientId, previousQboId, newQboId: qboId, savedViaApi });
-  return { clientId, previousQboId, newQboId: qboId, savedViaApi };
+  return verify;
+}
+
+/** Thin wrapper over saveClientFields for the single QboID field. */
+export async function setClientQboId({ clientId, qboId }) {
+  const before = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo', { ClientID: clientId }, 'Clients.aspx');
+  const previousQboId = before.data?.d?.QboID || '';
+  await saveClientFields({ clientId, overrides: { QboID: qboId }, expect: { QboID: qboId } });
+  logger.info('SA: QboID set and verified', { clientId, previousQboId, newQboId: qboId });
+  return { clientId, previousQboId, newQboId: qboId };
 }
 
 /**
