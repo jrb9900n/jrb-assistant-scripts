@@ -11,6 +11,71 @@ const BASE = `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REAL
 
 const getToken = getQBAccessToken;
 
+// ── Payment method cleanup ────────────────────────────────────
+
+/**
+ * Deactivates a QBO PaymentMethod list entry via sparse update. Used to
+ * retire a duplicate entry (e.g. "Visa***DUP") without deleting it —
+ * QBO doesn't support hard-deleting list entries that may be referenced
+ * by historical transactions, only deactivating them.
+ */
+export async function deactivatePaymentMethod({ id }) {
+  const token = await getToken();
+  const current = await query({ query: `SELECT Id, SyncToken FROM PaymentMethod WHERE Id = '${id}'` });
+  const syncToken = current?.PaymentMethod?.[0]?.SyncToken;
+  if (syncToken === undefined) throw new Error(`QB deactivatePaymentMethod: PaymentMethod ${id} not found`);
+
+  const res = await axios.post(`${BASE}/paymentmethod`,
+    { Id: id, SyncToken: syncToken, sparse: true, Active: false },
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } });
+  return res.data.PaymentMethod;
+}
+
+/**
+ * Re-points a Payment's PaymentMethodRef via sparse update — a metadata-only
+ * categorization change, never touches TotalAmt, TxnDate, or CustomerRef.
+ */
+export async function updatePaymentMethodRef({ paymentId, newPaymentMethodId }) {
+  const token = await getToken();
+  const current = await query({ query: `SELECT Id, SyncToken FROM Payment WHERE Id = '${paymentId}'` });
+  const syncToken = current?.Payment?.[0]?.SyncToken;
+  if (syncToken === undefined) throw new Error(`QB updatePaymentMethodRef: Payment ${paymentId} not found`);
+
+  const res = await axios.post(`${BASE}/payment`,
+    { Id: paymentId, SyncToken: syncToken, sparse: true, PaymentMethodRef: { value: newPaymentMethodId } },
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } });
+  return res.data.Payment;
+}
+
+/**
+ * Re-points a Customer's ParentRef via sparse update — used to fix
+ * incorrect sub-customer (Job) nesting without touching any transaction data.
+ */
+export async function updateCustomerParent({ customerId, newParentId }) {
+  const token = await getToken();
+  const current = await query({ query: `SELECT Id, SyncToken FROM Customer WHERE Id = '${customerId}'` });
+  const syncToken = current?.Customer?.[0]?.SyncToken;
+  if (syncToken === undefined) throw new Error(`QB updateCustomerParent: Customer ${customerId} not found`);
+
+  const res = await axios.post(`${BASE}/customer`,
+    { Id: customerId, SyncToken: syncToken, sparse: true, ParentRef: { value: newParentId }, Job: true },
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } });
+  return res.data.Customer;
+}
+
+/** Deactivates a QBO Customer via sparse update (QBO has no hard-delete for entities with history). */
+export async function deactivateCustomer({ customerId }) {
+  const token = await getToken();
+  const current = await query({ query: `SELECT Id, SyncToken FROM Customer WHERE Id = '${customerId}'` });
+  const syncToken = current?.Customer?.[0]?.SyncToken;
+  if (syncToken === undefined) throw new Error(`QB deactivateCustomer: Customer ${customerId} not found`);
+
+  const res = await axios.post(`${BASE}/customer`,
+    { Id: customerId, SyncToken: syncToken, sparse: true, Active: false },
+    { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } });
+  return res.data.Customer;
+}
+
 // ── Customer create ───────────────────────────────────────────
 
 /**
