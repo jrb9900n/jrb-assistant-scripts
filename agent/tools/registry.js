@@ -283,14 +283,26 @@ const QB_TOOLS = [
   },
   {
     name: 'identify_unknown_card',
-    description: 'Register an unknown Chase credit card by linking it to an employee. Updates the credit_cards record with the real last-four digits, routes any pending_identification expense stubs to that employee (sends SMS), and creates a QB CreditCard sub-account under the Chase parent. Call this when Michael says "identify card XXXX as [Employee Name]" after an unknown-card Teams alert.',
+    description: 'Register an unknown Chase credit card by linking it to an employee. Updates the credit_cards record with the real last-four digits, routes any pending_identification expense stubs to that employee (sends SMS), and creates a QB CreditCard sub-account under the Chase parent. Call this when Michael says "identify card XXXX as [Employee Name]" after an unknown-card alert.',
     input_schema: {
       type: 'object',
       properties: {
-        lastFour:     { type: 'string', description: '4-digit card number from the Chase alert (digits only, e.g. "3421")' },
+        lastFour:     { type: 'string', description: '4-digit card number (digits only, e.g. "3421")' },
         employeeName: { type: 'string', description: 'Employee name matching the credit_cards table (e.g. "Steffen Jacob")' },
       },
       required: ['lastFour', 'employeeName'],
+    },
+  },
+  {
+    name: 'backfill_expenses_from_qbo',
+    description: 'Fallback for gaps in Chase-poller coverage (outage, expired session, etc): pulls credit card Purchase transactions from QBO\'s bank feed for a date range and creates expense_reports + sends the SMS receipt link for any not already captured. QBO\'s bank feed lags Chase by 1-3 days, so only use this for dates far enough in the past that QBO has likely caught up (not for "right now"). Safe to re-run over the same range -- dedupes against existing expense_reports by card + date + amount, same rule the live poller uses.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        startDate: { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+        endDate:   { type: 'string', description: 'YYYY-MM-DD, inclusive' },
+      },
+      required: ['startDate', 'endDate'],
     },
   },
 ];
@@ -504,6 +516,40 @@ const CODE_TOOLS = [
         state: { type: 'string', enum: ['open', 'closed', 'all'], default: 'open' },
       },
       required: [],
+    },
+  },
+];
+
+const CARDDAV_TOOLS = [
+  {
+    name: 'carddav_provision',
+    description: 'Create or rotate a CardDAV credential for an employee, granting them access to the QBO customer/vendor contacts addressbook on their phone. Returns setup instructions (server URL, username, password).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Employee email address (used as CardDAV username)' },
+        name:  { type: 'string', description: 'Employee display name' },
+      },
+      required: ['email', 'name'],
+    },
+  },
+  {
+    name: 'carddav_revoke',
+    description: 'Deactivate an employee\'s CardDAV credential. They lose access to the contacts addressbook on their next sync.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email: { type: 'string', description: 'Employee email address whose credential should be revoked' },
+      },
+      required: ['email'],
+    },
+  },
+  {
+    name: 'carddav_list',
+    description: 'List all CardDAV credentials with active status and last sync time.',
+    input_schema: {
+      type: 'object',
+      properties: {},
     },
   },
 ];
@@ -796,12 +842,12 @@ const SCHEDULING_TOOLS = [
   },
   {
     name: 'get_waiting_list',
-    description: 'Load unscheduled jobs from the SA waiting list. Each job includes internal_notes (SA job-level scheduling notes — timing preferences, access requirements, special instructions), target_date, amount, and budgeted_hours. Optionally filter by service keyword.',
+    description: 'Load unscheduled jobs from the SA waiting list. Optionally filter by service keyword.',
     input_schema: {
       type: 'object',
       properties: {
         service_filter: { type: 'string', description: 'Keyword to filter by service type, e.g. "app 3" or "fert"' },
-        limit: { type: 'number', description: 'Max records to return (default 2000)', default: 2000 },
+        limit: { type: 'number', description: 'Max records to return', default: 100 },
       },
       required: [],
     },
@@ -820,7 +866,7 @@ const SCHEDULING_TOOLS = [
   },
   {
     name: 'get_weather_forecast',
-    description: 'Get 14-day weather forecast for SE Wisconsin. Each day includes morning (6am-noon), afternoon (noon-6pm), and evening (6pm-10pm) slots with precip_prob and condition. safe_for_fert is true when at least one daytime slot has <40% rain and temp 45-95F. Use slot data to determine if rain is only evening — morning/afternoon work can still proceed.',
+    description: 'Get 14-day weather forecast for SE Wisconsin including safe_for_fert flag per day.',
     input_schema: {
       type: 'object',
       properties: {
@@ -883,21 +929,14 @@ const SCHEDULING_TOOLS = [
 
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
-  crm:        [...QB_TOOLS, ...SA_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
-  // Unattended remediation runs triggered by the self-heal watcher (cron.js) — same as
-  // `code` but WITHOUT github_merge_pr (this runs with no human in the loop, so it must
-  // never be able to merge its own fix — only open a PR for Michael to approve) and
-  // WITHOUT any Teams tool. The watcher sends the final report itself, server-side,
-  // with suppressSelfHeal hardcoded true — trusting the agent to remember to pass that
-  // flag on every response would be a weak boundary for an unsupervised run.
-  auto_fix:   [...CODE_TOOLS.filter(t => t.name !== 'github_merge_pr'), ...FILE_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS.filter(t => ['sa_search_clients','sa_fuzzy_match_client','sa_get_client_profile','sa_get_client_notes','sa_list_resources','sa_dispatch_job','sa_update_route_order'].includes(t.name)), ...TEAMS_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],
 };
 
 export function getTools(taskType) {
