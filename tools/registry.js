@@ -932,6 +932,12 @@ const TOOL_MAP = {
   crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
+  // Unattended investigate-and-fix pass (self_heal_watcher) -- same tools as
+  // 'code' minus github_merge_pr, so it can open a PR for Michael but can
+  // never merge one itself, and no TEAMS_TOOLS since nothing should be
+  // sending arbitrary Teams messages from an unsupervised run. Without this
+  // entry, getTools() falls through to 'general', which grants both.
+  auto_fix:   [...CODE_TOOLS.filter(t => t.name !== 'github_merge_pr'), ...FILE_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
   scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
