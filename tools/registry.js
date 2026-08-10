@@ -153,6 +153,34 @@ const EMAIL_TOOLS = [
     },
   },
   {
+    name: 'run_inbox_processor',
+    description: 'Run the autonomous inbox processor now on michael@jrboehlke.com. Fetches unread emails, classifies priority, moves to folders, creates draft replies for P1 emails, and sends Teams alerts for hot items. Use when Michael asks to "process inbox", "check my email", "triage inbox", or "run the inbox processor".',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_email_triage',
+    description: 'Query the email_triage table — shows already-processed emails from michael@jrboehlke.com with priority, category, intent, and draft status. Use to answer "what did I get today", "any P1 emails", "what needs a response".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        hours: { type: 'number', description: 'How many hours back to look (default: 24)', default: 24 },
+        priority: { type: 'string', description: 'Filter to p1, p2, or p3' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'send_draft_reply',
+    description: 'Send a draft reply that was saved by the inbox processor. Use when Michael says "send it", "send the draft to [name]", or "go ahead and send".',
+    input_schema: {
+      type: 'object',
+      properties: {
+        draft_id: { type: 'string', description: 'Draft ID from email_triage.draft_id' },
+      },
+      required: ['draft_id'],
+    },
+  },
+  {
     name: 'create_reminder',
     description: 'Create a To Do reminder or task in Microsoft 365.',
     input_schema: {
