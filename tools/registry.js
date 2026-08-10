@@ -718,6 +718,120 @@ const SA_TOOLS = [
       required: ['clientId'],
     },
   },
+  {
+    name: 'sa_set_crackfill',
+    description: 'Calculate Lbs of Crackfill (= Pavement Size × 0.015, rounded) and write it to the SA custom field. If pavementSf is provided, also writes it to the Pavement Size field — use this at client intake when you have the value. If omitted, reads Pavement Size from SA. Call after sa_set_billing_defaults whenever pavementSf is known. Returns { clientId, pavementSf, lbsCrackfill, savedViaApi } or { skipped, reason } if Pavement Size is missing/invalid.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId:   { type: 'string', description: 'SA client GUID' },
+        pavementSf: { type: 'number', description: 'Pavement area in sq ft. If supplied, writes this value to the Pavement Size field and calculates crackfill. If omitted, reads Pavement Size from SA.' },
+      },
+      required: ['clientId'],
+    },
+  },
+  {
+    name: 'sa_list_resources',
+    description: 'List SA dispatch board resources (crews/employees available for scheduling). Returns [{ id, name }]. Call before sa_dispatch_job to confirm the resource ID for a crew name.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'sa_dispatch_job',
+    description: 'Dispatch a waiting-list job to a specific date and crew in Service Autopilot. This moves the job off the waiting list onto the schedule. Use the job_id from sa_waiting_list table (job_id column). Requires a SA resource GUID from sa_list_resources.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        wl_item_id:    { type: 'string', description: 'SA waiting list item UUID (sa_waiting_list.job_id)' },
+        schedule_date: { type: 'string', description: 'ISO date to schedule the job, e.g. "2026-06-16"' },
+        resource_id:   { type: 'string', description: 'SA resource/crew GUID from sa_list_resources' },
+      },
+      required: ['wl_item_id', 'schedule_date', 'resource_id'],
+    },
+  },
+  {
+    name: 'sa_update_route_order',
+    description: 'Set the stop sequence order for jobs already dispatched to the SA dispatch board. Pass the same schedule_date used during dispatch and job_ids as an ordered array (index 0 = stop 1). Call this once after all sa_dispatch_job calls complete for the day.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        schedule_date: { type: 'string', description: 'ISO date, e.g. "2026-06-19"' },
+        job_ids:       { type: 'array', items: { type: 'string' }, description: 'Job UUIDs in stop order — first element = stop 1' },
+      },
+      required: ['schedule_date', 'job_ids'],
+    },
+  },
+  {
+    name: 'sa_fuzzy_match_client',
+    description: 'Compare incoming contact form data against a list of SA search results to find duplicate accounts. Handles nicknames (Deborah/Debbie, Robert/Bob, etc.), address abbreviations (St/Street, Dr/Drive), spouse/same-address matches, and normalized phone/email. Returns the best match with a recommendation: USE_EXISTING, USE_EXISTING_VERIFY, or CREATE_NEW.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        incoming: {
+          type: 'object',
+          description: 'Contact data from the web form',
+          properties: {
+            firstName: { type: 'string' },
+            lastName:  { type: 'string' },
+            address:   { type: 'string', description: 'Street address only (no city/state/zip)' },
+            email:     { type: 'string' },
+            phone:     { type: 'string' },
+          },
+        },
+        candidates: {
+          type: 'array',
+          description: 'SA search results from one or more sa_search_clients calls — merge all results before passing here',
+          items: {
+            type: 'object',
+            properties: {
+              clientId:  { type: 'string' },
+              name:      { type: 'string', description: 'Full name as stored in SA' },
+              firstName: { type: 'string' },
+              lastName:  { type: 'string' },
+              address:   { type: 'string' },
+              email:     { type: 'string' },
+              phone:     { type: 'string' },
+            },
+          },
+        },
+      },
+      required: ['incoming', 'candidates'],
+    },
+  },
+  {
+    name: 'sa_get_client_profile',
+    description: 'Fetch scheduling-relevant client profile from SA: office notes (gate codes, property access instructions, special crew notes), billing notes, address, and phone. Call this before scheduling a client\'s jobs to get property context. Also returns custom fields if configured in SA (CustomField1-6).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID from sa_search_clients' },
+      },
+      required: ['clientId'],
+    },
+  },
+  {
+    name: 'sa_get_client_notes',
+    description: 'Fetch recent CRM notes and tickets for a client — call history, site visit notes, consultation records, issue logs. Returns newest first. Useful for scheduling context: know what was discussed, what issues exist, what services were requested.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID' },
+        limit:    { type: 'number', description: 'Max notes to return (default 10)' },
+      },
+      required: ['clientId'],
+    },
+  },
+  {
+    name: 'sa_get_audit_trail',
+    description: 'Pull the Service Autopilot audit trail (history log of who changed what and when) for a single record — invoice, estimate, job, payment, client, or ticket. Returns an array of history entries with a parsed `when` date. Only estimate and invoice types are confirmed working; job/payment/client/ticket are taken from SA\'s own frontend code but unverified against a live record.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        entityId: { type: 'string', description: 'GUID of the record (invoiceId, quoteId, jobId, paymentId, clientId, or ticketId)' },
+        type:     { type: 'string', description: 'Record type: estimate, invoice, job, payment, client, or ticket' },
+      },
+      required: ['entityId', 'type'],
+    },
+  },
 ];
 
 const SCHEDULING_TOOLS = [
