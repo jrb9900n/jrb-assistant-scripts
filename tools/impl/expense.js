@@ -681,32 +681,47 @@ async function handleUnknownCard({ cardLastFour, amount, merchant, transactionDa
 }
 
 function parseChaseAlert(text) {
-  // Card last four: "card ending in 1234", "card ...1234", "XXXX1234"
-  const cardMatch = text.match(/card\s*(?:ending\s*(?:in)?)?\s*\.{0,4}\s*(\d{4})\b/i) ||
-                    text.match(/ending\s*in\s*(\d{4})/i);
+  // Card last four — "card ending in 3468", "ending in 3468", "...3468", "(...3468)"
+  const cardMatch = text.match(
+    /(?:card\s+ending\s+(?:in\s+)?|ending\s+in\s+|\(\.*|\.{2,})\s*(\d{4})/i
+  );
   if (!cardMatch) return null;
   const cardLastFour = cardMatch[1];
 
-  // Amount: "$45.99", "$1,234.56"
+  // Amount — "$47.23", "$1,200.00"
   const amountMatch = text.match(/\$\s*([\d,]+\.\d{2})/);
   if (!amountMatch) return null;
-  const amount = parseFloat(amountMatch[1].replace(/,/g, ''));
+  const amount = parseFloat(amountMatch[1].replace(',', ''));
 
-  // Merchant: "at MERCHANT NAME" or "to MERCHANT NAME" — stop at common trailing words
-  const merchantMatch = text.match(/\b(?:at|to)\s+([A-Z0-9][A-Z0-9 &'.\-\*]{1,40}?)(?:\s+on\b|\s+was\b|\.|,|$)/i);
-  const merchant = merchantMatch ? merchantMatch[1].trim() : 'Unknown Merchant';
+  // Merchant — subject: "You made a $X.XX transaction with MERCHANT NAME"
+  // or body: "at HOME DEPOT on", "transaction at ...", etc.
+  let merchant = 'Unknown Merchant';
+  const merchantPatterns = [
+    /transaction\s+with\s+([A-Z][A-Z0-9 &'.,#\-*]+?)(?:\s*$|\s+on\s|\s+using\s|\s+for\s|\.|,)/im,
+    /\bat\s+([A-Z][A-Z0-9 &'.,#\-*]+?)\s+(?:on\s+\d|using\s+your|for\s+\$|\.|$)/i,
+    /transaction\s+at\s+(.+?)(?:\s+on\s+|\s+for\s+|\.|$)/i,
+    /purchase\s+at\s+(.+?)(?:\s+on\s+|\.|$)/i,
+  ];
+  for (const pat of merchantPatterns) {
+    const m = text.match(pat);
+    if (m && m[1].trim().length > 1) {
+      merchant = m[1].trim().replace(/\s*This transaction is above the level you set\.?/i, '').trim();
+      break;
+    }
+  }
 
-  // Date: "on 05/20/2026", "on May 20", or default to today
-  const dateMatch = text.match(/on\s+(\d{1,2}\/\d{1,2}\/\d{2,4})/i) ||
-                    text.match(/on\s+([A-Z][a-z]+ \d{1,2},?\s*\d{0,4})/i);
-  let transactionDate;
-  if (dateMatch) {
-    const parsed = new Date(dateMatch[1]);
-    transactionDate = isNaN(parsed.getTime())
-      ? new Date().toISOString().slice(0, 10)
-      : parsed.toISOString().slice(0, 10);
-  } else {
-    transactionDate = new Date().toISOString().slice(0, 10);
+  // Date — "05/20/2026", "May 20, 2026", "May 20 2026"
+  let transactionDate = new Date().toISOString().slice(0, 10);
+  const datePatterns = [
+    /\b(\d{1,2})\/(\d{1,2})\/(\d{4})\b/,
+    /\b(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{1,2}),?\s+(\d{4})\b/i,
+  ];
+  for (const pat of datePatterns) {
+    const m = text.match(pat);
+    if (m) {
+      const d = new Date(m[0]);
+      if (!isNaN(d.getTime())) { transactionDate = d.toISOString().slice(0, 10); break; }
+    }
   }
 
   return { cardLastFour, amount, merchant, transactionDate };
