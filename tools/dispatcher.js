@@ -45,6 +45,7 @@ const HANDLERS = {
 
   // CRM / Finance
   qb_query:              (i) => qb.query(i),
+  identify_unknown_card: (i) => expense.identifyUnknownCard(i),
   backfill_expenses_from_qbo: (i) => expense.backfillExpensesFromQbo(i),
 
   // Files / OneDrive

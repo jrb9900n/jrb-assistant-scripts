@@ -254,6 +254,18 @@ const QB_TOOLS = [
     },
   },
   {
+    name: 'identify_unknown_card',
+    description: 'Register an unknown Chase credit card by linking it to an employee. Updates the credit_cards record with the real last-four digits, routes any pending_identification expense stubs to that employee (sends SMS), and creates a QB CreditCard sub-account under the Chase parent. Call this when Michael says "identify card XXXX as [Employee Name]" after an unknown-card alert.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        lastFour:     { type: 'string', description: '4-digit card number (digits only, e.g. "3421")' },
+        employeeName: { type: 'string', description: 'Employee name matching the credit_cards table (e.g. "Steffen Jacob")' },
+      },
+      required: ['lastFour', 'employeeName'],
+    },
+  },
+  {
     name: 'backfill_expenses_from_qbo',
     description: 'Fallback for gaps in Chase-poller coverage (outage, expired session, etc): pulls credit card Purchase transactions from QBO\'s bank feed for a date range and creates expense_reports + sends the SMS receipt link for any not already captured. QBO\'s bank feed lags Chase by 1-3 days, so only use this for dates far enough in the past that QBO has likely caught up (not for "right now"). Safe to re-run over the same range -- dedupes against existing expense_reports by card + date + amount, same rule the live poller uses.',
     input_schema: {
