@@ -19,7 +19,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { sendEmail, draftEmail, getEmail, createReplyDraft, sendDraft } from './m365.js';
-import { runCommissionEngine, currentQuarter } from './commission-engine.js';
+import { runCommissionEngine, currentQuarter, findUnmatchedWonEstimates, findWaitingListJobs } from './commission-engine.js';
 import { sendProactiveMessage } from '../../teams/notify.js';
 import { logger } from '../../core/logger.js';
 
@@ -39,11 +39,11 @@ function fD(d) {
   return parsed.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
 }
 
-// Exact terms from the Accountability Agreement's Salary/Commission Structure
-// section, not the internal category enum, so the commission basis is obvious.
+// Shortened per Michael's spec, 2026-08-04 (was the full Accountability
+// Agreement phrasing — accurate but too long for a table column).
 const CATEGORY_LABEL = {
-  maintenance_snow: 'Landscape Maintenance & Snow Removal Contract',
-  self_performed: 'Self-Performed Asphalt, Concrete, or Landscape Project',
+  maintenance_snow: 'Contract',
+  self_performed: 'Project',
 };
 
 function subcontractorLabel(r) {
@@ -62,49 +62,85 @@ function alertBox(color, borderColor, title, rows) {
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${color};border-left:4px solid ${borderColor};border-radius:4px;margin-bottom:16px;"><tr><td style="padding:12px 16px;"><p style="margin:0 0 8px 0;font-size:12px;font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;color:${borderColor};">${title}</p>${rows}</td></tr></table>`;
 }
 
+const f_pct = n => `${(Number(n || 0) * 100).toFixed(1)}%`;
+const round2 = n => Number(n.toFixed(2));
+
 // No PM/employee column — Jarrett is currently the only employee with an active
 // commission plan, so every row is his and a repeated name is just noise (per
 // Michael, 2026-07-28: "No other employees earn commissions"). Revisit this if
 // a second commissioned PM is ever added — rows for different employees would
 // otherwise interleave in the same table with no way to tell them apart.
+// Column order/set per Michael's spec, 2026-08-04.
 const LEDGER_COLUMNS = [
   { label: 'Client', render: r => r.client_name ?? '—' },
-  { label: 'Service Name', render: r => r.service_names ?? '—' },
-  { label: 'Commission Category', render: r => CATEGORY_LABEL[r.category] ?? r.category },
+  { label: 'Category', render: r => CATEGORY_LABEL[r.category] ?? r.category },
+  { label: 'Line Item', render: r => r.line_item_names ?? '—' },
   { label: 'Estimate #', render: r => r.estimate_number ?? '—' },
   { label: 'Estimate Date', render: r => fD(r.estimate_date) },
-  { label: 'Date Completed', render: r => fD(r.date_completed) },
-  { label: 'Date Paid', render: r => fD(r.date_paid) },
-  { label: 'Invoice Value', render: r => f$(r.invoiced_amount) },
+  { label: 'Invoice #', render: r => r.invoice_number ?? '—' },
+  { label: 'Invoice Date', render: r => fD(r.invoice_date) },
+  { label: 'Invoice Amount', render: r => f$(r.invoiced_amount) },
+  { label: 'Paid Date', render: r => fD(r.date_paid) },
   // The commission engine's payable/paid trigger comes from invoiced_amount
   // minus sa_invoices.invoice_balance (reliable, QBO-synced) -- NOT from
-  // Date Paid (which comes from a separate, sparser sa_payment_applications/
+  // Paid Date (which comes from a separate, sparser sa_payment_applications/
   // sa_payments join, see fetchJobDetails in commission-engine.js). A row can
-  // legitimately show real dollars here with "—" for Date Paid: that's a data-
+  // legitimately show real dollars here with "—" for Paid Date: that's a data-
   // linkage gap in what populates the date, not a sign commission is being
   // paid on unpaid work. This column is the actual proof cash was collected.
-  { label: 'Paid to Date', render: r => f$(r.paid_amount) },
-  { label: 'Subcontractor?', render: r => subcontractorLabel(r) },
+  { label: 'Paid Amount', render: r => f$(r.paid_amount) },
+  { label: 'Subcontracted?', render: r => subcontractorLabel(r) },
+  { label: 'Commission Rate', render: r => f_pct(r.commission_rate) },
 ];
 
-function ledgerTable(rows, amountKey) {
+// Excel-style banding: same client keeps the same shade across however many
+// rows it has (Heather Kehr's 3 rows, Jason Carver's 4, etc.) instead of a
+// plain alternating-by-row-index stripe, which visually chopped a single
+// client's block up for no reason. Rows are already sorted by client first,
+// so the band only needs to flip when client_name actually changes.
+const BAND_COLORS = ['#ffffff', '#eef2f9'];
+function bandColorsByRow(sortedRows) {
+  let band = 0;
+  return sortedRows.map((r, i) => {
+    if (i > 0 && r.client_name !== sortedRows[i - 1].client_name) band = 1 - band;
+    return BAND_COLORS[band];
+  });
+}
+
+function sortByClientThenInvoiceDate(rows) {
+  return [...rows].sort((a, b) => {
+    const clientCmp = (a.client_name ?? '').localeCompare(b.client_name ?? '');
+    if (clientCmp !== 0) return clientCmp;
+    return (a.invoice_date ?? '').localeCompare(b.invoice_date ?? '');
+  });
+}
+
+const GRID_BORDER = '1px solid #d5dae3';
+
+function ledgerTable(rows, amountKey, labelOverrides = {}) {
   if (!rows.length) return `<p style="margin:0 0 10px;font-size:13px;color:#888888;font-style:italic;">None this run.</p>`;
-  const headerCells = LEDGER_COLUMNS.map(c => `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;">${c.label}</td>`).join('')
-    + `<td style="padding:0 8px 4px;font-size:11px;font-weight:bold;color:#888888;text-transform:uppercase;text-align:right;">Commission</td>`;
-  const body = rows.map((r, i) => {
-    const cells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:13px;color:#333333;">${c.render(r)}</td>`).join('');
-    return `<tr style="background-color:${i % 2 ? '#f8f8f8' : '#ffffff'};">${cells}<td style="padding:5px 8px;font-size:13px;color:#1a1a2e;font-weight:bold;text-align:right;white-space:nowrap;">${f$(r[amountKey])}</td></tr>`;
+  const sorted = sortByClientThenInvoiceDate(rows);
+  const bandColors = bandColorsByRow(sorted);
+  const headerCells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#ffffff;background-color:#3a3f5c;text-transform:uppercase;border:${GRID_BORDER};">${labelOverrides[c.label] ?? c.label}</td>`).join('')
+    + `<td style="padding:5px 8px;font-size:11px;font-weight:bold;color:#ffffff;background-color:#3a3f5c;text-transform:uppercase;text-align:right;border:${GRID_BORDER};">Commission Amount</td>`;
+  const body = sorted.map((r, i) => {
+    const rowColor = bandColors[i];
+    const cells = LEDGER_COLUMNS.map(c => `<td style="padding:5px 8px;font-size:13px;color:#333333;background-color:${rowColor};border:${GRID_BORDER};">${c.render(r)}</td>`).join('');
+    // Commission Amount gets its own tint (like a calculated column in Excel)
+    // instead of following the client band, so it stands out as the number
+    // that matters on every row regardless of which client it's on.
+    return `<tr>${cells}<td style="padding:5px 8px;font-size:13px;color:#1a1a2e;font-weight:bold;text-align:right;white-space:nowrap;background-color:#dcecdc;border:${GRID_BORDER};">${f$(r[amountKey])}</td></tr>`;
   }).join('');
-  const total = rows.reduce((s, r) => s + Number(r[amountKey] || 0), 0);
-  return `<div style="overflow-x:auto;"><table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:6px;border-collapse:collapse;white-space:nowrap;">
+  const total = sorted.reduce((s, r) => s + Number(r[amountKey] || 0), 0);
+  return `<div style="overflow-x:auto;"><table role="presentation" cellpadding="0" cellspacing="0" style="margin-bottom:6px;border-collapse:collapse;white-space:nowrap;border:${GRID_BORDER};">
     <tr>${headerCells}</tr>
     ${body}
     <tr style="background-color:#1a1a2e;">
-      <td colspan="${LEDGER_COLUMNS.length}" style="padding:8px;font-size:13px;color:#aaaacc;">Total</td>
-      <td style="padding:8px;font-size:15px;color:#ffffff;font-weight:bold;text-align:right;">${f$(total)}</td>
+      <td colspan="${LEDGER_COLUMNS.length}" style="padding:8px;font-size:13px;color:#aaaacc;border:${GRID_BORDER};">Total</td>
+      <td style="padding:8px;font-size:15px;color:#ffffff;font-weight:bold;text-align:right;border:${GRID_BORDER};">${f$(total)}</td>
     </tr>
   </table></div>
-  <p style="margin:2px 0 14px;font-size:11px;color:#888888;">Estimate #/Date are a best-effort match (no direct link exists from invoice to estimate) — flag if one looks wrong. Service Name/Date Completed/Date Paid can show "—" when the underlying job or payment record hasn't synced from Service Autopilot yet — that's a display gap only; "Paid to Date" is the actual amount collected against the invoice and is what determines whether a row is payable. "Subcontractor?" reflects what's been auto-flagged from QBO vendor bills so far; reply to confirm, reject, or add one I missed.</p>`;
+  <p style="margin:2px 0 14px;font-size:11px;color:#888888;">Estimate #/Date are a best-effort match (no direct link exists from invoice to estimate) — flag if one looks wrong. Invoice Date/Paid Date can show "—" when the underlying record hasn't synced from Service Autopilot yet — that's a display gap only; "Paid Amount" is the actual amount collected against the invoice and is what determines whether a row is payable. "Subcontracted?" reflects what's been auto-flagged from QBO vendor bills so far; reply to confirm, reject, or add one I missed. Invoice Amount/Paid Amount exclude sales tax.</p>`;
 }
 
 function reviewList(items) {
@@ -114,7 +150,7 @@ function reviewList(items) {
 
 export async function generateCommissionReport({ quarter, engineResult, isFinal = true, isDraft = false } = {}) {
   const targetQuarter = quarter || currentQuarter();
-  const result = engineResult || await runCommissionEngine({ quarter: targetQuarter });
+  const result = engineResult || await runCommissionEngine({ quarter: targetQuarter, isFinal });
 
   const [payableResult, accruedResult, renewalPendingResult, quarterLedgerIdsResult, unconfirmedPmResult] = await Promise.all([
     fleetops.from('commission_ledger').select('*').eq('quarter', targetQuarter).gt('payable_commission', 0).order('employee_name'),
@@ -140,6 +176,13 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
 
   const payableRows = payableResult.data ?? [];
   const accruedRows = accruedResult.data ?? [];
+  // Section 2 is "accrued but not payable" — a row already shown (with dollars)
+  // in Section 1 this quarter doesn't need to repeat there too. The summary
+  // box below is labeled the same way (per Michael, 2026-08-04) and its total
+  // matches this same subset, NOT the full GAAP accrual -- the full accrual
+  // for the accountant is payableTotal + this, since the two partition every
+  // accrued row with no overlap.
+  const accruedNotPayableRows = accruedRows.filter(r => Number(r.payable_commission || 0) === 0);
   const renewalPending = renewalPendingResult.data ?? [];
   const quarterLedger = quarterLedgerIdsResult.data ?? [];
   const unconfirmedPmRows = unconfirmedPmResult.data ?? [];
@@ -158,7 +201,7 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   const unconfirmedLines = unconfirmedLinesResult.data ?? [];
 
   const payableTotal = payableRows.reduce((s, r) => s + Number(r.payable_commission || 0), 0);
-  const accruedTotal = accruedRows.reduce((s, r) => s + Number(r.accrued_commission || 0), 0);
+  const accruedTotal = accruedNotPayableRows.reduce((s, r) => s + Number(r.accrued_commission || 0), 0);
 
   // unplannedJobs/unassignedJobs come from a company-wide engine run across
   // every employee, not just commission-eligible PMs — since only Jarrett has
@@ -170,6 +213,86 @@ export async function generateCommissionReport({ quarter, engineResult, isFinal 
   // this quarter (e.g. two maintenance contracts) would otherwise be ambiguous
   // about which ledger row a review item refers to.
   const clientLabel = row => row?.service_names ? `${row.client_name ?? '—'} (${row.service_names})` : (row?.client_name ?? '—');
+
+  // Estimate-first coverage check (2026-08-04, per Michael): for every
+  // employee with an active plan, look forward from their WON estimates
+  // instead of only backward from invoices — catches a job that's real and
+  // won but hasn't yet produced a traced commission_ledger row (this is how
+  // the Sterling Pharma enhancement job went unreported for a full cycle).
+  const { data: activePlans, error: activePlansError } = await fleetops
+    .from('commission_plans').select('employee_name, self_performed_rate').eq('active', true);
+  if (activePlansError) throw new Error(`generateCommissionReport activePlans query failed: ${activePlansError.message}`);
+  const unmatchedEstimatesByEmployee = await Promise.all(
+    (activePlans ?? []).map(async p => (await findUnmatchedWonEstimates({ employeeName: p.employee_name }))
+      .map(e => ({ ...e, employeeName: p.employee_name, rate: Number(p.self_performed_rate) })))
+  );
+  const unmatchedEstimates = unmatchedEstimatesByEmployee.flat();
+
+  // sa_waiting_list (2026-08-05, per Michael: "you will be able to tell what
+  // it is [from the waiting list]") turned out to be a MORE reliable second
+  // source than sa_accepted_estimates for this same section -- it carries a
+  // real sales_rep field (ground truth, not a date-proximity guess) and
+  // caught a real gap: a repeat Celia Shaughnessy weed-removal visit with no
+  // formal estimate behind it at all, which findUnmatchedWonEstimates could
+  // never have found. Merged with the estimate-based list rather than
+  // replacing it -- deduped by client+amount (the only correlation available,
+  // no direct FK) so the same job (e.g. Dolsky, present in both sources)
+  // doesn't appear twice.
+  const waitingListJobsByEmployee = await Promise.all(
+    (activePlans ?? []).map(async p => (await findWaitingListJobs({ employeeName: p.employee_name }))
+      .map(j => ({ ...j, employeeName: p.employee_name, rate: Number(p.self_performed_rate) })))
+  );
+  const dedupeKey = (client, amount) => `${client}|${amount.toFixed(2)}`;
+  const estimateKeys = new Set(unmatchedEstimates.map(e => dedupeKey(e.clientName, e.amount)));
+  const waitingListJobs = waitingListJobsByEmployee.flat()
+    .filter(j => !estimateKeys.has(dedupeKey(j.clientName, j.amount)));
+
+  // Section 3, "Waiting List — Work Won But Not Performed" (per Michael,
+  // 2026-08-04): a won job with no invoice yet -- e.g. the Dolsky job, sold
+  // but not completed -- shown with the same columns as the ledger tables
+  // above. Most of those columns are necessarily blank (nothing's been
+  // invoiced), and there's no real category/rate signal on an individual
+  // won job alone -- self_performed is the only category either source is
+  // ever seen to map to in practice, so it's used as the default rather
+  // than left unlabeled. Commission Amount here is a PROJECTION (rate ×
+  // amount) for visibility into upcoming liability, not a booked figure --
+  // nothing is accrued or payable until it's actually invoiced.
+  const waitingListRows = [
+    ...unmatchedEstimates.map(e => ({
+      client_name: e.clientName,
+      category: 'self_performed',
+      line_item_names: e.lineItemName ?? null,
+      estimate_number: e.estimateNumber,
+      estimate_date: e.quoteDate,
+      invoice_number: null,
+      invoice_date: null,
+      invoiced_amount: e.amount,
+      date_paid: null,
+      paid_amount: 0,
+      involves_subcontractor: false,
+      unconfirmed_subcontracted_fraction: 0,
+      commission_rate: e.rate,
+      projected_commission: round2(e.rate * e.amount),
+      inProgressNote: e.inProgressNote,
+    })),
+    ...waitingListJobs.map(j => ({
+      client_name: j.clientName,
+      category: 'self_performed',
+      line_item_names: j.lineItemName,
+      estimate_number: null,
+      estimate_date: j.dateAdded,
+      invoice_number: null,
+      invoice_date: null,
+      invoiced_amount: j.amount,
+      date_paid: null,
+      paid_amount: 0,
+      involves_subcontractor: false,
+      unconfirmed_subcontracted_fraction: 0,
+      commission_rate: j.rate,
+      projected_commission: round2(j.rate * j.amount),
+      inProgressNote: j.targetDate ? `Target date ${fD(j.targetDate)} per SA Waiting List.` : null,
+    })),
+  ];
 
   const reviewItems = [
     ...renewalPending.map(r => `${clientLabel(r) ?? r.sa_reference} — looks like a contract renewal, confirm new/expanded vs. renewal before it's paid`),
@@ -217,7 +340,7 @@ ${!isFinal ? alertBox('#f0f4ff', '#1a1a2e', 'Quarter Still In Progress', `<p sty
   </td>
   <td style="padding:14px 16px;text-align:center;border-right:1px solid #d8e0f0;">
     <p style="margin:0;font-size:20px;font-weight:bold;color:#1a1a2e;">${f$(accruedTotal)}</p>
-    <p style="margin:2px 0 0;font-size:11px;color:#555577;text-transform:uppercase;letter-spacing:0.6px;">Newly Accrued</p>
+    <p style="margin:2px 0 0;font-size:11px;color:#555577;text-transform:uppercase;letter-spacing:0.6px;">Accrued But Not Payable</p>
   </td>
   <td style="padding:14px 16px;text-align:center;">
     <p style="margin:0;font-size:20px;font-weight:bold;color:${reviewItems.length ? '#b35900' : '#333'};">${reviewItems.length}</p>
@@ -227,18 +350,27 @@ ${!isFinal ? alertBox('#f0f4ff', '#1a1a2e', 'Quarter Still In Progress', `<p sty
 
 <p style="margin:0 0 20px;font-size:12px;color:#888888;">Payable is cash-basis — prorated by newly-collected cash since the last run, withheld entirely for pending renewals or unconfirmed subcontractor involvement. Accrued is GAAP-basis — the full commission recognized once, in the earliest quarter a job/contract is seen, for the accountant's books.</p>`;
 
-  html += sectionHeader('Payable This Quarter', payableRows.length);
+  html += sectionHeader('Commissions Payable', payableRows.length);
   html += ledgerTable(payableRows, 'payable_commission');
 
-  html += sectionHeader('Newly Accrued (GAAP)', accruedRows.length);
-  html += ledgerTable(accruedRows, 'accrued_commission');
+  html += sectionHeader('Commissions Accrued But Not Payable', accruedNotPayableRows.length);
+  html += ledgerTable(accruedNotPayableRows, 'accrued_commission');
+  if (accruedRows.length > accruedNotPayableRows.length) {
+    html += `<p style="margin:-4px 0 14px;font-size:11px;color:#888888;">${accruedRows.length - accruedNotPayableRows.length} additional row${accruedRows.length - accruedNotPayableRows.length !== 1 ? 's' : ''} accrued this quarter but ${accruedRows.length - accruedNotPayableRows.length !== 1 ? 'are' : 'is'} already shown above in Commissions Payable — not repeated here.</p>`;
+  }
+
+  html += sectionHeader('Waiting List — Work Won But Not Performed', waitingListRows.length);
+  html += ledgerTable(waitingListRows, 'projected_commission', { 'Invoice Amount': 'Job Amount' });
+  if (waitingListRows.length) {
+    html += `<p style="margin:-4px 0 14px;font-size:11px;color:#888888;">Estimate amount shown in place of Invoice Amount (nothing's been invoiced yet). Commission Amount here is a projection at the self-performed rate, not a booked figure — nothing is accrued or payable until the job is actually invoiced.</p>`;
+  }
 
   if (reviewItems.length) {
     html += sectionHeader('Needs Review', reviewItems.length);
     html += alertBox('#fff3cd', '#e6a817', `${reviewItems.length} item${reviewItems.length !== 1 ? 's' : ''} pending confirmation`, reviewList(reviewItems));
   }
 
-  if (!payableRows.length && !accruedRows.length && !reviewItems.length) {
+  if (!payableRows.length && !accruedRows.length && !waitingListRows.length && !reviewItems.length) {
     html += `<p style="margin:16px 0;font-size:14px;color:#888888;">No commission activity this run.</p>`;
   }
 

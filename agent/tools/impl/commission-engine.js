@@ -118,6 +118,161 @@ function quarterSortKey(quarterStr) {
   return Number(year) * 4 + Number(q);
 }
 
+// Last calendar day of a quarter, e.g. '2026-Q2' -> '2026-06-30'.
+function quarterEndDate(quarterStr) {
+  const [year, q] = quarterStr.split('-Q').map(Number);
+  const endMonth = q * 3; // 3, 6, 9, 12
+  const lastDay = new Date(Date.UTC(year, endMonth, 0)).getUTCDate(); // day 0 of next month = last day of endMonth
+  return `${year}-${String(endMonth).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+}
+
+// Cash actually collected on a set of invoices BY a given date — used only
+// for the quarter-end close (isFinal), where "payable this quarter" must
+// mean cash that landed by quarter-end, not however much happens to be paid
+// by whenever the close actually runs. Without this, a payment landing after
+// quarter-end (e.g. collected in July against a Q2 job) would get counted as
+// Q2 payable just because the close ran after the money arrived — caught by
+// Michael 2026-08-04 on three real Q2 jobs (Jason Carver, Kelley Sovol, Laura
+// Ramos) all paid after 6/30. sa_invoices.invoice_balance (used for the live
+// job.paidAmount elsewhere in this file) has no such cutoff; it's always
+// "as of now." payment_date is stored as text (YYYY-MM-DD, same caveat as
+// fetchJobDetails' datePaid) so lexicographic comparison against the cutoff
+// works.
+// taxScale (see stripTax) converts a raw/tax-inclusive cash amount into the
+// same pre-tax basis as job.invoicedAmount, so incrementalPaid stays
+// consistent regardless of which source below actually answered.
+async function fetchPaidAmountAsOf(underlyingInvoices, asOfDate, qboPaymentIndex, taxScale) {
+  if (!underlyingInvoices.length) return 0;
+  const invoiceIds = underlyingInvoices.map(inv => inv.saId);
+
+  // Manual escape hatch first (see commission_payment_overrides' own
+  // migration for why this exists) — an override always wins for its invoice,
+  // regardless of what the sync does or doesn't know.
+  const { data: overrides, error: overridesError } = await fleetops
+    .from('commission_payment_overrides')
+    .select('sa_invoice_sa_id, paid_amount_confirmed, as_of_date')
+    .in('sa_invoice_sa_id', invoiceIds);
+  if (overridesError) throw new Error(`fetchPaidAmountAsOf commission_payment_overrides query failed: ${overridesError.message}`);
+  const overrideByInvoice = new Map((overrides ?? []).map(o => [o.sa_invoice_sa_id, o]));
+  let total = [...overrideByInvoice.values()]
+    .filter(o => o.as_of_date <= asOfDate)
+    .reduce((sum, o) => sum + Number(o.paid_amount_confirmed || 0) * taxScale, 0);
+
+  const remaining = underlyingInvoices.filter(inv => !overrideByInvoice.has(inv.saId));
+  if (!remaining.length) return round2(total);
+
+  // QBO payment data next (see buildQboPaymentIndex) — far more complete than
+  // sa_payment_applications in practice (real gap found 2026-08-04: several
+  // fully-paid invoices — Jason Carver x2, Kelley Sovol, Laura Ramos, Joyce
+  // Aldon — have zero rows in sa_payment_applications at all, but all of
+  // them are present here).
+  const stillRemaining = [];
+  for (const inv of remaining) {
+    const qboPayments = qboPaymentIndex.get(inv.qboId);
+    if (!qboPayments?.length) { stillRemaining.push(inv); continue; }
+    total += qboPayments
+      .filter(p => p.date && p.date <= asOfDate)
+      .reduce((sum, p) => sum + p.amount * taxScale, 0);
+  }
+  if (!stillRemaining.length) return round2(total);
+
+  const stillRemainingIds = stillRemaining.map(inv => inv.saId);
+  const { data: apps, error } = await fleetops
+    .from('sa_payment_applications')
+    .select('invoice_sa_id, payment_sa_id, amount_applied')
+    .in('invoice_sa_id', stillRemainingIds);
+  if (error) throw new Error(`fetchPaidAmountAsOf sa_payment_applications query failed: ${error.message}`);
+  const paymentIds = [...new Set((apps ?? []).map(a => a.payment_sa_id).filter(Boolean))];
+  if (!paymentIds.length) return round2(total);
+
+  const { data: payments, error: paymentsError } = await fleetops
+    .from('sa_payments').select('sa_id, payment_date').in('sa_id', paymentIds);
+  if (paymentsError) throw new Error(`fetchPaidAmountAsOf sa_payments query failed: ${paymentsError.message}`);
+  const dateById = new Map((payments ?? []).map(p => [p.sa_id, p.payment_date]));
+
+  // No signal at all (no override, no QBO payment link, no SA payment
+  // application) means we don't know when it was paid — deliberately NOT
+  // falling back to the live invoice_balance-derived total here, since
+  // "unknown timing" must not silently resolve to "definitely paid by
+  // quarter-end" for a payout.
+  total += (apps ?? []).reduce((sum, a) => {
+    const paymentDate = dateById.get(a.payment_sa_id);
+    if (!paymentDate || paymentDate > asOfDate) return sum;
+    return sum + Number(a.amount_applied || 0) * taxScale;
+  }, 0);
+  return round2(total);
+}
+
+// Sales tax on an invoice is not part of the job's value for commission
+// purposes -- pulled from qb_invoices.raw_data.TxnTaxDetail.TotalTax (already
+// synced, no live API call) rather than sa_invoices, which has no tax field
+// of its own. Batched over every qbo_id in a single call, mirroring the
+// prefetch-once pattern used elsewhere in this file (assignmentIndex,
+// estimatesByClient, vendorBills) instead of one query per invoice.
+const IN_CLAUSE_CHUNK_SIZE = 200; // a company-wide scan's qbo_id set can run into the thousands -- PostgREST's GET-encoded .in() rejects an unbounded list with a 400
+
+async function fetchTaxByQboId(qboIds) {
+  const uniqueIds = [...new Set(qboIds.filter(Boolean))];
+  if (!uniqueIds.length) return new Map();
+  const taxByQboId = new Map();
+  for (let i = 0; i < uniqueIds.length; i += IN_CLAUSE_CHUNK_SIZE) {
+    const chunk = uniqueIds.slice(i, i + IN_CLAUSE_CHUNK_SIZE);
+    const { data, error } = await fleetops.from('qb_invoices').select('qb_id, raw_data').in('qb_id', chunk);
+    if (error) throw new Error(`fetchTaxByQboId query failed: ${error.message}`);
+    for (const r of data ?? []) taxByQboId.set(r.qb_id, Number(r.raw_data?.TxnTaxDetail?.TotalTax ?? 0));
+  }
+  return taxByQboId;
+}
+
+// Removes sales tax from an invoice_total/invoice_balance pair, scaling the
+// balance (and therefore paidAmount = total - balance) proportionally --
+// there's no per-line tax breakdown of which dollars are still outstanding,
+// so an even split across the whole invoice is the best available estimate,
+// consistent with how paidPct etc. already approximate elsewhere in this file.
+function stripTax(invoiceTotal, invoiceBalance, taxAmount) {
+  const preTaxTotal = round2(Math.max(0, invoiceTotal - taxAmount));
+  const scale = invoiceTotal > 0 ? preTaxTotal / invoiceTotal : 1;
+  return { preTaxTotal, preTaxBalance: round2(invoiceBalance * scale), scale };
+}
+
+// QuickBooks Payment objects carry their own LinkedTxn back to the invoice(s)
+// they paid off -- this turned out to be a far more complete data source for
+// "when was this actually paid" than sa_payment_applications/sa_payments
+// (found 2026-08-04: several fully-paid invoices — Jason Carver x2, Kelley
+// Sovol, Laura Ramos, Joyce Aldon — have ZERO rows in sa_payment_applications
+// at all, but their real payment dates are all present here). Built once per
+// run (qb_payments is a few thousand rows in the lookback window, no live API
+// call) rather than queried per job. Keyed by the QBO invoice id (Payment
+// Line[].LinkedTxn[].TxnId), value is every {date, amount} applied to that
+// invoice (a single payment can split across several invoices, one Line per
+// invoice, so amount is the per-line applied amount, not the payment total).
+async function buildQboPaymentIndex() {
+  const lookbackDate = dateStr(LOOKBACK_DAYS + 120); // payments can land well after an invoice's own lookback-bounded date
+  const { data, error } = await fleetops.from('qb_payments').select('date, raw_data').gte('date', lookbackDate);
+  if (error) throw new Error(`buildQboPaymentIndex query failed: ${error.message}`);
+  const index = new Map();
+  for (const payment of data ?? []) {
+    for (const line of payment.raw_data?.Line ?? []) {
+      for (const txn of line?.LinkedTxn ?? []) {
+        if (!txn?.TxnId) continue;
+        if (!index.has(txn.TxnId)) index.set(txn.TxnId, []);
+        index.get(txn.TxnId).push({ date: payment.date, amount: Number(line.Amount ?? 0) });
+      }
+    }
+  }
+  return index;
+}
+
+// Latest known payment date for a job from the QBO payment index, across all
+// of its underlying invoices.
+function latestQboPaymentDate(underlyingInvoices, qboPaymentIndex) {
+  const dates = underlyingInvoices
+    .flatMap(inv => qboPaymentIndex.get(inv.qboId) ?? [])
+    .map(p => p.date)
+    .filter(Boolean);
+  return dates.length ? dates.sort().at(-1) : null;
+}
+
 function annualizeContractValue(invoiceTotal, frequency) {
   const key = (frequency || '').toLowerCase().replace(/[^a-z]/g, '');
   const mult = FREQUENCY_MULTIPLIER[key];
@@ -175,10 +330,26 @@ function lineKeyOf(line) {
 // Only called for jobs that have already cleared PM + plan resolution (i.e.
 // commission-eligible jobs — a small subset of the company-wide scan), so
 // this doesn't add meaningful N+1 cost across the full job list.
-async function fetchJobDetails(job) {
+async function fetchJobDetails(job, { qboPaymentIndex } = {}) {
   const invoiceIds = job.underlyingInvoices.map(inv => inv.saId);
 
-  const [jobsResult, estimateResult, paymentAppsResult] = await Promise.all([
+  const lineItems = (await Promise.all(
+    job.underlyingInvoices.map(inv => fetchLineItemsForInvoice(inv.saId, inv.qboId))
+  )).flat();
+  // Prefer the QBO item name ("Grading", "Topsoil", "Hardscape Installation")
+  // over the free-text line description, which is often blank or generic —
+  // falls back to description only when no item name exists at all. QBO's
+  // item names are full category paths ("Landscape:Landscape
+  // Enhancements:Topsoil") — only the last segment is the actual item.
+  // $0 lines are excluded (real case, Sterling Pharma: a "Landscape
+  // Restoration" line at $0 alongside the real $5,500 "Landscape
+  // Installation" line — listing both implied two paid items when only one
+  // actually had value).
+  const computedLineItemNames = [...new Set(
+    lineItems.filter(l => l.amount !== 0).map(l => (l.itemName || l.description).split(':').pop().trim()).filter(Boolean)
+  )].join(', ') || null;
+
+  const [jobsResult, estimateResult, paymentAppsResult, invoicesResult, lineItemOverrideResult] = await Promise.all([
     fleetops.from('sa_jobs').select('service, date_completed').in('invoice_id', invoiceIds),
     // No direct FK from an invoice to its originating estimate — best-effort:
     // the client's accepted estimate closest to (and no later than) this job's
@@ -191,32 +362,68 @@ async function fetchJobDetails(job) {
       .limit(1)
       .maybeSingle(),
     fleetops.from('sa_payment_applications').select('payment_sa_id').in('invoice_sa_id', invoiceIds),
+    // For self_performed jobs there's exactly one underlying invoice; for a
+    // maintenance_snow contract row (many invoices) this shows the EARLIEST
+    // one, matching the "first-year value" basis used elsewhere for that
+    // category — a contract row's Invoice #/Date is representative, not
+    // exhaustive.
+    fleetops.from('sa_invoices').select('invoice_number, date').in('sa_id', invoiceIds).order('date', { ascending: true }).limit(1).maybeSingle(),
+    // Manual escape hatch for when QBO's own line data doesn't resolve at all
+    // (see commission_line_item_overrides' own migration).
+    fleetops.from('commission_line_item_overrides').select('line_item_name').in('sa_invoice_sa_id', invoiceIds).limit(1).maybeSingle(),
   ]);
+  const lineItemNames = lineItemOverrideResult.data?.line_item_name ?? computedLineItemNames;
 
   if (jobsResult.error) logger.warn('fetchJobDetails sa_jobs query failed', { err: jobsResult.error.message, saReference: job.saReference });
   if (estimateResult.error) logger.warn('fetchJobDetails sa_accepted_estimates query failed', { err: estimateResult.error.message, saReference: job.saReference });
   if (paymentAppsResult.error) logger.warn('fetchJobDetails sa_payment_applications query failed', { err: paymentAppsResult.error.message, saReference: job.saReference });
+  if (invoicesResult.error) logger.warn('fetchJobDetails sa_invoices query failed', { err: invoicesResult.error.message, saReference: job.saReference });
+  if (lineItemOverrideResult.error) logger.warn('fetchJobDetails commission_line_item_overrides query failed', { err: lineItemOverrideResult.error.message, saReference: job.saReference });
 
   const jobRows = jobsResult.data ?? [];
   const serviceNames = [...new Set(jobRows.map(r => r.service).filter(Boolean))].join(', ') || null;
   const dateCompleted = jobRows.map(r => r.date_completed).filter(Boolean).sort().at(-1) ?? null;
 
-  let datePaid = null;
-  const paymentSaIds = [...new Set((paymentAppsResult.data ?? []).map(r => r.payment_sa_id).filter(Boolean))];
-  if (paymentSaIds.length) {
-    const { data: payments, error: paymentsError } = await fleetops
-      .from('sa_payments').select('payment_date').in('sa_id', paymentSaIds);
-    if (paymentsError) logger.warn('fetchJobDetails sa_payments query failed', { err: paymentsError.message, saReference: job.saReference });
-    // payment_date is stored as text — sorting lexicographically works only
-    // because SA's sync writes it as YYYY-MM-DD; if that ever changes this
-    // would need real date parsing.
-    datePaid = (payments ?? []).map(p => p.payment_date).filter(Boolean).sort().at(-1) ?? null;
+  // QBO's own payment records first (see buildQboPaymentIndex — far more
+  // complete in practice than the sa_payment_applications join below).
+  let datePaid = qboPaymentIndex ? latestQboPaymentDate(job.underlyingInvoices, qboPaymentIndex) : null;
+
+  if (!datePaid) {
+    const paymentSaIds = [...new Set((paymentAppsResult.data ?? []).map(r => r.payment_sa_id).filter(Boolean))];
+    if (paymentSaIds.length) {
+      const { data: payments, error: paymentsError } = await fleetops
+        .from('sa_payments').select('payment_date').in('sa_id', paymentSaIds);
+      if (paymentsError) logger.warn('fetchJobDetails sa_payments query failed', { err: paymentsError.message, saReference: job.saReference });
+      // payment_date is stored as text — sorting lexicographically works only
+      // because SA's sync writes it as YYYY-MM-DD; if that ever changes this
+      // would need real date parsing.
+      datePaid = (payments ?? []).map(p => p.payment_date).filter(Boolean).sort().at(-1) ?? null;
+    }
   }
+
+  if (!datePaid) {
+    const { data: overrides, error: overridesError } = await fleetops
+      .from('commission_payment_overrides').select('as_of_date').in('sa_invoice_sa_id', invoiceIds)
+      .order('as_of_date', { ascending: false }).limit(1).maybeSingle();
+    if (overridesError) logger.warn('fetchJobDetails commission_payment_overrides query failed', { err: overridesError.message, saReference: job.saReference });
+    datePaid = overrides?.as_of_date ?? null;
+  }
+
+  // Prefer an exact-amount match (see findEstimateByAmount) over the
+  // date-proximity guess above for DISPLAY purposes too — same reasoning as
+  // its use in resolvePM. Only used when unique for this client/amount.
+  const amountMatches = await findEstimateByAmount(job.saClientId, job.invoicedAmount);
+  const bestEstimate = amountMatches.length === 1
+    ? { estimate_number: amountMatches[0].estimate_number, quote_date: amountMatches[0].quote_date }
+    : estimateResult.data;
 
   return {
     serviceNames,
-    estimateNumber: estimateResult.data?.estimate_number ?? null,
-    estimateDate: estimateResult.data?.quote_date ?? null,
+    lineItemNames,
+    estimateNumber: bestEstimate?.estimate_number ?? null,
+    estimateDate: bestEstimate?.quote_date ?? null,
+    invoiceNumber: invoicesResult.data?.invoice_number ?? null,
+    invoiceDate: invoicesResult.data?.date ?? null,
     dateCompleted,
     datePaid,
   };
@@ -359,7 +566,29 @@ async function buildAttributionIndexes() {
 // (the fallible date-proximity guess, caught wrong 3 times against real data:
 // Sterling Pharma, Celia Shaughnessy, Lori Pegelow) withholds payable
 // commission pending human confirmation; everything else is trusted.
-async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, isContractJob, fuzzyCandidateCache, assignmentIndex, estimatesByClient }) {
+// ── Exact-amount estimate match (2026-08-05) ────────────────────────────────
+// sa_estimates_2026 carries per-estimate estimated_value AND per-line
+// amounts/service names (sa_accepted_estimates has neither) -- a real
+// improvement over date-proximity guessing found after yet another
+// misattribution (Mary Jo Smith's Tree Trimming job: matched by date to
+// estimate #5424, a DIFFERENT $1,000 estimate for the same client, when the
+// real one was #5426 -- which turned out to be missing from
+// sa_accepted_estimates entirely, not just picked wrong). Matching on the
+// invoice's own pretax amount against estimated_value is far less likely to
+// collide than "whichever estimate happens to be nearby in time," though a
+// same-client estimate at the exact same dollar amount is still possible in
+// principle -- callers only trust this when exactly one candidate matches.
+async function findEstimateByAmount(clientId, amount) {
+  if (!clientId) return [];
+  const { data, error } = await fleetops
+    .from('sa_estimates_2026')
+    .select('estimate_number, salesperson, quote_date, estimated_value, line_items')
+    .eq('client_id', clientId);
+  if (error) { logger.warn('findEstimateByAmount query failed', { err: error.message, clientId }); return []; }
+  return (data ?? []).filter(e => Math.abs(Number(e.estimated_value || 0) - amount) < 0.01);
+}
+
+async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, invoicedAmount, isContractJob, fuzzyCandidateCache, assignmentIndex, estimatesByClient }) {
   const manualMatch =
     (invoiceSaId && assignmentIndex.byInvoice.get(invoiceSaId)) ||
     (contractId && assignmentIndex.byContract.get(contractId)) ||
@@ -390,7 +619,31 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
     }
   }
 
-  // No job-level signal either — scrape the rep off the estimate that
+  // No job-level signal either — try an exact-amount match against
+  // sa_estimates_2026 before falling back to pure date-proximity guessing
+  // (see findEstimateByAmount). Only trusted when the amount is unique to a
+  // single estimate for this client; a tie falls through to the weaker
+  // date-proximity tier below rather than guessing between them.
+  if (invoicedAmount != null) {
+    const amountMatches = await findEstimateByAmount(saClientId, invoicedAmount);
+    if (amountMatches.length === 1 && amountMatches[0].salesperson) {
+      const est = amountMatches[0];
+      const scopeCols = (contractId || invoiceSaId)
+        ? { sa_contract_id: contractId ?? null, sa_invoice_sa_id: invoiceSaId ?? null }
+        : { sa_client_id: saClientId };
+      const { error: insertError } = await fleetops.from('pm_job_assignments').insert({
+        ...scopeCols,
+        employee_name: est.salesperson,
+        source: 'sa_signal',
+        confidence: 'estimate_amount_match',
+        notes: `Matched estimate #${est.estimate_number} by exact invoiced amount ($${invoicedAmount}) via sa_estimates_2026`,
+      });
+      if (insertError) logger.warn('pm_job_assignments estimate_amount_match insert failed', { err: insertError.message });
+      return { employeeName: est.salesperson, confidence: 'estimate_amount_match' };
+    }
+  }
+
+  // No unique amount match either — scrape the rep off the estimate that
   // actually preceded (and could plausibly have won) THIS job, not just
   // "whichever estimate is most recent for the client overall."
   // Fixed 2026-07-29 after a real misattribution: Sterling Pharma's March 2026
@@ -437,6 +690,113 @@ async function resolvePM({ saClientId, contractId, invoiceSaId, earliestDate, is
   return null;
 }
 
+// ── Estimate-first coverage check (2026-08-04) ──────────────────────────────
+// The main engine works backward from invoices (scan every company invoice,
+// then guess who sold it) — that guessing is exactly what caused the Sterling
+// Pharma/Celia Shaughnessy/Lori Pegelow misattributions. This works forward
+// instead, starting from ground truth (sa_accepted_estimates.sales_rep) for
+// the small set of estimates a given employee actually won, and checks
+// whether each one ever produced a commission_ledger row — surfacing any
+// that haven't as a coverage gap rather than letting a won job silently
+// never appear in a report (this is how the Sterling enhancement job went
+// unreported for a full report cycle: it was correctly in the ledger, the
+// report just wasn't regenerated after it landed). estimate_number linkage
+// is the same best-effort match fetchJobDetails/resolvePM already rely on
+// elsewhere in this file — not a strict FK — so this is a coverage signal to
+// review, not proof that something is actually wrong with any given estimate.
+export async function findUnmatchedWonEstimates({ employeeName, lookbackDays = LOOKBACK_DAYS } = {}) {
+  const cutoff = dateStr(lookbackDays);
+  const { data: estimates, error } = await fleetops
+    .from('sa_accepted_estimates')
+    .select('estimate_id, estimate_number, client_name, client_id, amount, quote_date')
+    .eq('sales_rep', employeeName)
+    .gte('quote_date', cutoff);
+  if (error) throw new Error(`findUnmatchedWonEstimates estimates query failed: ${error.message}`);
+
+  const estimateNumbers = [...new Set((estimates ?? []).map(e => e.estimate_number).filter(Boolean))];
+  if (!estimateNumbers.length) return [];
+
+  const [tracedResult, resolutionsResult] = await Promise.all([
+    fleetops.from('commission_ledger').select('estimate_number').in('estimate_number', estimateNumbers),
+    // sa_accepted_estimates ("accepted") turns out to include estimates that
+    // are merely sent, or later lost -- resolved_at/resolved_reason are null
+    // for every row checked so far, so SA gives no reliable won/lost signal.
+    // estimate_resolutions is where a human records that once (see its own
+    // migration) instead of re-explaining the same estimate every cycle.
+    fleetops.from('estimate_resolutions').select('estimate_number, resolution, note, line_item_name').in('estimate_number', estimateNumbers),
+  ]);
+  if (tracedResult.error) throw new Error(`findUnmatchedWonEstimates ledger query failed: ${tracedResult.error.message}`);
+  if (resolutionsResult.error) throw new Error(`findUnmatchedWonEstimates resolutions query failed: ${resolutionsResult.error.message}`);
+  const tracedSet = new Set((tracedResult.data ?? []).map(r => r.estimate_number).filter(Boolean));
+  const resolutionByEstimate = new Map((resolutionsResult.data ?? []).map(r => [r.estimate_number, r]));
+
+  return (estimates ?? [])
+    .filter(e => e.estimate_number && !tracedSet.has(e.estimate_number))
+    .map(e => ({ ...e, resolution: resolutionByEstimate.get(e.estimate_number) }))
+    // 'lost'/'sent_only'/'invoiced' are fully resolved -- don't keep flagging
+    // them every run. 'in_progress' still surfaces (with its note) since it's
+    // real, ongoing, uninvoiced work worth tracking, just not an error.
+    .filter(e => !e.resolution || e.resolution.resolution === 'in_progress')
+    .map(e => ({
+      estimateId: e.estimate_id,
+      estimateNumber: e.estimate_number,
+      clientName: e.client_name,
+      clientId: e.client_id,
+      amount: Number(e.amount || 0),
+      quoteDate: e.quote_date,
+      inProgressNote: e.resolution?.note ?? null,
+      lineItemName: e.resolution?.line_item_name ?? null,
+    }));
+}
+
+// ── SA's own Waiting List (2026-08-05) ──────────────────────────────────────
+// sa_waiting_list turned out to be a MORE reliable source than
+// sa_accepted_estimates for "won but not yet performed" work — it carries a
+// real sales_rep field (ground truth, not a date-proximity guess) and, per
+// its name, is SA's own tracking of exactly this: jobs sold and waiting to be
+// scheduled/dispatched. Real gap found checking Michael Dolsky's job here
+// (2026-08-05): a recurring weed-removal visit for Celia Shaughnessy (added
+// to the waiting list 2026-08-01) has NO corresponding sa_accepted_estimates
+// row at all — a repeat visit under an existing arrangement, not a fresh
+// formal estimate — so findUnmatchedWonEstimates could never have found it.
+// Cross-referenced against commission_ledger by client name + amount (no
+// direct FK exists) rather than quarter-scoped, since a waiting-list item
+// invoiced in an earlier run should stay excluded permanently, not just for
+// the quarter that happened to catch it.
+export async function findWaitingListJobs({ employeeName }) {
+  const { data: items, error } = await fleetops
+    .from('sa_waiting_list')
+    .select('client_name, amount, date_added, target_date')
+    .eq('sales_rep', employeeName);
+  if (error) throw new Error(`findWaitingListJobs sa_waiting_list query failed: ${error.message}`);
+  if (!items?.length) return [];
+
+  const { data: ledgerRows, error: ledgerError } = await fleetops
+    .from('commission_ledger').select('client_name, invoiced_amount').eq('employee_name', employeeName);
+  if (ledgerError) throw new Error(`findWaitingListJobs commission_ledger query failed: ${ledgerError.message}`);
+  const alreadyInvoiced = (client, amount) => (ledgerRows ?? []).some(
+    r => r.client_name === client && Math.abs(Number(r.invoiced_amount) - amount) < 0.02
+  );
+
+  // sa_waiting_list.category turned out to be a BTA business-categorization
+  // field, NOT a service/line-item description (real case, 2026-08-05: it
+  // read "Commercial Asphalt Maintenance" for a job that's actually
+  // "Sealcoating - Res. 1 Coat") -- not used as a line-item guess. No
+  // per-item override mechanism exists here yet (unlike estimate_resolutions
+  // for the estimate-sourced list above) since this table has no natural key
+  // to hang one off of besides client+amount, which is already the dedup
+  // key -- left blank rather than guessing wrong again.
+  return items
+    .filter(i => !alreadyInvoiced(i.client_name, Number(i.amount || 0)))
+    .map(i => ({
+      clientName: i.client_name,
+      amount: Number(i.amount || 0),
+      lineItemName: null,
+      dateAdded: i.date_added,
+      targetDate: i.target_date,
+    }));
+}
+
 // ── Renewal detection ───────────────────────────────────────────
 // Heuristic only — SA has no native renewal flag. A different contract_id for
 // the same customer_id in the prior-year window is treated as a likely renewal
@@ -474,6 +834,10 @@ async function assembleMaintenanceSnowJobs() {
     .order('date', { ascending: true });
   if (error) throw new Error(`assembleMaintenanceSnowJobs query failed: ${error.message}`);
 
+  // Sales tax is not part of a job's value for commission purposes (Michael,
+  // 2026-08-04) — stripped per invoice before grouping/summing.
+  const taxByQboId = await fetchTaxByQboId((rows ?? []).map(r => r.qbo_id));
+
   // Group by contract_id (fall back to customer_id if a contract has no id set)
   const groups = new Map();
   for (const row of rows ?? []) {
@@ -489,10 +853,15 @@ async function assembleMaintenanceSnowJobs() {
     // (which would overstate accrual if a mid-year rate increase inflated it).
     const earliest = contractRows[0];
     const latest = contractRows[contractRows.length - 1];
-    const invoicedAmount = contractRows.reduce((s, r) => s + Number(r.invoice_total || 0), 0);
-    const paidAmount = contractRows.reduce(
-      (s, r) => s + (Number(r.invoice_total || 0) - Number(r.invoice_balance || 0)), 0
-    );
+    const earliestPreTax = stripTax(Number(earliest.invoice_total || 0), 0, taxByQboId.get(earliest.qbo_id) ?? 0);
+    let invoicedAmount = 0, paidAmount = 0, rawTotal = 0;
+    for (const r of contractRows) {
+      const total = Number(r.invoice_total || 0);
+      const { preTaxTotal, preTaxBalance } = stripTax(total, Number(r.invoice_balance || 0), taxByQboId.get(r.qbo_id) ?? 0);
+      invoicedAmount += preTaxTotal;
+      paidAmount += preTaxTotal - preTaxBalance;
+      rawTotal += total;
+    }
 
     jobs.push({
       category: 'maintenance_snow',
@@ -501,9 +870,15 @@ async function assembleMaintenanceSnowJobs() {
       contractId: latest.contract_id,
       invoiceSaId: null,
       clientName: latest.client,
-      contractOrFirstYearValue: annualizeContractValue(Number(earliest.invoice_total || 0), earliest.frequency),
-      invoicedAmount,
-      paidAmount,
+      contractOrFirstYearValue: annualizeContractValue(earliestPreTax.preTaxTotal, earliest.frequency),
+      invoicedAmount: round2(invoicedAmount),
+      paidAmount: round2(paidAmount),
+      // Approximate — a multi-invoice contract can mix different tax rates
+      // across its constituent invoices; weighted by total value here rather
+      // than tracked per-invoice, since fetchPaidAmountAsOf only needs one
+      // scalar per job (self_performed, the only category Jarrett has today,
+      // always has exactly one invoice, where this is exact).
+      taxScale: rawTotal > 0 ? invoicedAmount / rawTotal : 1,
       dateStart: earliest.date,
       dateEnd: latest.date,
       earliestDate: earliest.date,
@@ -524,31 +899,41 @@ async function assembleSelfPerformedJobs() {
     .gt('invoice_total', 0);
   if (error) throw new Error(`assembleSelfPerformedJobs query failed: ${error.message}`);
 
-  return (rows ?? []).map(row => ({
-    category: 'self_performed',
-    saReference: `invoice:${row.sa_id}`,
-    saClientId: row.customer_id,
-    contractId: null,
-    invoiceSaId: row.sa_id,
-    clientName: row.client,
-    contractOrFirstYearValue: Number(row.invoice_total || 0),
-    invoicedAmount: Number(row.invoice_total || 0),
-    paidAmount: Number(row.invoice_total || 0) - Number(row.invoice_balance || 0),
-    // Sub bills usually arrive before the client is invoiced — widen the match
-    // window rather than using the single invoice date (a zero-width window
-    // makes the description-based fuzzy match unreachable).
-    dateStart: daysBefore(row.date, SELF_PERFORMED_BILL_WINDOW_DAYS),
-    dateEnd: daysAfter(row.date, SELF_PERFORMED_BILL_WINDOW_DAYS),
-    earliestDate: row.date,
-    underlyingInvoices: [{ saId: row.sa_id, qboId: row.qbo_id }],
-  }));
+  // Sales tax is not part of a job's value for commission purposes (Michael,
+  // 2026-08-04) — stripped per invoice from qb_invoices.raw_data.TxnTaxDetail.
+  const taxByQboId = await fetchTaxByQboId((rows ?? []).map(r => r.qbo_id));
+
+  return (rows ?? []).map(row => {
+    const total = Number(row.invoice_total || 0);
+    const { preTaxTotal, preTaxBalance, scale } = stripTax(total, Number(row.invoice_balance || 0), taxByQboId.get(row.qbo_id) ?? 0);
+    return {
+      category: 'self_performed',
+      saReference: `invoice:${row.sa_id}`,
+      saClientId: row.customer_id,
+      contractId: null,
+      invoiceSaId: row.sa_id,
+      clientName: row.client,
+      contractOrFirstYearValue: preTaxTotal,
+      invoicedAmount: preTaxTotal,
+      paidAmount: round2(preTaxTotal - preTaxBalance),
+      taxScale: scale,
+      // Sub bills usually arrive before the client is invoiced — widen the match
+      // window rather than using the single invoice date (a zero-width window
+      // makes the description-based fuzzy match unreachable).
+      dateStart: daysBefore(row.date, SELF_PERFORMED_BILL_WINDOW_DAYS),
+      dateEnd: daysAfter(row.date, SELF_PERFORMED_BILL_WINDOW_DAYS),
+      earliestDate: row.date,
+      underlyingInvoices: [{ saId: row.sa_id, qboId: row.qbo_id }],
+    };
+  });
 }
 
 // ── Main run ─────────────────────────────────────────────────────
 
-export async function runCommissionEngine({ quarter } = {}) {
+export async function runCommissionEngine({ quarter, isFinal = true } = {}) {
   const targetQuarter = quarter || currentQuarter();
   const targetKey = quarterSortKey(targetQuarter);
+  const targetQuarterEnd = quarterEndDate(targetQuarter);
 
   const { data: plans, error: plansError } = await fleetops
     .from('commission_plans')
@@ -562,6 +947,52 @@ export async function runCommissionEngine({ quarter } = {}) {
     assembleSelfPerformedJobs(),
   ]);
   const allJobs = [...maintenanceJobs, ...selfPerformedJobs];
+
+  // A job that WAS commissionable in a prior run for this quarter (e.g. a
+  // manual pm_job_assignments override just moved it to an employee with no
+  // plan, or removed its PM entirely) needs its old row actively removed --
+  // the loop below only ever upserts rows for jobs that resolve to a planned
+  // employee THIS run; a job that no longer qualifies is simply `continue`d
+  // past, which on its own leaves the old row sitting there stale (real bug,
+  // caught 2026-08-04: reassigning a Heather Kehr invoice off Jarrett Bruce
+  // left the old commission owed to him unchanged in the ledger). Prefetched
+  // once (this table only ever holds a handful of real rows) rather than
+  // queried per job.
+  const { data: existingLedgerRows, error: existingLedgerError } = await fleetops
+    .from('commission_ledger').select('id, sa_reference').eq('quarter', targetQuarter);
+  if (existingLedgerError) throw new Error(`existing commission_ledger prefetch failed: ${existingLedgerError.message}`);
+  const existingLedgerIdByReference = new Map((existingLedgerRows ?? []).map(r => [r.sa_reference, r.id]));
+
+  // Broader case than removeStaleLedgerRowIfAny below: a job can vanish from
+  // allJobs ENTIRELY, not just resolve to a different employee -- e.g. its
+  // invoice_total gets corrected to $0 in QBO/SA after the fact (real case
+  // caught 2026-08-04: two Jason Carver invoices, $2,268.25 and $131.88,
+  // were zeroed out — apparently re-split into two other invoices that DO
+  // have real amounts — but sat in the ledger unchanged since the query that
+  // assembles candidate jobs filters on invoice_total > 0, so a zeroed
+  // invoice never even reaches the per-job loop to be reconsidered). Any
+  // existing row whose sa_reference isn't in this run's candidate set at all
+  // is unconditionally stale.
+  const allJobReferences = new Set(allJobs.map(j => j.saReference));
+  const orphanedRows = (existingLedgerRows ?? []).filter(r => !allJobReferences.has(r.sa_reference));
+  if (orphanedRows.length) {
+    const { error: orphanDeleteError } = await fleetops.from('commission_ledger').delete().in('id', orphanedRows.map(r => r.id));
+    if (orphanDeleteError) {
+      logger.warn('orphaned commission_ledger row cleanup failed', { err: orphanDeleteError.message });
+    } else {
+      logger.info('Removed commission_ledger rows for jobs no longer in the candidate set at all', { saReferences: orphanedRows.map(r => r.sa_reference) });
+      for (const r of orphanedRows) existingLedgerIdByReference.delete(r.sa_reference);
+    }
+  }
+
+  async function removeStaleLedgerRowIfAny(saReference) {
+    const staleId = existingLedgerIdByReference.get(saReference);
+    if (!staleId) return;
+    const { error: deleteError } = await fleetops.from('commission_ledger').delete().eq('id', staleId);
+    if (deleteError) logger.warn('removeStaleLedgerRowIfAny delete failed', { err: deleteError.message, saReference });
+    else logger.info('Removed stale commission_ledger row — job no longer resolves to a planned employee', { saReference });
+    existingLedgerIdByReference.delete(saReference);
+  }
 
   // Fetch vendor bills ONCE for the whole lookback window rather than per-job
   // (getVendorBillsForPeriod paginates internally, so this covers the full window).
@@ -579,6 +1010,7 @@ export async function runCommissionEngine({ quarter } = {}) {
   // findJobLevelSalesRep.
   const fuzzyCandidateCache = new Map();
   const { assignmentIndex, estimatesByClient } = await buildAttributionIndexes();
+  const qboPaymentIndex = await buildQboPaymentIndex();
 
   for (const job of allJobs) {
     const pmResolution = await resolvePM({
@@ -586,6 +1018,7 @@ export async function runCommissionEngine({ quarter } = {}) {
       contractId: job.contractId,
       invoiceSaId: job.invoiceSaId,
       earliestDate: job.earliestDate,
+      invoicedAmount: job.invoicedAmount,
       isContractJob: job.category === 'maintenance_snow',
       fuzzyCandidateCache,
       assignmentIndex,
@@ -603,6 +1036,7 @@ export async function runCommissionEngine({ quarter } = {}) {
         saReference: job.saReference, clientName: job.clientName, category: job.category,
         value: job.contractOrFirstYearValue,
       });
+      await removeStaleLedgerRowIfAny(job.saReference);
       continue;
     }
 
@@ -613,12 +1047,13 @@ export async function runCommissionEngine({ quarter } = {}) {
         saReference: job.saReference, clientName: job.clientName, category: job.category,
         employeeName, value: job.contractOrFirstYearValue,
       });
+      await removeStaleLedgerRowIfAny(job.saReference);
       continue;
     }
 
     let jobDetails;
     try {
-      jobDetails = await fetchJobDetails(job);
+      jobDetails = await fetchJobDetails(job, { qboPaymentIndex });
     } catch (err) {
       // fetchJobDetails' internal queries log+swallow their own {error} results;
       // this catches a harder failure (e.g. a rejected network call) so one job's
@@ -802,8 +1237,16 @@ export async function runCommissionEngine({ quarter } = {}) {
     const pendingCount = lineRecords.filter(l => l.category === 'subcontracted_candidate' && !l.confirmed).length + unattributedMatches.length;
     results.subBillFlags += pendingCount;
 
+    // Quarter-end close: cap newly-collected cash to what actually landed by
+    // targetQuarterEnd, not whatever's paid as of whenever this run happens
+    // (see fetchPaidAmountAsOf). A mid-quarter tracking run (isFinal=false)
+    // has no such close to honor yet, so it keeps using the live total.
+    const paidAmountForPayable = isFinal
+      ? await fetchPaidAmountAsOf(job.underlyingInvoices, targetQuarterEnd, qboPaymentIndex, job.taxScale ?? 1)
+      : job.paidAmount;
+
     const priorCommissionedThrough = priorQuarterRow ? Number(priorQuarterRow.commissioned_through_amount) : 0;
-    const incrementalPaid = Math.max(0, job.paidAmount - priorCommissionedThrough);
+    const incrementalPaid = Math.max(0, paidAmountForPayable - priorCommissionedThrough);
     // Same withholding mechanism as unconfirmedFraction, composed rather than
     // duplicated: an unconfirmed PM attribution zeroes the confirmed fraction
     // entirely (same as unconfirmedFraction=1), and commissionedThroughAmount
@@ -854,8 +1297,11 @@ export async function runCommissionEngine({ quarter } = {}) {
         unconfirmed_subcontracted_fraction: Number(unconfirmedFraction.toFixed(4)),
         pm_attribution_confirmed: pmAttributionConfirmed,
         service_names: jobDetails.serviceNames,
+        line_item_names: jobDetails.lineItemNames,
         estimate_number: jobDetails.estimateNumber,
         estimate_date: jobDetails.estimateDate,
+        invoice_number: jobDetails.invoiceNumber,
+        invoice_date: jobDetails.invoiceDate,
         date_completed: jobDetails.dateCompleted,
         date_paid: jobDetails.datePaid,
         renewal_flag: renewalFlag,
