@@ -3,6 +3,8 @@
 // Session cookies are cached in-process for 4 hours to avoid repeated browser launches.
 
 import fs from 'fs';
+import net from 'net';
+import tls from 'tls';
 import { fileURLToPath } from 'url';
 import { logger } from '../../core/logger.js';
 
@@ -149,6 +151,18 @@ let _sessionExpiry       = 0;
 let _loginPromise        = null; // deduplicate concurrent login attempts
 let _incapsulaBackoffUntil = 0;  // epoch ms; refuse SA calls until this clears
 
+// Closes the live SA browser session, if any. Exported so cron.js can call this
+// from a process-exit handler — a live Chromium instance kept open for up to
+// SESSION_TTL_MS otherwise becomes an orphaned OS process (leaked memory) if the
+// Node process exits without cleaning it up first.
+export async function closeSaSession() {
+  if (_browser) {
+    try { await _browser.close(); } catch {}
+    _browser = null;
+    _page = null;
+  }
+}
+
 // ── Session management ───────────────────────────────────────────────────────
 
 async function saveSessionCookies(page) {
@@ -218,6 +232,27 @@ async function getSession(force = false) {
   return _loginPromise;
 }
 
+// Parses SA_PROXY_URL (http://user:pass@host:port) once, shared by login() (which
+// launches Chromium through it) and checkProxyHealth() (which probes it directly) —
+// so both agree on what "the proxy" means instead of drifting apart over time.
+function parseProxyUrl(proxyUrl) {
+  if (!proxyUrl) return null;
+  try {
+    const u = new URL(proxyUrl);
+    const port = u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80);
+    return {
+      hostname: u.hostname,
+      port,
+      server: `${u.protocol}//${u.host}`,
+      auth: u.username
+        ? { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) }
+        : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function login() {
   readSharedBackoff();
   if (Date.now() < _incapsulaBackoffUntil) {
@@ -244,33 +279,30 @@ async function login() {
 
   // Residential proxy support — set SA_PROXY_URL=http://user:pass@host:port to bypass Incapsula IP blocks
   const proxyUrl = process.env.SA_PROXY_URL || '';
-  let proxyArg  = null;
-  let proxyAuth = null;
-  if (proxyUrl) {
-    try {
-      const u = new URL(proxyUrl);
-      proxyArg  = `${u.protocol}//${u.host}`;
-      if (u.username) proxyAuth = { username: decodeURIComponent(u.username), password: decodeURIComponent(u.password) };
-      logger.info('SA: using residential proxy', { server: proxyArg });
-    } catch {
-      logger.warn('SA: SA_PROXY_URL is malformed — launching without proxy', { url: proxyUrl });
-    }
-  }
+  const proxy = parseProxyUrl(proxyUrl);
+  if (proxyUrl && !proxy) logger.warn('SA: SA_PROXY_URL is malformed — launching without proxy', { url: proxyUrl });
+  if (proxy) logger.info('SA: using residential proxy', { server: proxy.server });
+  const proxyAuth = proxy?.auth || null;
 
   puppeteerExtra.use(StealthPlugin());
   const launchArgs = ['--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu'];
-  if (proxyArg) launchArgs.push(`--proxy-server=${proxyArg}`);
+  if (proxy) launchArgs.push(`--proxy-server=${proxy.server}`);
   const browser = await puppeteerExtra.launch({
     executablePath,
     headless: true,
     args: launchArgs,
   });
 
-  const page = await browser.newPage();
-  if (proxyAuth) await page.authenticate(proxyAuth);
-  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-
+  // newPage()/authenticate()/setUserAgent() used to run outside this try block —
+  // if any of them threw (all three are real network/IPC calls that can fail,
+  // especially with a flaky residential proxy), the freshly-launched browser was
+  // never closed and never assigned to _browser, leaking an orphaned Chromium
+  // process. Moved inside so the catch below covers them too.
   try {
+    const page = await browser.newPage();
+    if (proxyAuth) await page.authenticate(proxyAuth);
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+
     // Try restoring from cached cookies first — avoids triggering a new login
     const restored = await tryRestoreSession(page);
     if (restored) {
@@ -306,6 +338,161 @@ async function login() {
     await browser.close();
     throw err;
   }
+}
+
+// ── Proxy health probe ───────────────────────────────────────────────────────
+// window.fetch() inside the browser collapses every network failure — proxy
+// auth rejection, exhausted bandwidth, DNS, TLS — into the same generic
+// "Failed to fetch" TypeError, by design (the Fetch spec hides the reason
+// from page JS). That makes SA outages undiagnosable from the alert alone.
+// This probes the proxy directly via a raw CONNECT tunnel, bypassing the
+// browser, so a real proxy-layer status (e.g. 407) can be surfaced.
+//
+// Phase 1 (connectPhase) opens the CONNECT tunnel, exactly as before.
+// Phase 2 (checkTunnelThroughput) is new: some proxy plans (including
+// Webshare's Static Residential fair-use policy — the actual cause of the
+// 2026-07-31 12-hour outage) throttle data AFTER a successful CONNECT rather
+// than rejecting it outright, so a CONNECT-only check reads that failure
+// mode as "ok: true". Phase 2 sends one real HTTPS request through the
+// already-open tunnel and requires an actual response byte to arrive before
+// calling it healthy — the exact signal a bandwidth-exhausted/throttled
+// tunnel can't produce, since it opens but never carries real traffic.
+async function connectPhase(proxy, targetHost, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let buffer = '';
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (!result.socket) { try { socket.destroy(); } catch {} }
+      resolve(result);
+    };
+
+    const socket = net.connect({ host: proxy.hostname, port: proxy.port });
+    const timer = setTimeout(() => finish({ checked: true, ok: false, detail: 'proxy CONNECT timed out' }), timeoutMs);
+
+    socket.on('error', (err) => {
+      finish({ checked: true, ok: false, detail: `proxy connection error: ${err.message}` });
+    });
+
+    // A graceful close (no bytes ever written) doesn't raise 'error' in Node —
+    // without this, a proxy that silently drops the connection (e.g. a
+    // suspended account) would misreport as "timed out" after the full wait.
+    socket.on('close', () => {
+      finish({ checked: true, ok: false, detail: 'proxy closed the connection without responding' });
+    });
+
+    socket.on('connect', () => {
+      const authHeader = proxy.auth
+        ? `Proxy-Authorization: Basic ${Buffer.from(`${proxy.auth.username}:${proxy.auth.password}`).toString('base64')}\r\n`
+        : '';
+      socket.write(
+        `CONNECT ${targetHost}:443 HTTP/1.1\r\n` +
+        `Host: ${targetHost}:443\r\n` +
+        authHeader +
+        `Connection: close\r\n\r\n`
+      );
+    });
+
+    socket.on('data', (chunk) => {
+      buffer += chunk.toString('utf8');
+      if (!buffer.includes('\r\n')) return; // status line hasn't fully arrived yet
+      const statusLine = buffer.split('\r\n')[0];
+      const match = statusLine.match(/HTTP\/\d\.\d (\d{3})/);
+      const status = match ? Number(match[1]) : null;
+      if (status === 200) {
+        // Hand the live socket to phase 2 instead of destroying it. Strip every
+        // listener this phase attached first — phase 2 installs its own
+        // 'data'/'error'/'close' handlers on top of the TLS wrapper, and this
+        // phase's copies would otherwise stay attached (harmless no-ops once
+        // `settled` is true, but pointless dangling listeners on a socket
+        // that's about to be reused for something else).
+        socket.removeAllListeners();
+        finish({ checked: true, ok: true, status, socket });
+      } else if (status === 407) {
+        finish({ checked: true, ok: false, status, detail: 'proxy rejected credentials (407) — check proxy provider account/bandwidth' });
+      } else {
+        finish({ checked: true, ok: false, status, detail: `proxy returned unexpected response: ${statusLine.trim() || '(empty)'}` });
+      }
+    });
+  });
+}
+
+function checkTunnelThroughput(socket, host, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let tlsSocket;
+    const startedAt = Date.now();
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { tlsSocket?.destroy(); } catch {}
+      try { socket.destroy(); } catch {}
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish({
+      ok: false,
+      detail: `proxy accepted CONNECT but no response arrived within ${timeoutMs}ms — tunnel likely open but not carrying real traffic (bandwidth exhausted/throttled)`,
+    }), timeoutMs);
+
+    try {
+      tlsSocket = tls.connect({ socket, host, servername: host, rejectUnauthorized: true }, () => {
+        tlsSocket.write(`GET / HTTP/1.1\r\nHost: ${host}\r\nConnection: close\r\nUser-Agent: JRBAgent-ProxyHealthCheck\r\n\r\n`);
+      });
+    } catch (err) {
+      finish({ ok: false, detail: `TLS handshake over tunnel failed to start: ${err.message}` });
+      return;
+    }
+
+    tlsSocket.on('data', () => {
+      // First byte of a real response is enough — this only needs to distinguish
+      // "the tunnel carries real traffic" from "it doesn't", not benchmark speed.
+      finish({ ok: true, detail: `tunnel carries real traffic — first response byte after ${Date.now() - startedAt}ms` });
+    });
+    tlsSocket.on('error', (err) => {
+      finish({ ok: false, detail: `error reading through tunnel: ${err.message}` });
+    });
+    tlsSocket.on('close', () => {
+      finish({ ok: false, detail: 'tunnel closed without any data ever arriving — likely throttled to zero' });
+    });
+  });
+}
+
+export async function checkProxyHealth(timeoutMs = 15000, throughputTimeoutMs = 10000) {
+  // NOTE: deliberately does NOT skip during an active Incapsula backoff. This probe
+  // is a raw CONNECT tunnel to the proxy itself — it never touches SA/Incapsula — so
+  // an Incapsula backoff has no bearing on whether the proxy is healthy. Skipping it
+  // during backoff (the previous behavior) suppressed exactly the diagnostic info
+  // needed to tell "is this outage proxy-caused or Incapsula-caused" during the
+  // window when that question matters most. The backoff state is still surfaced
+  // below (via incapsulaBackoffActive) so callers have full context either way.
+  readSharedBackoff();
+  const incapsulaBackoffActive = Date.now() < _incapsulaBackoffUntil;
+
+  const proxyUrl = process.env.SA_PROXY_URL || '';
+  if (!proxyUrl) return { checked: false, detail: 'SA_PROXY_URL not set — SA calls go direct', incapsulaBackoffActive };
+  const proxy = parseProxyUrl(proxyUrl);
+  if (!proxy) return { checked: false, detail: 'SA_PROXY_URL is malformed', incapsulaBackoffActive };
+  const targetHost = new URL(SA_BASE).hostname;
+
+  const connectResult = await connectPhase(proxy, targetHost, timeoutMs);
+  if (!connectResult.ok) {
+    return { ...connectResult, incapsulaBackoffActive };
+  }
+
+  const throughputResult = await checkTunnelThroughput(connectResult.socket, targetHost, throughputTimeoutMs);
+  return {
+    checked: true,
+    ok: throughputResult.ok,
+    status: connectResult.status,
+    detail: throughputResult.ok
+      ? `proxy accepted the connection and real traffic flows through it — ${throughputResult.detail}`
+      : `proxy accepted the CONNECT handshake, but ${throughputResult.detail}`,
+    incapsulaBackoffActive,
+  };
 }
 
 // ── HTTP helpers ─────────────────────────────────────────────────────────────
@@ -351,6 +538,35 @@ function looksLikeIncapsula(res) {
   );
 }
 
+async function post(path, body, referer) {
+  readSharedBackoff();
+  if (Date.now() < _incapsulaBackoffUntil) {
+    const remainingMin = Math.ceil((_incapsulaBackoffUntil - Date.now()) / 60000);
+    throw new Error(`SA Incapsula backoff active — ${remainingMin} min remaining before SA operations resume`);
+  }
+  let page = await getSession();
+  let res = await saPost(page, path, body, referer);
+  if (looksLikeLoginPage(res)) {
+    logger.info('SA: session expired, refreshing');
+    page = await getSession(true);
+    res = await saPost(page, path, body, referer);
+  }
+  // Log any null-data response so we can see the raw content if detection misses
+  if (res.data === null) {
+    logger.warn('SA: null response from API', { path, status: res.status, textSlice: res.text?.slice(0, 300) });
+  }
+  if (looksLikeIncapsula(res)) {
+    // Don't retry with another login — that adds another flagged login and makes it worse.
+    // Set the backoff timer and broadcast to all other scheduler instances via shared file.
+    _incapsulaBackoffUntil = Date.now() + INCAPSULA_BACKOFF_MS;
+    writeSharedBackoff(_incapsulaBackoffUntil);
+    const clearAt = new Date(_incapsulaBackoffUntil).toLocaleTimeString();
+    logger.error('SA: Incapsula block on API call — setting 45-min backoff', { clearAt });
+    throw new Error(`SA blocked by Incapsula bot protection. All SA operations paused until ${clearAt}. No further login attempts will be made.`);
+  }
+  return res;
+}
+
 async function saGet(page, url) {
   const result = await page.evaluate(async (url) => {
     const res = await window.fetch(url, { credentials: 'include' });
@@ -385,35 +601,6 @@ export async function navigateToClientView({ clientId }) {
   await new Promise(r => setTimeout(r, 3000));
 }
 
-async function post(path, body, referer) {
-  readSharedBackoff();
-  if (Date.now() < _incapsulaBackoffUntil) {
-    const remainingMin = Math.ceil((_incapsulaBackoffUntil - Date.now()) / 60000);
-    throw new Error(`SA Incapsula backoff active — ${remainingMin} min remaining before SA operations resume`);
-  }
-  let page = await getSession();
-  let res = await saPost(page, path, body, referer);
-  if (looksLikeLoginPage(res)) {
-    logger.info('SA: session expired, refreshing');
-    page = await getSession(true);
-    res = await saPost(page, path, body, referer);
-  }
-  // Log any null-data response so we can see the raw content if detection misses
-  if (res.data === null) {
-    logger.warn('SA: null response from API', { path, status: res.status, textSlice: res.text?.slice(0, 300) });
-  }
-  if (looksLikeIncapsula(res)) {
-    // Don't retry with another login — that adds another flagged login and makes it worse.
-    // Set the backoff timer and broadcast to all other scheduler instances via shared file.
-    _incapsulaBackoffUntil = Date.now() + INCAPSULA_BACKOFF_MS;
-    writeSharedBackoff(_incapsulaBackoffUntil);
-    const clearAt = new Date(_incapsulaBackoffUntil).toLocaleTimeString();
-    logger.error('SA: Incapsula block on API call — setting 45-min backoff', { clearAt });
-    throw new Error(`SA blocked by Incapsula bot protection. All SA operations paused until ${clearAt}. No further login attempts will be made.`);
-  }
-  return res;
-}
-
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 function toSaBrowserDate(d) {
@@ -445,10 +632,75 @@ function extractPlaceholders(text) {
   return [...new Set(matches || [])];
 }
 
+// SA's ScheduledWork response gives StartDate/EndDate/DateCompleted as "M/D/YYYY" strings
+function parseSaMdy(s) {
+  if (!s) return null;
+  const [m, d, y] = String(s).split('/').map(Number);
+  if (!m || !d || !y) return null;
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+// Maps a raw ScheduledWorkWs.asmx/Query item to the sa_jobs table schema (fleetops Supabase)
+function mapScheduledWorkItem(item) {
+  const now = new Date().toISOString();
+  return {
+    id: item.ID,
+    start_date: parseSaMdy(item.StartDate),
+    customer_id: item.CustomerID || null,
+    invoice_id: item.InvoiceID || null,
+    client: item.Client || '',
+    address: item.Address || null,
+    city: item.City || null,
+    state: item.State || null,
+    zip: item.Zip || null,
+    service: item.Service || null,
+    assigned: item.Assigned || null,
+    assigned_resource_id: item.AssignedResourceID || null,
+    sales_rep: item.SalesRep || null,
+    end_date: parseSaMdy(item.EndDate),
+    start_time: item.StartTime || null,
+    end_time: item.EndTime || null,
+    date_completed: parseSaMdy(item.DateCompleted),
+    completed_username: item.CompletedUsername || null,
+    status: item.Status ?? null,
+    sub_status: item.SubStatus || null,
+    priority: item.Priority ?? null,
+    schedule_type: item.ScheduleType || null,
+    is_rescheduled: !!item.IsRescheduled,
+    amount: item.Amount ?? null,
+    rate: item.Rate ?? null,
+    hours: item.Hours ?? null,
+    total_man_hours: item.TotalManHours ?? null,
+    budgeted_hours: item.BudgetedHours ?? null,
+    latitude: item.Latitude ?? null,
+    longitude: item.Longitude ?? null,
+    internal_scheduling_notes: item.InternalSchedulingNotes || null,
+    has_route_sheet_notes: !!item.HasRouteSheetNotes,
+    has_comments: !!item.HasComments,
+    job_comments: item.JobComments || [],
+    raw_json: item,
+    first_seen_at: now,
+    last_synced_at: now,
+  };
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 /** Returns the epoch ms timestamp when the Incapsula backoff clears (0 if not active). */
 export function getSABackoffUntil() { return _incapsulaBackoffUntil; }
+
+/** Generic authenticated POST for investigative use — returns raw {status, data, text}. */
+export async function postRaw({ path, body, referer }) {
+  return post(path, body, referer || 'ClientView.aspx');
+}
+
+/** Fetches SA's own payment record — the only known way to inspect a payment's QBO sync state. */
+export async function getPaymentData({ paymentId }) {
+  const res = await post('/WebServices/PaymentOverlayWs.asmx/GetPaymentData', { PaymentID: paymentId }, 'ClientView.aspx');
+  const d = res.data?.d || res.data;
+  if (!d) throw new Error(`SA getPaymentData failed for ${paymentId}: ${res.text?.slice(0, 200)}`);
+  return d;
+}
 
 /**
  * Search SA clients by name.
@@ -686,6 +938,381 @@ export async function setClientBillingDefaults({ clientId }) {
   }
   logger.info('SA: billing defaults set', { clientId, city: d.City, taxRefId });
   return { clientId, sendInvoiceBy: 'Email', taxable: true, city: d.City, taxRefId, savedViaApi: true };
+}
+
+/**
+ * Set (or correct) the QboID link on an existing SA client record — the field SA
+ * uses to know which QBO customer an invoice should sync to. Round-trips every
+ * other field unchanged via GetClientInfo -> SaveClient (same pattern as
+ * setClientBillingDefaults) so this touches nothing else on the client record —
+ * no billing values, no invoice/line-item data. Never creates a new SA client.
+ * Returns { clientId, previousQboId, newQboId, savedViaApi }
+ */
+export async function setClientQboId({ clientId, qboId }) {
+  const infoRes = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'Clients.aspx');
+  const d = infoRes.data?.d;
+  if (!d) throw new Error(`SA setClientQboId: GetClientInfo failed for ${clientId}: ${infoRes.text?.slice(0, 200)}`);
+
+  function parseSaDate(v) {
+    if (!v) return { Month: -1, Day: -1, Year: -1 };
+    if (typeof v === 'object' && 'Month' in v && 'Day' in v && 'Year' in v) {
+      const { Month, Day, Year } = v;
+      if (Month > 0 && Day > 0 && Year > 0) {
+        const dt = new Date(Year, Month - 1, Day);
+        if (dt.getMonth() + 1 === Month && dt.getDate() === Day) return { Month, Day, Year };
+      }
+      return { Month: -1, Day: -1, Year: -1 };
+    }
+    const ms = String(v).match(/\/Date\((-?\d+)\)\//);
+    const dt = ms ? new Date(parseInt(ms[1])) : new Date(v);
+    if (isNaN(dt.getTime())) return { Month: -1, Day: -1, Year: -1 };
+    return { Month: dt.getMonth() + 1, Day: dt.getDate(), Year: dt.getFullYear() };
+  }
+
+  const previousQboId = d.QboID || '';
+
+  const info = {
+    ClientID: clientId, IsLead: false, saveType: 0, IsConvertingLead: false,
+    FirstName: d.FirstName || '', LastName: d.LastName || '', NickName: d.NickName || '',
+    ClientCompanyName: d.ClientCompanyName || '', Email: d.Email || '',
+    HomePhone: d.HomePhone || '', CellPhone: d.CellPhone || '',
+    ProviderID: d.ProviderData?.Value || EMPTY_GUID,
+    WorkPhone: d.WorkPhone || '', OtherPhone: d.OtherPhone || '', FaxNumber: d.FaxNumber || '',
+    PreferredPhoneID: d.PreferredPhoneID || '1', ClientTitle: d.ClientTitle || '',
+    ListID: d.ListID || EMPTY_GUID,
+    QboID: qboId,                                                    // ← only field being changed
+    PropertyName: d.PropertyName || '', PropertyNameAttentionTo: d.PropertyNameAttentionTo || '',
+    Address: d.Address || '', AddressTwo: d.AddressTwo || '', City: d.City || '',
+    StateID: d.StateInfo?.Value || EMPTY_GUID, PostalCode: d.PostalCode || '',
+    MapCode: d.MapCode || '', DivisionID: d.DivisionInfo?.Value || EMPTY_GUID,
+    NameOnInv: d.NameOnInv || '', AttentionTo: d.AttentionTo || '',
+    BillingAddress: d.BillingAddress || '', BillingAddressTwo: d.BillingAddressTwo || '',
+    BillingCity: d.BillingCity || '', BillingStateID: d.BillingStateInfo?.Value || EMPTY_GUID,
+    BillingPostalCode: d.BillingPostalCode || '',
+    MasterPropertyClientID: d.MasterPropertyClientInfo?.Value || EMPTY_GUID,
+    CountryID: d.CountryInfo?.Value || EMPTY_GUID,
+    DefaultBillingUnderID: d.BillingUnderInfo?.Value || EMPTY_GUID,
+    ClientSinceDate: parseSaDate(d.ClientSinceDate),
+    CSRId: d.CSRInfo?.Value || EMPTY_GUID, AccountTypeID: d.AccountTypeInfo?.Value || EMPTY_GUID,
+    PriorityID: d.PriorityID || 0, UserName: d.UserName || '', Password: d.Password || '',
+    Latitude: d.Latitude || '', Longitude: d.Longitude || '',
+    SalesPersonID: d.SalesPersonInfo?.Value || EMPTY_GUID,
+    CustomerSourceID: d.CustomerSourceInfo?.Value || EMPTY_GUID,
+    ReferredByID: d.ReferredByInfo?.Value || EMPTY_GUID, DoNotMarket: d.DoNotMarket || false,
+    BillingEmail: d.BillingEmail || '', FlagForReview: d.FlagForReview || false,
+    AccountNumber: d.AccountNumber || '', SubscriptionType: d.SubscriptionType || 0,
+    BillingDate: parseSaDate(d.BillingDate), AutoCharge: d.AutoCharge || false,
+    BillingNotes: d.BillingNotes || '', PaymentMethodID: d.PaymentMethodInfo?.Value || EMPTY_GUID,
+    SalesTaxRefID: d.SalesTaxInfo?.Value || EMPTY_GUID,
+    SalesTaxCodeID: d.SalesTaxCodeInfo?.Value || EMPTY_GUID,          // preserve existing tax setting exactly
+    InvoiceFrequencyID: d.InvoiceFrequencyInfo?.Value || EMPTY_GUID,
+    StandardTermID: d.StandardTermInfo?.Value || EMPTY_GUID,
+    SendInvoiceBy: d.SendInvoiceBy || 'Email',                        // preserve existing, don't force
+    DefaultInvoiceFormatID: d.DefaultInvoiceInfo?.Value || EMPTY_GUID,
+    OfficeNotes: d.OfficeNotes || '',
+    CCFirstName: d.CCFirstName || '', CCLastName: d.CCLastName || '',
+    CCBillingAddress: d.CCBillingAddress || '', CCBillingZip: d.CCBillingZip || '',
+    CCNumber: d.CCNumber || '', CCExpiration: d.CCExpiration || '', CCToken: d.CCToken || '',
+    CCCustomerToken: d.CCCustomerToken || '', CCBrand: d.CCBrand || '',
+    Geocode: false, ManualGeocode: false, UpdateManualGeocodeFlag: false,
+  };
+
+  const saveRes = await post('/webservices/ClientEditOverlayWs.asmx/SaveClient', { info }, 'ClientView.aspx');
+  const result = saveRes.data?.d;
+  if (result?.response?.Errors?.length > 0) {
+    throw new Error(`SA setClientQboId SaveClient errors: ${JSON.stringify(result.response.Errors)}`);
+  }
+
+  // Verify via a fresh GetClientInfo read rather than trusting the SaveClient response —
+  // SA returns 500 for QBO-linked clients due to a known server-side post-save sync bug
+  // (see setClientBillingDefaults), even when the underlying field write succeeded.
+  const verifyRes = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'Clients.aspx');
+  const verifiedQboId = verifyRes.data?.d?.QboID || '';
+  const savedViaApi = saveRes.status !== 500;
+  if (!savedViaApi) {
+    logger.warn('SA: SaveClient returned 500 (known SA QBO-sync bug) — verified via GetClientInfo instead', { clientId });
+  }
+  if (verifiedQboId !== qboId) {
+    throw new Error(`SA setClientQboId: verification failed — expected QboID ${qboId}, GetClientInfo shows "${verifiedQboId}"`);
+  }
+  logger.info('SA: QboID set and verified', { clientId, previousQboId, newQboId: qboId, savedViaApi });
+  return { clientId, previousQboId, newQboId: qboId, savedViaApi };
+}
+
+/**
+ * SA's own real "QBO Catchup Sync" feature, reverse-engineered from
+ * QboCompanyOverlay.js (the client page's "Link to QuickBooks" panel,
+ * opened via ClientView's ShowQboCompany()). `doInitialSync: true` is what
+ * the UI sends when no catch-up date is chosen — the option meant for a
+ * client that's never synced before. This is a first-class, documented SA
+ * UI action, not a workaround.
+ */
+export async function triggerQboInitialSync({ clientId }) {
+  const res = await post('/v3/WebServices/Shared/UtilitiesWs.asmx/TriggerQBOInitialSync', {
+    SAPCustomerID: clientId,
+    browserDate: { Month: 1, Day: 1, Year: 2014 },
+    doInitialSync: true,
+  }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA triggerQboInitialSync: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const errors = d.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA triggerQboInitialSync failed: ${JSON.stringify(errors)}`);
+  }
+  logger.info('SA: QBO initial sync triggered', { clientId });
+  return { clientId, errors };
+}
+
+/**
+ * Read-only status check for SA's QBO company-sync overlay — last sync
+ * time, subscription status, sync step, and error code for a given client.
+ */
+export async function getQboCompanyData({ clientId }) {
+  const res = await post('/WebServices/ClientViewWs.asmx/GetQboCompanyData',
+    { customerId: clientId }, 'ClientView.aspx');
+  const result = res.data?.d?.Result;
+  if (!result) {
+    throw new Error(`SA getQboCompanyData: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  return result;
+}
+
+/**
+ * Read-only check of the SA client's own QboID link (the field that gates
+ * whether SA's automatic invoice sync has a QBO customer to push to).
+ * Returns the raw field set — SA doesn't reliably use one consistent key
+ * name across responses, so callers should check all of them.
+ */
+export async function getClientQboLink({ clientId }) {
+  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
+    { ClientID: clientId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getClientQboLink: no data returned for clientId ${clientId}`);
+  return {
+    clientId,
+    name: d.PropertyName || `${d.FirstName || ''} ${d.LastName || ''}`.trim(),
+    QboID: d.QboID ?? null,
+    QboId: d.QboId ?? null,
+    HasQBO: d.HasQBO ?? null,
+  };
+}
+
+/**
+ * Fetch the full editable record for an SA invoice, via the InvoiceOverlay.asmx
+ * service (distinct from ClientViewWs.asmx / ClientEditOverlayWs.asmx — invoices
+ * have their own overlay service). Endpoint/payload shape confirmed 2026-07-31
+ * from a live browser network capture, not guessed.
+ * Returns the raw `d` object (InvoiceID, CustomerData, InvoiceNumber, LineItems
+ * with full rate/quantity/tax detail, etc.) exactly as SA returns it.
+ */
+export async function getInvoice({ invoiceId }) {
+  const res = await post('/WebServices/InvoiceOverlay.asmx/GetInvoice',
+    { InvoiceID: invoiceId }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getInvoice: no data returned for invoiceId ${invoiceId}: ${res.text?.slice(0, 200)}`);
+  return d;
+}
+
+// ── Audit trail — AuditTrailsWs.asmx ─────────────────────────────────────────
+
+// SA's per-record "view history" dialog (ShowAuditTrailDialog) always passes one
+// of these literal Type strings as EntityID's Type. Confirmed by reading SA's own
+// minified frontend JS call sites:
+//   - "Quote"            → sa-js-cache/service-autopilot.md doc (estimates)
+//   - "Invoice"           → sa-js-cache-InvoiceOverlay.js:1213
+//   - "ScheduledService"  → sa-js-cache-ClientView-minified.js (job.ID / ServiceItem.ID)
+//   - "Customer"          → sa-js-cache-ClientView-minified.js (_clientView.customerID)
+//   - "Ticket"            → sa-js-cache-ClientView-minified.js / sa-minified.js
+//   - "Payment"           → sa-js-cache-sa-minified.js
+// "job"/"payment"/"client" below are our own friendly aliases — pass either the
+// alias or the raw SA Type string directly.
+const AUDIT_TRAIL_TYPES = {
+  estimate: 'Quote',
+  quote:    'Quote',
+  invoice:  'Invoice',
+  job:      'ScheduledService',
+  payment:  'Payment',
+  client:   'Customer',
+  ticket:   'Ticket',
+};
+
+// SA .NET date format: "/Date(1776780203813)/"
+function parseNetDate(val) {
+  if (!val) return null;
+  const match = String(val).match(/\/Date\((\d+)\)\//);
+  if (match) return new Date(parseInt(match[1], 10));
+  const d = new Date(val);
+  return isNaN(d) ? null : d;
+}
+
+/**
+ * Pull the audit trail (who/what/when history log) for a single SA record —
+ * invoice, estimate, job, payment, client, or ticket. `type` accepts either a
+ * friendly alias (estimate/invoice/job/payment/client/ticket) or a raw SA Type
+ * string (e.g. "ScheduledService"). Only "Quote" and "Invoice" have been
+ * confirmed against real records; the other type strings are taken directly
+ * from SA's own frontend JS but haven't been exercised live yet — verify the
+ * response shape the first time you use a new type.
+ *
+ * Returns the raw OutputRecords[] plus a `Note`/`DateCreated` parsed to a JS
+ * Date for convenience (`when`).
+ */
+export async function getAuditTrail({ entityId, type }) {
+  const saType = AUDIT_TRAIL_TYPES[type?.toLowerCase?.()] || type;
+  if (!saType) {
+    throw new Error(`SA getAuditTrail: type is required (one of ${Object.keys(AUDIT_TRAIL_TYPES).join(', ')}, or a raw SA Type string)`);
+  }
+  const res = await post('/WebServices/AuditTrailsWs.asmx/GetAuditTrailData',
+    { InputData: { EntityID: entityId, Type: saType } }, 'ClientView.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA getAuditTrail: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const records = (d.OutputRecords || []).map(r => ({
+    ...r,
+    when: parseNetDate(r.DateCreated),
+  }));
+  return records;
+}
+
+/** Converts GetInvoice's 0-indexed Month to the 1-indexed shape SaveInvoice expects. */
+function toSaveInvoiceDate(dateObj) {
+  if (!dateObj || typeof dateObj !== 'object') return dateObj;
+  return { Month: dateObj.Month + 1, Day: dateObj.Day, Year: dateObj.Year };
+}
+
+/**
+ * Read-modify-write an SA invoice via InvoiceOverlay.asmx, round-tripping the
+ * full record from GetInvoice unchanged except for whatever's in `overrides`.
+ * Converts InvoiceDate/InvoiceDueDate/LineItems[].Date to SaveInvoice's
+ * 1-indexed-month shape automatically (see toSaveInvoiceDate) — GetInvoice
+ * returns Month 0-indexed but SaveInvoice expects it 1-indexed; skipping this
+ * conversion corrupts the invoice's dates on every save (confirmed incident,
+ * Kettle Moraine invoice #33351, 2026-07-31 — fully reverted same day).
+ * `overrides` are applied last and are NOT auto-converted — pass already-
+ * 1-indexed months there. `expect` is an optional {field: expectedValue} map
+ * checked against a fresh GetInvoice read after saving; throws if mismatched.
+ */
+export async function saveInvoiceFields({ invoiceId, overrides = {}, expect = {} }) {
+  const d = await getInvoice({ invoiceId });
+  const invoiceData = {
+    ...d,
+    TxnID: d.TxnID ?? '',
+    DeletedLineItems: d.DeletedLineItems ?? [],
+    InvoiceDate: toSaveInvoiceDate(d.InvoiceDate),
+    InvoiceDueDate: toSaveInvoiceDate(d.InvoiceDueDate),
+    LineItems: (d.LineItems || []).map(li => ({ ...li, Date: toSaveInvoiceDate(li.Date) })),
+    ...overrides,
+  };
+
+  const saveRes = await post('/WebServices/InvoiceOverlay.asmx/SaveInvoice',
+    { InvoiceData: invoiceData }, 'ClientView.aspx');
+  const result = saveRes.data?.d;
+  if (result?.Errors?.length > 0) {
+    throw new Error(`SA saveInvoiceFields errors: ${JSON.stringify(result.Errors)}`);
+  }
+
+  const verify = await getInvoice({ invoiceId });
+  for (const [field, expected] of Object.entries(expect)) {
+    if (verify[field] !== expected) {
+      throw new Error(`SA saveInvoiceFields: verification failed — expected ${field}="${expected}", GetInvoice shows "${verify[field]}"`);
+    }
+  }
+  return verify;
+}
+
+/**
+ * Toggle an invoice's number — the established manual technique for forcing
+ * SA to re-attempt its one-way sync to QBO. Round-trips the invoice unchanged
+ * except InvoiceNumber. Uses saveInvoiceFields (date-safe) rather than a bare
+ * spread-and-save, unlike the previous implementation of this function.
+ */
+export async function setInvoiceNumber({ invoiceId, newNumber }) {
+  return saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: newNumber },
+    expect: { InvoiceNumber: newNumber },
+  });
+}
+
+/**
+ * Toggles an invoice's number to force SA's backend to re-attempt its QBO
+ * sync, polls for a resulting QboID, then reverts the number/lock state
+ * regardless of outcome. Safe and non-destructive — never touches rate,
+ * quantity, line items, or totals. Confirmed via live testing (2026-08-03)
+ * that a valid client-level QBO link is necessary for this to work; on an
+ * unlinked/stale-linked client it will safely no-op (revert with synced:false).
+ */
+export async function resyncInvoiceToQbo({ invoiceId, pollIntervalMs = 15_000, maxPolls = 8 }) {
+  const before = await getInvoice({ invoiceId });
+  const originalNumber = before.InvoiceNumber;
+  const originalLocked = !!before.IsLocked;
+  const alreadyQboId = before.QboID || null;
+
+  logger.info('SA: resyncInvoiceToQbo starting', { invoiceId, originalNumber, originalLocked, alreadyQboId });
+
+  await saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: `${originalNumber}z`, IsLocked: false },
+    expect: { InvoiceNumber: `${originalNumber}z` },
+  });
+
+  let qboId = null;
+  let attempts = 0;
+  for (let i = 0; i < maxPolls; i++) {
+    attempts++;
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    const check = await getInvoice({ invoiceId });
+    if (check.QboID) {
+      qboId = check.QboID;
+      break;
+    }
+  }
+
+  await saveInvoiceFields({
+    invoiceId,
+    overrides: { InvoiceNumber: originalNumber, IsLocked: originalLocked },
+    expect: { InvoiceNumber: originalNumber },
+  });
+  attempts++;
+
+  const synced = !!qboId;
+  if (!synced) {
+    logger.warn('SA: resyncInvoiceToQbo did not observe a QboID within poll budget — reverted, not retrying further', { invoiceId, maxPolls });
+  } else {
+    logger.info('SA: resyncInvoiceToQbo synced successfully', { invoiceId, qboId });
+  }
+
+  return { invoiceId, synced, qboId, originalNumber, originalLocked, attempts };
+}
+
+/**
+ * Permanently delete SA client records via the bulk-delete action from the
+ * Clients list view. Endpoint/payload confirmed from SA's own ClientList.js
+ * 2026-07-31 (not guessed) — this is the real "select clients, click Delete"
+ * feature, not a workaround. DESTRUCTIVE AND IRREVERSIBLE — callers must
+ * verify each clientId has no attached jobs/invoices/estimates/history before
+ * calling this. SA itself may also refuse (returned per-id in `errors`) if a
+ * client has attached records it won't let go.
+ * Returns { requested, removedIds, errors }
+ */
+export async function deleteClients({ clientIds }) {
+  const res = await post('/webservices/ClientList.asmx/DeleteClients',
+    { DeleteItems: clientIds }, 'ClientList.aspx');
+  const d = res.data?.d;
+  if (!d) {
+    throw new Error(`SA deleteClients: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
+  }
+  const errors = d.Errors || [];
+  if (errors.length > 0) {
+    throw new Error(`SA deleteClients failed: ${JSON.stringify(errors)}`);
+  }
+  logger.info('SA: clients deleted', { requested: clientIds.length, removed: (d.RemovedIndexes || []).length });
+  return { requested: clientIds.length, removedIds: clientIds, errors };
 }
 
 /**
@@ -1288,66 +1915,6 @@ export async function getClientProfile({ clientId }) {
 }
 
 /**
- * SA's own real "QBO Catchup Sync" feature, reverse-engineered from
- * QboCompanyOverlay.js (the client page's "Link to QuickBooks" panel,
- * opened via ClientView's ShowQboCompany()). `doInitialSync: true` is what
- * the UI sends when no catch-up date is chosen — the option meant for a
- * client that's never synced before. This is a first-class, documented SA
- * UI action, not a workaround.
- */
-export async function triggerQboInitialSync({ clientId }) {
-  const res = await post('/v3/WebServices/Shared/UtilitiesWs.asmx/TriggerQBOInitialSync', {
-    SAPCustomerID: clientId,
-    browserDate: { Month: 1, Day: 1, Year: 2014 },
-    doInitialSync: true,
-  }, 'ClientView.aspx');
-  const d = res.data?.d;
-  if (!d) {
-    throw new Error(`SA triggerQboInitialSync: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
-  }
-  const errors = d.Errors || [];
-  if (errors.length > 0) {
-    throw new Error(`SA triggerQboInitialSync failed: ${JSON.stringify(errors)}`);
-  }
-  logger.info('SA: QBO initial sync triggered', { clientId });
-  return { clientId, errors };
-}
-
-/**
- * Read-only status check for SA's QBO company-sync overlay — last sync
- * time, subscription status, sync step, and error code for a given client.
- */
-export async function getQboCompanyData({ clientId }) {
-  const res = await post('/WebServices/ClientViewWs.asmx/GetQboCompanyData',
-    { customerId: clientId }, 'ClientView.aspx');
-  const result = res.data?.d?.Result;
-  if (!result) {
-    throw new Error(`SA getQboCompanyData: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
-  }
-  return result;
-}
-
-/**
- * Read-only check of the SA client's own QboID link (the field that gates
- * whether SA's automatic invoice sync has a QBO customer to push to).
- * Returns the raw field set — SA doesn't reliably use one consistent key
- * name across responses, so callers should check all of them.
- */
-export async function getClientQboLink({ clientId }) {
-  const res = await post('/webservices/ClientEditOverlayWs.asmx/GetClientInfo',
-    { ClientID: clientId }, 'ClientView.aspx');
-  const d = res.data?.d;
-  if (!d) throw new Error(`SA getClientQboLink: no data returned for clientId ${clientId}`);
-  return {
-    clientId,
-    name: d.PropertyName || `${d.FirstName || ''} ${d.LastName || ''}`.trim(),
-    QboID: d.QboID ?? null,
-    QboId: d.QboId ?? null,
-    HasQBO: d.HasQBO ?? null,
-  };
-}
-
-/**
  * Fetch the Pavement Size custom field value for a single SA client.
  * Uses GetCustomerDataAsync to get the CustomerJobID, then GetCustomFields to read
  * the "Pavement Size" field by Description. Returns sq ft as a number, or null.
@@ -1377,7 +1944,7 @@ export async function fetchClientPavementSf(clientId) {
  * that overwrites all custom fields atomically. Confirmed via reverse-engineering SA's Knockout
  * overlay save (probe-cf-saveclicked.mjs, 2026-07-21).
  */
-export async function setClientCrackfill({ clientId }) {
+export async function setClientCrackfill({ clientId, pavementSf: pavementSfArg }) {
   // 1. Get custom field list (IDs + current values)
   const gcflRes = await post('/webservices/ClientEditOverlayWs.asmx/GetCustomFieldList',
     { ClientID: clientId }, 'Clients.aspx');
@@ -1394,9 +1961,11 @@ export async function setClientCrackfill({ clientId }) {
     throw new Error(`SA setClientCrackfill: custom field(s) not found: ${missing.join(', ')}`);
   }
 
-  const pavementSf = parseFloat(pavementField.CustomFieldValue);
-  if (!pavementField.CustomFieldValue || isNaN(pavementSf) || pavementSf <= 0) {
-    return { clientId, skipped: true, reason: `Pavement Size "${pavementField.CustomFieldValue}" is not a valid positive number` };
+  // Use caller-supplied value (intake path) or read from SA (reconciliation path)
+  const pavementRaw = pavementSfArg != null ? String(pavementSfArg) : (pavementField.CustomFieldValue || '');
+  const pavementSf  = parseFloat(pavementRaw);
+  if (!pavementRaw || isNaN(pavementSf) || pavementSf <= 0) {
+    return { clientId, skipped: true, reason: `Pavement Size "${pavementRaw}" is not a valid positive number` };
   }
 
   const lbsCrackfill = Math.round(pavementSf * 0.015);
@@ -1426,12 +1995,14 @@ export async function setClientCrackfill({ clientId }) {
     return { Month: dt.getMonth() + 1, Day: dt.getDate(), Year: dt.getFullYear() };
   }
 
-  // 3. Build CustomFields array — all fields preserved, crackfill updated
-  const customFields = fields.map(f => ({
-    CustomFieldValue: f.CustomFieldName === 'Lbs of Crackfill' ? String(lbsCrackfill) : (f.CustomFieldValue || ''),
-    CustomFieldDate:  null,
-    CustomFieldID:    f.CustomFieldID,
-  }));
+  // 3. Build CustomFields array — crackfill updated; pavement size written if caller supplied it
+  const customFields = fields.map(f => {
+    if (f.CustomFieldName === 'Lbs of Crackfill')
+      return { CustomFieldValue: String(lbsCrackfill), CustomFieldDate: null, CustomFieldID: f.CustomFieldID };
+    if (f.CustomFieldName === 'Pavement Size' && pavementSfArg != null)
+      return { CustomFieldValue: String(pavementSfArg), CustomFieldDate: null, CustomFieldID: f.CustomFieldID };
+    return { CustomFieldValue: f.CustomFieldValue || '', CustomFieldDate: null, CustomFieldID: f.CustomFieldID };
+  });
 
   // 4. Build SaveClient info — preserve all existing client values, only add CustomFields
   const info = {
@@ -1661,6 +2232,83 @@ export async function syncWaitingList() {
 }
 
 /**
+ * Pull the SA dispatch board's ScheduledWork for a date range and upsert to sa_jobs
+ * (fleetops Supabase). Unlike syncWaitingList, this never prunes — sa_jobs is a
+ * historical record (invoiced/completed jobs must persist), not a live snapshot.
+ */
+export async function syncScheduledWork({ startDate, endDate }) {
+  // Date-only strings ("2026-07-01") parse as UTC midnight — normalize to local noon first
+  // so a Central-time host doesn't read the range back as shifted a day earlier.
+  const normalizeDate = (d) => typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? new Date(`${d}T12:00:00`) : d;
+  const start = toSaBrowserDate(normalizeDate(startDate));
+  const end   = toSaBrowserDate(normalizeDate(endDate));
+  const isMulti = !(start.Month === end.Month && start.Day === end.Day && start.Year === end.Year);
+
+  const body = {
+    OnNewDispatchBoard: true,
+    QueryData: {
+      IsWaitingList: false,
+      StartDate: start, EndDate: end,
+      ServiceIDs: [], CrewIDs: [], CustomFields: [], Divisions: [],
+      Tags: [], TicketTypes: [], DOW: -1,
+      DispatchID: EMPTY_GUID, DispatchedOnly: false, FilterProximity: false,
+      IncludeUnassignedWork: false, IsCloseOutDay: false, IsSnow: false,
+      LoadAppointmentTimes: false, MapCode: '', MapCodeOperator: '0', MultiDay: isMulti,
+      Priority: '0', ProximityAddress: '', ProximityMiles: '5.00',
+      ResourceID: 1, ResourceTags: '', ScheduleStatus: '0',
+      ScreenViewID: EMPTY_GUID, ShowProductTotals: true, UseMinDays: true,
+      Address: '', City: '', Client: '', Zip: '',
+    },
+  };
+
+  const res = await post('/WebServices/ScheduledWorkWs.asmx/Query', body, 'DispatchBoard.aspx');
+  const items = res.data?.d?.ScheduledItems || res.data?.ScheduledItems || [];
+  logger.info('SA syncScheduledWork: fetched from SA', { count: items.length, startDate, endDate });
+
+  if (items.length === 0) return { synced: 0 };
+
+  // start_date is half of the upsert's dedup key (id, start_date) — a null here means
+  // re-syncing the same item creates a duplicate row instead of updating it.
+  const skipped = items.filter(item => !parseSaMdy(item.StartDate)).length;
+  if (skipped > 0) logger.warn('SA syncScheduledWork: dropping items with unparseable StartDate', { skipped });
+  const records = items.filter(item => parseSaMdy(item.StartDate)).map(mapScheduledWorkItem);
+
+  const { createClient } = await import('@supabase/supabase-js');
+  const db = createClient(
+    'https://mzywmgesulyalevtzudw.supabase.co',
+    process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+  );
+
+  const BATCH = 500;
+
+  // Preserve the true first_seen_at for rows that already exist — an upsert otherwise
+  // resets it to "now" on every re-sync.
+  const keys = records.map(r => `and(id.eq.${r.id},start_date.eq.${r.start_date})`);
+  const existingFirstSeen = new Map();
+  for (let i = 0; i < keys.length; i += BATCH) {
+    const { data, error } = await db
+      .from('sa_jobs')
+      .select('id, start_date, first_seen_at')
+      .or(keys.slice(i, i + BATCH).join(','));
+    if (error) throw new Error(`syncScheduledWork first_seen_at lookup: ${error.message}`);
+    for (const row of data || []) existingFirstSeen.set(`${row.id}|${row.start_date}`, row.first_seen_at);
+  }
+  for (const r of records) {
+    const existing = existingFirstSeen.get(`${r.id}|${r.start_date}`);
+    if (existing) r.first_seen_at = existing;
+  }
+
+  let upserted = 0;
+  for (let i = 0; i < records.length; i += BATCH) {
+    const { error } = await db.from('sa_jobs').upsert(records.slice(i, i + BATCH), { onConflict: 'id,start_date' });
+    if (error) throw new Error(`syncScheduledWork upsert batch ${i}: ${error.message}`);
+    upserted += Math.min(BATCH, records.length - i);
+  }
+  logger.info('SA syncScheduledWork complete', { returned: items.length, upserted, skipped });
+  return { synced: upserted, skipped };
+}
+
+/**
  * List SA dispatch board resources (crews) available for assignment.
  * Returns [{ id, name }]
  */
@@ -1782,164 +2430,4 @@ export async function updateRouteOrder({ scheduleDate, jobIds }) {
 
   logger.info('SA: route order updated', { scheduleDate, count: jobIds.length });
   return { success: true, count: jobIds.length };
-}
-
-// ── Invoice editing — InvoiceOverlay.asmx ────────────────────────────────────
-
-/**
- * Fetch the full editable record for an SA invoice via InvoiceOverlay.asmx.
- * Returns the raw `d` object — CustomerData, LineItems (rate/qty/tax/dates),
- * SalesTax, Total, QboID, HasQBO, IsLocked, InvoiceNumber, InvoiceDate, etc.
- */
-export async function getInvoice({ invoiceId }) {
-  const res = await post('/WebServices/InvoiceOverlay.asmx/GetInvoice',
-    { InvoiceID: invoiceId }, 'ClientView.aspx');
-  const d = res.data?.d;
-  if (!d) {
-    throw new Error(`SA getInvoice: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
-  }
-  return d;
-}
-
-// GetInvoice returns date fields as {Month, Day, Year, IsValid} with Month
-// 0-indexed (Jan=0). SaveInvoice's InvoiceData expects Month 1-indexed (Jan=1)
-// — confirmed 2026-07-31 via a live isolated single-field test (sending Month+1
-// reproduced the exact original date with zero drift; sending Month raw shifted
-// the date back one calendar month, compounding on every save). This mirrors
-// SA's own real browser UI (independently observed via live network capture),
-// which has always sent Month+1 relative to GetInvoice's read for the same
-// invoice/moment. Applies to InvoiceDate, InvoiceDueDate, and every
-// LineItems[].Date. IsValid is dropped — real UI payloads never send it.
-// If a date is passed via `overrides` in saveInvoiceFields (bypassing this
-// conversion), supply an already-1-indexed month yourself (June = 6).
-function toSaveInvoiceDate(dateObj) {
-  if (!dateObj || typeof dateObj !== 'object') return dateObj;
-  return { Month: dateObj.Month + 1, Day: dateObj.Day, Year: dateObj.Year };
-}
-
-/**
- * Read-modify-write an SA invoice via InvoiceOverlay.asmx, round-tripping the
- * full record from GetInvoice unchanged except for whatever's in `overrides`.
- * Converts InvoiceDate/InvoiceDueDate/LineItems[].Date to SaveInvoice's
- * 1-indexed-month shape automatically (see toSaveInvoiceDate). `overrides` are
- * applied last and are NOT auto-converted — pass already-1-indexed months there.
- * `expect` is an optional {field: expectedValue} map checked against a fresh
- * GetInvoice read after saving; throws if any field doesn't match.
- */
-export async function saveInvoiceFields({ invoiceId, overrides = {}, expect = {} }) {
-  const d = await getInvoice({ invoiceId });
-  const invoiceData = {
-    ...d,
-    // GetInvoice returns these as null when empty, but a real save from SA's
-    // own UI always sends "" / [] respectively — confirmed 2026-07-31 from a
-    // live capture of a successful lock-toggle save. Raw null causes a
-    // server-side NullReferenceException specifically on that path.
-    TxnID: d.TxnID ?? '',
-    DeletedLineItems: d.DeletedLineItems ?? [],
-    InvoiceDate: toSaveInvoiceDate(d.InvoiceDate),
-    InvoiceDueDate: toSaveInvoiceDate(d.InvoiceDueDate),
-    LineItems: (d.LineItems || []).map(li => ({ ...li, Date: toSaveInvoiceDate(li.Date) })),
-    ...overrides,
-  };
-
-  const saveRes = await post('/WebServices/InvoiceOverlay.asmx/SaveInvoice',
-    { InvoiceData: invoiceData }, 'ClientView.aspx');
-  const result = saveRes.data?.d;
-  if (result?.Errors?.length > 0) {
-    throw new Error(`SA saveInvoiceFields errors: ${JSON.stringify(result.Errors)}`);
-  }
-
-  const verify = await getInvoice({ invoiceId });
-  for (const [field, expected] of Object.entries(expect)) {
-    if (verify[field] !== expected) {
-      throw new Error(`SA saveInvoiceFields: verification failed — expected ${field}="${expected}", GetInvoice shows "${verify[field]}"`);
-    }
-  }
-  return verify;
-}
-
-/**
- * Toggle an invoice's number — the established manual technique for forcing
- * SA to re-attempt its one-way sync to QBO. Round-trips the invoice unchanged
- * except InvoiceNumber.
- */
-export async function setInvoiceNumber({ invoiceId, newNumber }) {
-  return saveInvoiceFields({
-    invoiceId,
-    overrides: { InvoiceNumber: newNumber },
-    expect: { InvoiceNumber: newNumber },
-  });
-}
-
-/**
- * Automates the manual "append/remove a character on the invoice number to
- * force a resync" technique. Unlocks (if locked), appends 'z' to the invoice
- * number, saves once, polls GetInvoice for a populated QboID, then ALWAYS
- * reverts the number and restores the original lock state — regardless of
- * whether the sync completed — so this never leaves an invoice in a
- * half-toggled state even on failure/timeout.
- */
-export async function resyncInvoiceToQbo({ invoiceId, pollIntervalMs = 15_000, maxPolls = 8 }) {
-  const before = await getInvoice({ invoiceId });
-  const originalNumber = before.InvoiceNumber;
-  const originalLocked = !!before.IsLocked;
-  const alreadyQboId = before.QboID || null;
-
-  logger.info('SA: resyncInvoiceToQbo starting', { invoiceId, originalNumber, originalLocked, alreadyQboId });
-
-  await saveInvoiceFields({
-    invoiceId,
-    overrides: { InvoiceNumber: `${originalNumber}z`, IsLocked: false },
-    expect: { InvoiceNumber: `${originalNumber}z` },
-  });
-
-  let qboId = null;
-  let attempts = 0;
-  for (let i = 0; i < maxPolls; i++) {
-    attempts++;
-    await new Promise(r => setTimeout(r, pollIntervalMs));
-    const check = await getInvoice({ invoiceId });
-    if (check.QboID) {
-      qboId = check.QboID;
-      break;
-    }
-  }
-
-  await saveInvoiceFields({
-    invoiceId,
-    overrides: { InvoiceNumber: originalNumber, IsLocked: originalLocked },
-    expect: { InvoiceNumber: originalNumber },
-  });
-  attempts++;
-
-  const synced = !!qboId;
-  if (!synced) {
-    logger.warn('SA: resyncInvoiceToQbo did not observe a QboID within poll budget — reverted, not retrying further', { invoiceId, maxPolls });
-  } else {
-    logger.info('SA: resyncInvoiceToQbo synced successfully', { invoiceId, qboId });
-  }
-
-  return { invoiceId, synced, qboId, originalNumber, originalLocked, attempts };
-}
-
-// ── Client bulk-delete — ClientList.asmx ─────────────────────────────────────
-
-/**
- * The real "select clients in the list view, click Delete" action.
- * Destructive and irreversible — callers must verify zero attached
- * jobs/invoices/estimates/waiting-list entries before calling this.
- */
-export async function deleteClients({ clientIds }) {
-  const res = await post('/webservices/ClientList.asmx/DeleteClients',
-    { DeleteItems: clientIds }, 'ClientList.aspx');
-  const d = res.data?.d;
-  if (!d) {
-    throw new Error(`SA deleteClients: no response (status=${res.status}). Raw: ${res.text?.slice(0, 300)}`);
-  }
-  const errors = d.Errors || [];
-  if (errors.length > 0) {
-    throw new Error(`SA deleteClients failed: ${JSON.stringify(errors)}`);
-  }
-  logger.info('SA: clients deleted', { requested: clientIds.length, removed: (d.RemovedIndexes || []).length });
-  return { requested: clientIds.length, removedIds: clientIds, errors };
 }
