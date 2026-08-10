@@ -68,15 +68,25 @@ git -C C:\Users\Assistant\JRBAgent worktree remove C:\Users\Assistant\.worktrees
 
 A `branch_drift_check` scheduled task runs every 15 minutes specifically to
 catch and safely auto-correct any violation of this rule (see
-`agent/scheduler/cron.js`) — but that's a safety net, not a substitute for
+`scheduler/cron.js`) — but that's a safety net, not a substitute for
 following it.
 
 ---
 
 ## Project Root
 ```
-C:\Users\Assistant\JRBAgent\agent\
+C:\Users\Assistant\JRBAgent\
 ```
+
+> **2026-08-10: repointed from `agent\` to repo root.** The launcher
+> (`launcher\start-agent.ps1`) previously ran everything from a second,
+> nested copy of the codebase at `agent\` — a full duplicate tree that had
+> to be kept in sync by hand and drifted badly enough (twice) to nearly
+> cause a production outage (see the memory entries on this). `$AgentDir`
+> now points at repo root instead. The `agent\` subtree still exists on
+> disk as a leftover, untracked in most places — do not write new files
+> there, and do not treat anything under it as a source of truth. It's
+> slated for full removal once the repoint has run cleanly for a while.
 
 ## Key File Structure
 ```
@@ -208,19 +218,11 @@ The `audit_runs` / `audit_issues` tables (added 2026-05-20) are separate from th
 The JRBAgent weekly cron checks for high-level discrepancies; the AME does the deep invoice-level match.
 Both live in the fleetops Supabase project.
 
-## Deployment Note — teams/bot.js
+## Deployment Note — teams/bot.js (historical, resolved 2026-08-10)
 
-The git repo tracks **both** `teams/bot.js` (repo root) and `agent/teams/bot.js`. The launcher loads `agent/teams/bot.js`.
+The git repo used to track **both** `teams/bot.js` (repo root) and `agent/teams/bot.js`, with the launcher loading the `agent/` copy — requiring a manual copy step after every pull, which silently wiped features more than once when a PR only updated one side (e.g. 2026-05-20: PR #26 updated only the root, the copy overwrote intent routing added in PR #25).
 
-**Critical rule:** Any PR that touches either file must update both in the same commit. If you update only one, the manual copy step below will silently wipe features present only in the other file. (This happened 2026-05-20: PR #26 updated only the root, the copy overwrote intent routing added in PR #25.)
-
-After any `git pull`, copy the root file to the live location:
-```powershell
-Copy-Item "C:\Users\Assistant\JRBAgent\teams\bot.js" "C:\Users\Assistant\JRBAgent\agent\teams\bot.js" -Force
-```
-This copy is safe only when both files were already kept in sync in the PR.
-
-Then restart the agent.
+**This is resolved.** The launcher now runs everything from repo root (see the Project Root note above) — there is only one `teams/bot.js` that matters going forward, and no copy step after `git pull`. Just restart the agent.
 
 ---
 
@@ -362,7 +364,7 @@ Multi-mailbox email catalog, calendar r/w, and SharePoint/OneDrive access for bo
 All functions accept optional `userEmail` param — omit for `assistant@`, pass `michael@jrboehlke.com` for Michael's mailbox/calendar.
 
 ### Skill
-`agent/skills/definitions/inbox-management.md` — category taxonomy, folder structure, processing workflow
+`skills/definitions/inbox-management.md` — category taxonomy, folder structure, processing workflow
 
 ### Supabase (jrb-assistant — znpahinyplccdyoekfeo)
 `email_catalog` table — idempotent upsert on `message_id`. Columns: mailbox, subject, from_address, category, action_taken, folder, thread_id, snippet, etc.
@@ -407,9 +409,6 @@ Open Contacts → Settings → Add account → Other → CardDAV (same credentia
 
 ### Supabase (jrb-assistant — znpahinyplccdyoekfeo)
 Table: `carddav_credentials` — columns: `email`, `name`, `token`, `active`, `created_at`, `last_used`
-
-### Security note
-Remove the old `agent/delete-outlook-contacts.mjs` one-off script once this session is done.
 
 ---
 
