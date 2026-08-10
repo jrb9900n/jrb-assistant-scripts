@@ -23,6 +23,37 @@ import * as sa          from './impl/serviceautopilot.js';
 import * as carddav     from './impl/carddav.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { sendProactiveMessage } from '../teams/notify.js';
+import { createClient } from '@supabase/supabase-js';
+
+const MICHAEL = 'michael@jrboehlke.com';
+
+// ── Supabase singleton — one client per process, not one per query ────────────
+let _supabaseClient = null;
+function getSupabaseClient() {
+  if (!_supabaseClient) {
+    _supabaseClient = createClient(
+      process.env.SUPABASE_URL,
+      process.env.SUPABASE_SERVICE_KEY,
+    );
+  }
+  return _supabaseClient;
+}
+
+// ── Input validation helpers ──────────────────────────────────────────────────
+
+const VALID_PRIORITIES = new Set(['p1', 'p2', 'p3']);
+
+/**
+ * Clamp hours to a finite, positive integer in [1, 8760] (max 1 year).
+ * Returns 24 if the value is missing, NaN, Infinity, or out of range.
+ */
+function sanitizeHours(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 24;
+  return Math.min(Math.max(Math.floor(n), 1), 8760);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 const HANDLERS = {
   // Email
@@ -36,7 +67,8 @@ const HANDLERS = {
   move_email:            (i) => m365.moveEmail(i),
   catalog_email:         (i) => m365.catalogEmail(i),
   get_email_catalog:     (i) => m365.getEmailCatalog(i),
-  send_draft_reply:      (i) => m365.sendDraft({ userEmail: 'michael@jrboehlke.com', ...i }),
+  // Fix: spread caller input first, then enforce userEmail so it cannot be overridden
+  send_draft_reply:      (i) => m365.sendDraft({ ...i, userEmail: MICHAEL }),
 
   // Inbox assistant (on-demand)
   run_inbox_processor: async () => {
@@ -44,12 +76,17 @@ const HANDLERS = {
     return processInbox();
   },
   get_email_triage: async ({ hours = 24, priority } = {}) => {
-    const { createClient } = await import('@supabase/supabase-js');
-    const db = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-    const since = new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+    // Validate and sanitize inputs before use
+    const safeHours = sanitizeHours(hours);
+    if (priority !== undefined && !VALID_PRIORITIES.has(priority)) {
+      throw new Error(`Invalid priority value: "${priority}". Must be one of: p1, p2, p3.`);
+    }
+
+    const db = getSupabaseClient();
+    const since = new Date(Date.now() - safeHours * 60 * 60 * 1000).toISOString();
     let q = db.from('email_triage')
       .select('from_name,from_address,subject,priority,category,intent,folder_moved_to,draft_id,hot_trigger,meeting_detected,action_items,processed_at')
-      .eq('mailbox', 'michael@jrboehlke.com')
+      .eq('mailbox', MICHAEL)
       .gte('processed_at', since)
       .order('priority', { ascending: true })
       .order('processed_at', { ascending: false })
