@@ -367,6 +367,14 @@ const SCHEDULED_TASKS = [
     // recovery, not on every check, via both Teams and email.
     schedule: '0 */4 * * *',
     name: 'qb_health_check',
+    // Confirmed 2026-08-11: node-cron's default ScheduledTask only checks the exact
+    // current second on each 1s poll tick (recoverMissedExecutions defaults false) — a
+    // multi-second event-loop stall (Puppeteer/network work elsewhere in this process)
+    // straddling this task's once-per-4h target second causes a silent, permanent skip
+    // for that occurrence, no error logged. Reproduced directly; see
+    // project-jrb-agent-architecture memory. This task is read-only (a token fetch) and
+    // safe to catch up on, so opt in to node-cron's missed-execution recovery.
+    recoverMissedExecutions: true,
     run: async () => {
       try {
         const { getQBAccessToken } = await import('../tools/impl/qb-token.js');
@@ -532,6 +540,16 @@ const SCHEDULED_TASKS = [
     // contention can leave a record half-toggled if a call fails mid-operation).
     schedule: '15 7,13,19 * * *',
     name: 'qbo_sync_watchdog',
+    // Confirmed 2026-08-11: never fired across two full scheduled windows despite a
+    // valid expression, while sibling tasks in the same registration loop fired fine.
+    // Root cause: node-cron's default ScheduledTask only checks the exact current
+    // second on each 1s poll tick (recoverMissedExecutions defaults false) — any
+    // multi-second event-loop stall straddling this task's narrow once-per-6h target
+    // second causes a silent, permanent skip for that occurrence. Reproduced directly
+    // against node-cron 3.0.3; see project-jrb-agent-architecture memory. The run itself
+    // (runQboSyncWatchdog) already has its own lock + is documented safe to call
+    // repeatedly, so opt in to node-cron's missed-execution recovery here.
+    recoverMissedExecutions: true,
     run: async () => {
       if (!acquireRunLock('qbo_sync_watchdog', 10 * 60_000)) {
         logger.debug('qbo_sync_watchdog: skipped (another instance still running)');
@@ -1550,7 +1568,7 @@ for (const task of SCHEDULED_TASKS) {
     } catch (err) {
       logger.error(`Scheduled task failed: ${task.name}`, { err: err.message });
     }
-  });
+  }, task.recoverMissedExecutions ? { recoverMissedExecutions: true } : undefined);
 }
 logger.info('All schedules registered. Scheduler running.');
 
