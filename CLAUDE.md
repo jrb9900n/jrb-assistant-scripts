@@ -238,6 +238,12 @@ Full receipt capture workflow for company credit cards. Lives across both repos.
 ### How it works
 1. Chase alert email forwarded to `assistant@jrboehlke.com` → email poller (every 5 min) → `processChaseAlert()` → expense report created → **Twilio SMS** sent to cardholder within ~5 minutes of charge
 2. QBO webhook (`POST /qbo-webhook`) fires separately when QBO processes the transaction → reconciles with Chase stub (updates `qbo_transaction_id`) or creates its own report if no stub exists
+
+### Credit card expense source priority (confirmed by Michael 2026-08-18)
+
+Three independent paths can detect the same charge: the email-forwarded Chase alert (`processChaseAlert` in `tools/impl/expense.js`), the ChasePoller browser-based transaction poller (`chase-daemon.js` in the separate `ChasePoller` repo), and the QBO webhook (`processNewPurchase` in `tools/impl/expense.js`). Priority order, highest to lowest: **1. email, 2. poller, 3. qbo**.
+
+`expense_reports.source` (`'email' | 'poller' | 'qbo' | null`) tracks which source last supplied the authoritative vendor/amount/date. All three creation paths dedupe against the same card+amount(±$0.02)+date(±1 day) match. When a match is found, a **higher**-priority source upgrades the existing row's data (and `source` tag) rather than skipping; a source never upgrades a row already tagged with an equal-or-higher-priority source. Concretely: email always upgrades (unless already `email`); the poller upgrades only if the existing row is `qbo` or untagged; QBO never upgrades (its existing "reconcile with alertStub, only attach `qbo_transaction_id`" behavior already matches lowest priority and needed no change).
 3. Employee taps SMS link → FieldOps expense portal (`/expense/:uuid`) → fills form, uploads receipt photo
 4. Receipt saved to Supabase Storage (`expense-receipts` bucket) → automatically attached to QBO Purchase transaction via Attachments API
 5. Alternatively: employee emails receipt photo to `assistant@jrboehlke.com` → matched by card last-four + amount → uploaded to Storage + QBO, confirmation SMS sent

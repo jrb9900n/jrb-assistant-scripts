@@ -140,6 +140,12 @@ async function processNewPurchase(purchaseId) {
     return;
   }
 
+  // qbo is the lowest-priority source (see CLAUDE.md "Credit card expense
+  // source priority") - the alertStub reconciliation branch above already
+  // never overwrites vendor/amount/date, only attaches qbo_transaction_id,
+  // which is correct since qbo should never outrank whatever created the
+  // stub. Only tagged 'qbo' here because this branch runs when QBO is the
+  // first (and only, so far) source to see this transaction.
   const { data: report, error } = await supabase
     .from('expense_reports')
     .insert({
@@ -153,6 +159,7 @@ async function processNewPurchase(purchaseId) {
       vendor,
       transaction_date: date,
       status: 'pending_employee',
+      source: 'qbo',
     })
     .select()
     .single();
@@ -575,12 +582,19 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
     return true;
   }
 
-  // Dedup: existing report within ±1 day with same card + amount
+  // Dedup: existing report within ±1 day with same card + amount.
+  //
+  // Source priority (email > poller > qbo, see CLAUDE.md "Credit card
+  // expense source priority" - confirmed by Michael 2026-08-17): email is
+  // the highest-priority source, so if a lower-priority source (poller/qbo,
+  // or a legacy row with no source tag) already created the report, upgrade
+  // it with email's data rather than just skip. Email never yields to
+  // anything else.
   const dayBefore = new Date(`${transactionDate}T12:00:00`); dayBefore.setDate(dayBefore.getDate() - 1);
   const dayAfter  = new Date(`${transactionDate}T12:00:00`); dayAfter.setDate(dayAfter.getDate() + 1);
   const { data: dup } = await supabase
     .from('expense_reports')
-    .select('id')
+    .select('id, source')
     .eq('card_last_four', cardLastFour)
     .gte('transaction_date', dayBefore.toISOString().slice(0, 10))
     .lte('transaction_date', dayAfter.toISOString().slice(0, 10))
@@ -589,7 +603,15 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
     .maybeSingle();
 
   if (dup) {
-    logger.info('Chase alert: duplicate report already exists, skipping', { reportId: dup.id });
+    if (dup.source !== 'email') {
+      await supabase
+        .from('expense_reports')
+        .update({ vendor: merchant, amount, transaction_date: transactionDate, source: 'email' })
+        .eq('id', dup.id);
+      logger.info('Chase alert: upgraded existing report to email source', { reportId: dup.id, previousSource: dup.source ?? 'none' });
+    } else {
+      logger.info('Chase alert: duplicate report already exists, skipping', { reportId: dup.id });
+    }
     return true;
   }
 
@@ -605,6 +627,7 @@ export async function processChaseAlert(email, { getEmail, sendEmail }) {
       vendor: merchant,
       transaction_date: transactionDate,
       status: 'pending_employee',
+      source: 'email',
     })
     .select()
     .single();
