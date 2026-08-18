@@ -5,11 +5,23 @@
 # Kill by port 3978
 $portLine = netstat -ano | Select-String ":3978 .*LISTENING" | Select-Object -First 1
 if ($portLine) {
-    $orphanPid = ($portLine -split '\s+')[-1].Trim()
-    if ($orphanPid -match '^\d+$') {
-        Write-Output "bot-wrapper: killing PID $orphanPid on port 3978"
-        $killResult = taskkill /f /pid $orphanPid 2>&1
-        Write-Output "bot-wrapper: taskkill result: $killResult"
+    $orphanPidStr = ($portLine -split '\s+')[-1].Trim()
+    # Validate that the extracted token is a pure integer before passing it to
+    # taskkill. netstat output format can vary across Windows versions (e.g.
+    # trailing whitespace, extra columns, or IPv6 formatting differences) so
+    # the regex guard plus an explicit [int] cast protects against an
+    # unintended shell injection or a non-PID token reaching taskkill.
+    if ($orphanPidStr -match '^\d+$') {
+        $orphanPid = [int]$orphanPidStr
+        if ($orphanPid -gt 0) {
+            Write-Output "bot-wrapper: killing PID $orphanPid on port 3978"
+            $killResult = taskkill /f /pid $orphanPid 2>&1
+            Write-Output "bot-wrapper: taskkill result: $killResult"
+        } else {
+            Write-Output "bot-wrapper: skipping invalid PID 0 from netstat output"
+        }
+    } else {
+        Write-Output "bot-wrapper: could not parse a valid PID from netstat line: $portLine"
     }
 }
 

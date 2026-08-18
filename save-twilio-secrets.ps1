@@ -2,6 +2,7 @@ if (-not ([System.Management.Automation.PSTypeName]'TwilioCredWriter').Type) {
     Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
+using System.Text;
 public class TwilioCredWriter {
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
     public struct CREDENTIAL {
@@ -13,12 +14,20 @@ public class TwilioCredWriter {
     [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     public static extern bool CredWrite([In] ref CREDENTIAL credential, uint flags);
     public static bool Write(string target, string password) {
-        var blob = Marshal.StringToCoTaskMemUni(password);
-        var cred = new CREDENTIAL { Type=1, TargetName=target, UserName="JRBAgent",
-            CredentialBlob=blob, CredentialBlobSize=(uint)(password.Length*2), Persist=2 };
-        bool r = CredWrite(ref cred, 0);
-        Marshal.FreeCoTaskMem(blob);
-        return r;
+        // Use Encoding.Unicode.GetBytes so that CredentialBlobSize is the true
+        // byte length (handles surrogate pairs correctly; password.Length*2 would
+        // undercount a string containing supplementary-plane characters).
+        byte[] blob = Encoding.Unicode.GetBytes(password);
+        IntPtr ptr = Marshal.AllocHGlobal(blob.Length);
+        try {
+            Marshal.Copy(blob, 0, ptr, blob.Length);
+            var cred = new CREDENTIAL { Type=1, TargetName=target, UserName="JRBAgent",
+                CredentialBlob=ptr, CredentialBlobSize=(uint)blob.Length, Persist=2 };
+            return CredWrite(ref cred, 0);
+        } finally {
+            // Always free the unmanaged buffer, even if CredWrite throws.
+            Marshal.FreeHGlobal(ptr);
+        }
     }
 }
 "@

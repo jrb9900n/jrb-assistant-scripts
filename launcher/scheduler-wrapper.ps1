@@ -35,12 +35,13 @@ try {
         $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
         if ($proc) {
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-            # Guard HasExited before blocking on WaitForExit: if Stop-Process
-            # failed silently (TOCTOU - process already exited or PID reused)
-            # we must not block indefinitely on a process we do not own.
-            if (-not $proc.HasExited) {
-                $proc.WaitForExit(5000) | Out-Null
-            }
+            # Always wait for the process to exit after sending the kill signal.
+            # The 5000 ms timeout prevents indefinite blocking if Stop-Process
+            # failed silently or the OS is slow to reap the handle.
+            # Note: the .NET Process object holds an OS handle opened before
+            # Stop-Process was called, so WaitForExit tracks the original
+            # process - not a PID that may have been reused.
+            $proc.WaitForExit(5000) | Out-Null
         }
     }
 } catch {
