@@ -33,9 +33,14 @@ export function isCrmActionRequest(text) {
   // using the lowercased copy so the comparison is consistent with the rest of
   // the function — no separate `i` flag needed after toLowerCase()).
   if (/^(fw|fwd):/.test(t.split('\n')[0])) return true;
-  // "service autopilot" is matched as a phrase; the former bare \bsa\b token
-  // was removed because it is far too broad (e.g. "SA" = South Africa) and
-  // "service autopilot" already covers the intended abbreviation in context.
+  // "service autopilot" is matched as a phrase for the full product name.
+  // The bare abbreviation "SA" is intentionally excluded: it is a two-letter
+  // token that produces too many false positives (greetings in other languages,
+  // proper nouns, unrelated acronyms such as "South Africa", etc.) and was
+  // previously removed for exactly that reason.  If SA-as-abbreviation matching
+  // is needed in future it should be gated on surrounding context (e.g.
+  // /\bsa\s+(client|job|account)\b/ or /\badd to sa\b/) rather than a bare
+  // token match.
   return /\b(ticket|estimate|quote|job|waiting list|service autopilot|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t);
 }
 
