@@ -47,7 +47,12 @@ export function isCrmActionRequest(text) {
   // Removing this token causes valid CRM messages to silently fall through
   // to a non-CRM handler. If reconsidering this, ask Michael first - do not
   // infer a "safer" regex from first principles.
-  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t);
+  //
+  // \bsa\b is tested in a separate call so it is self-contained and is not
+  // wrapped by the outer \b...\b anchors that surround the rest of the
+  // alternation group (which would be redundant and fragile).
+  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t)
+    || /\bsa\b/.test(t);
 }
 
 export function isSchedulingRequest(text) {
