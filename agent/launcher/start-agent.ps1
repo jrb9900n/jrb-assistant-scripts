@@ -56,12 +56,12 @@ public class CredManager {
 function Validate-Email {
     param([string]$Value, [string]$SecretName)
     if ([string]::IsNullOrWhiteSpace($Value)) {
-        Write-Warning "Secret '$SecretName' is missing or empty — downstream email sending will fail."
+        Write-Warning "Secret '$SecretName' is missing or empty - downstream email sending will fail."
         return $false
     }
     # RFC-5321-style sanity check: one '@', non-empty local and domain parts, domain has a dot
     if ($Value -notmatch '^[^@\s]+@[^@\s]+\.[^@\s]+$') {
-        Write-Warning "Secret '$SecretName' does not look like a valid email address — downstream email sending will fail."
+        Write-Warning "Secret '$SecretName' does not look like a valid email address - downstream email sending will fail."
         return $false
     }
     return $true
@@ -69,7 +69,7 @@ function Validate-Email {
 
 # Strip a leading BOM (U+FEFF isn't whitespace to .NET's Trim(), so it survives a
 # plain Trim() and would otherwise pass the regex above hidden inside the local
-# part) plus ordinary whitespace — this project has hit an identical BOM-in-secret
+# part) plus ordinary whitespace - this project has hit an identical BOM-in-secret
 # failure mode before (a FieldOps CI secret).
 $accountantEmail = Get-Secret "ACCOUNTANT_EMAIL"
 if ($accountantEmail) {
@@ -77,7 +77,7 @@ if ($accountantEmail) {
     $accountantEmail = $accountantEmail.Trim()
 }
 if (-not (Validate-Email -Value $accountantEmail -SecretName "ACCOUNTANT_EMAIL")) {
-    # ACCOUNTANT_EMAIL is optional — commission-report.js already falls back to
+    # ACCOUNTANT_EMAIL is optional - commission-report.js already falls back to
     # sending Michael-only plus a log warning when it's unset. This launcher runs
     # every mode (teams/scheduler/cli), so it must not abort startup over one
     # optional downstream feature's secret; just don't inject an invalid value.
@@ -125,7 +125,7 @@ $secrets = @{
     "FIELDOPS_SUPABASE_KEY"          = Get-Secret "FIELDOPS_SUPABASE_KEY"
     "QB_WEBHOOK_VERIFIER_TOKEN"      = Get-Secret "QB_WEBHOOK_VERIFIER_TOKEN"
     "EXPENSE_PORTAL_BASE"            = "https://fieldops.jrboehlke.com/expense"
-    # PM commission report — only injected when a valid value was retrieved
+    # PM commission report - only injected when a valid value was retrieved
     "TWILIO_ACCOUNT_SID"             = Get-Secret "TWILIO_ACCOUNT_SID"
     "TWILIO_AUTH_TOKEN"              = Get-Secret "TWILIO_AUTH_TOKEN"
     "TWILIO_FROM_PHONE"              = Get-Secret "TWILIO_FROM_PHONE"
