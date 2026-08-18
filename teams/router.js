@@ -33,10 +33,11 @@ export function isCrmActionRequest(text) {
   // using the lowercased copy so the comparison is consistent with the rest of
   // the function — no separate `i` flag needed after toLowerCase()).
   if (/^(fw|fwd):/.test(t.split('\n')[0])) return true;
-  // "service autopilot" is matched as a phrase; the former bare \bsa\b token
-  // was removed because it is far too broad (e.g. "SA" = South Africa) and
-  // "service autopilot" already covers the intended abbreviation in context.
-  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t);
+  // "service autopilot" is matched as a phrase for the full name.  \bsa\b is
+  // retained alongside it because internal workflows commonly use the bare
+  // abbreviation (e.g. "add to SA", "SA client") and silently dropping those
+  // signals would cause valid CRM messages to fall through to a non-CRM handler.
+  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t);
 }
 
 export function isSchedulingRequest(text) {
