@@ -17,8 +17,8 @@ const supabase = createClient(
 
 // ── Date helpers ────────────────────────────────────────────────────────────
 
-export function getPriorWeekRange() {
-  const now = new Date();
+export function getPriorWeekRange(referenceDate = new Date()) {
+  const now = referenceDate;
   const dow = now.getUTCDay(); // 0=Sun
   const thisSun = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - dow));
   const lastMon = new Date(thisSun); lastMon.setUTCDate(thisSun.getUTCDate() - 6);
@@ -976,8 +976,16 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
 
 // ── Main entry point ────────────────────────────────────────────────────────
 
-export async function generateAndSendWeeklyFinanceReport({ delayed = false, delayMinutes = 0 } = {}) {
-  const { start, end, weekLabel, displayRange } = getPriorWeekRange();
+// referenceDate lets a backfill run target a historical week (getPriorWeekRange
+// computes the week *before* whatever date it's given) instead of always the
+// most recently completed week. NOTE: the week-scoped sections (payments,
+// invoices, deposits, expenses) will be accurately historical, but a few
+// sections have no historical snapshot to pull from and always reflect
+// TODAY regardless of referenceDate: AR aging, audit issues, active cards,
+// SA data freshness. That's an inherent limitation of those data sources
+// (live current-state queries, not a historical ledger), not a bug here.
+export async function generateAndSendWeeklyFinanceReport({ delayed = false, delayMinutes = 0, referenceDate = new Date() } = {}) {
+  const { start, end, weekLabel, displayRange } = getPriorWeekRange(referenceDate);
   logger.info('weekly_finance_report: gathering data', { weekLabel, start, end });
 
   const [payments, arAging, invoices, deposits, expenses, auditIssues, ameMatches, unrecordedPayments, unmatchedQBPayments, activeCards, freshness] = await Promise.all([
