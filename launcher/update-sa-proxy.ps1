@@ -22,12 +22,14 @@ public class CredWriter2 {
     public static bool Save(string target, string user, string pass) {
         byte[] blob = Encoding.Unicode.GetBytes(pass);
         IntPtr ptr = Marshal.AllocHGlobal(blob.Length);
-        Marshal.Copy(blob, 0, ptr, blob.Length);
-        CREDENTIAL c = new CREDENTIAL { Type=1, TargetName=target, UserName=user,
-            CredentialBlob=ptr, CredentialBlobSize=(uint)blob.Length, Persist=2 };
-        bool ok = CredWrite(ref c, 0);
-        Marshal.FreeHGlobal(ptr);
-        return ok;
+        try {
+            Marshal.Copy(blob, 0, ptr, blob.Length);
+            CREDENTIAL c = new CREDENTIAL { Type=1, TargetName=target, UserName=user,
+                CredentialBlob=ptr, CredentialBlobSize=(uint)blob.Length, Persist=2 };
+            return CredWrite(ref c, 0);
+        } finally {
+            Marshal.FreeHGlobal(ptr);
+        }
     }
 }
 "@

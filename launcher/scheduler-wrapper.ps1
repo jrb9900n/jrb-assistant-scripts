@@ -22,19 +22,29 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 # Use Get-CimInstance instead of the deprecated (and PS7-removed) Get-WmiObject
 # so the kill step does not silently produce no output in modern environments
 # (finding #2).
-Get-CimInstance Win32_Process -Filter "name='node.exe'" | Where-Object {
-    $_.CommandLine -like '*scheduler/cron.js*' -or $_.CommandLine -like '*scheduler\cron.js*'
-} | ForEach-Object {
-    # Obtain a .NET Process handle by PID so we can call WaitForExit() and
-    # confirm the OS has fully released file locks and port handles before
-    # proceeding - a fixed-duration sleep is not reliable (finding #3).
-    $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
-    if ($proc) {
-        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
-        # Wait up to 5 s for the process to fully exit; this prevents the
-        # self-dedup PID-file race described in the header comment.
-        $proc.WaitForExit(5000) | Out-Null
+# Wrapped in try/catch so that a WMI failure (service unavailable, access
+# denied, etc.) does not abort the entire script under ErrorActionPreference=Stop
+# and prevent start-agent.ps1 from ever being reached.
+try {
+    Get-CimInstance Win32_Process -Filter "name='node.exe'" | Where-Object {
+        $_.CommandLine -like '*scheduler/cron.js*' -or $_.CommandLine -like '*scheduler\cron.js*'
+    } | ForEach-Object {
+        # Obtain a .NET Process handle by PID so we can call WaitForExit() and
+        # confirm the OS has fully released file locks and port handles before
+        # proceeding - a fixed-duration sleep is not reliable (finding #3).
+        $proc = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+        if ($proc) {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+            # Guard HasExited before blocking on WaitForExit: if Stop-Process
+            # failed silently (TOCTOU - process already exited or PID reused)
+            # we must not block indefinitely on a process we do not own.
+            if (-not $proc.HasExited) {
+                $proc.WaitForExit(5000) | Out-Null
+            }
+        }
     }
+} catch {
+    Write-Output "scheduler-wrapper: CimInstance query failed (non-fatal): $_"
 }
 
 # Wrap the launch in try/catch so that a missing or broken start-agent.ps1
