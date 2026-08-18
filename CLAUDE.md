@@ -341,6 +341,17 @@ Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TE
 
 Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 
+### Credential backup, healthcheck, and restore (built 2026-08-17)
+
+Built after the 2026-08-12 KB5121003 incident wiped all 35 `JRBAgent:*` Credential Manager entries with zero warning and zero backup, costing hours of forensic recovery from scattered `.env` files and PM2 dumps.
+
+- `tools/impl/credential-backup.js` - enumerates every `JRBAgent:*` entry (auto-discovers by prefix, no hardcoded key list), encrypts the whole set with DPAPI (`CurrentUser` scope - ties to this Windows profile's DPAPI master key, a separate store from Credential Manager that survived the actual 2026-08-12 wipe intact), and writes it to **two places**: `C:\Users\Assistant\CredentialBackups\jrbagent-creds-<date>.enc` (fast local recovery, 30-day retention) and OneDrive at `/JRBAgent-Ops/CredentialBackups/latest.enc` (survives a local-disk-only disaster).
+- **`credential_backup` cron task** - daily 3 AM, runs the backup above.
+- **`credential_healthcheck` cron task** - every 20 minutes, compares current Credential Manager entries against the key list from the last successful backup. Sends a Teams alert within ~20 minutes if any are missing (vs. the hours it took to notice last time), and a recovery message once they're back.
+- **Restore**: `node scripts/restore-credentials.mjs` (dry run - lists what would be restored, writes nothing) or `node scripts/restore-credentials.mjs --confirm` (actually writes to Credential Manager). Reads local backup first, falls back to OneDrive if local is also gone.
+- **Known limitation**: DPAPI encryption ties the backup to this specific Windows user profile. It protects against exactly the failure mode that actually happened (Credential Manager vault wiped, DPAPI keys intact) but would NOT be decryptable if the entire profile/machine were lost. That's an accepted tradeoff for now - a passphrase-based fallback layer would close that gap if ever wanted.
+- Tested end-to-end 2026-08-17 against the real 35 production credentials: enumerate, encrypt, local write, OneDrive upload, healthcheck (clean), decrypt, and a disposable-key CredWrite/CredRead round-trip all verified working.
+
 ---
 
 ## GitHub Repos (scoped access only)
