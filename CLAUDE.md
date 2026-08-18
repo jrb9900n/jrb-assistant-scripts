@@ -78,15 +78,20 @@ following it.
 C:\Users\Assistant\JRBAgent\
 ```
 
-> **2026-08-10: repointed from `agent\` to repo root.** The launcher
-> (`launcher\start-agent.ps1`) previously ran everything from a second,
-> nested copy of the codebase at `agent\` — a full duplicate tree that had
-> to be kept in sync by hand and drifted badly enough (twice) to nearly
-> cause a production outage (see the memory entries on this). `$AgentDir`
-> now points at repo root instead. The `agent\` subtree still exists on
-> disk as a leftover, untracked in most places — do not write new files
-> there, and do not treat anything under it as a source of truth. It's
-> slated for full removal once the repoint has run cleanly for a while.
+> **2026-08-10: repointed from `agent\` to repo root** (`$AgentDir` inside
+> `start-agent.ps1`). **2026-08-17: `agent\` subtree fully removed.** The
+> 2026-08-10 repoint had only updated `$AgentDir` itself — the actual Windows
+> Task Scheduler task definitions for `JRB Teams Bot`, `JRB Scheduler`, and
+> `JRB Cloudflare Watchdog` still executed wrapper/watchdog scripts physically
+> under `agent\launcher\`/`agent\scripts\`, and those files were never
+> git-tracked. A full file-by-file comparison against root before deletion
+> found real, previously-lost fixes (a missing `scheduler-wrapper.ps1`, a
+> cloudflared-watchdog bug, a `$pid`-shadowing bug, a genuine CRM-intent
+> routing decision in `teams/router.js`) — see PRs #260 and #261. All three
+> task definitions were repointed to root (`scripts/repoint-task-scheduler-to-root.ps1`,
+> requires an elevated PowerShell) and verified with clean restarts before
+> `agent\` was deleted. There is now only one copy of every file — do not
+> recreate a duplicate tree.
 
 ## Key File Structure
 ```
