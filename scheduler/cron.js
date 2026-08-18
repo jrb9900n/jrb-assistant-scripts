@@ -1552,6 +1552,44 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
       }
     },
   },
+  {
+    // 3 AM daily - encrypted backup of every JRBAgent:* Credential Manager entry
+    // to local disk + OneDrive. Built after the 2026-08-12 KB5121003 incident
+    // wiped all 35 entries with no backup and no warning; see
+    // tools/impl/credential-backup.js for the full design rationale.
+    schedule: '0 3 * * *',
+    name: 'credential_backup',
+    run: async () => {
+      try {
+        const { runCredentialBackup } = await import('../tools/impl/credential-backup.js');
+        const result = await runCredentialBackup();
+        logger.info('credential_backup: complete', result);
+      } catch (err) {
+        logger.error('credential_backup: FAILED', { err: err.message });
+        try {
+          await sendProactiveMessage(`Credential backup FAILED: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('credential_backup: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Every 20 minutes - detect missing JRBAgent:* Credential Manager entries.
+    // The 2026-08-12 wipe went unnoticed for hours because nothing checked
+    // presence at all; this catches it fast and points straight at the restore
+    // script. Alerts once on detection and once on recovery, not every cycle.
+    schedule: '*/20 * * * *',
+    name: 'credential_healthcheck',
+    run: async () => {
+      try {
+        const { runCredentialHealthcheck } = await import('../tools/impl/credential-backup.js');
+        await runCredentialHealthcheck();
+      } catch (err) {
+        logger.warn('credential_healthcheck: check itself failed', { err: err.message });
+      }
+    },
+  },
 ];
 
 // â”€â”€ Dev task detection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
