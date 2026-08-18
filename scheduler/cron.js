@@ -600,6 +600,29 @@ const SCHEDULED_TASKS = [
       logger.info('qb_reauth_reminder: sent', { daysRemaining });
     },
   },
+  {
+    // 8:05 AM daily — nudge if the Chase session has expired. The daemon watchdog
+    // (below, outside this array) silently refuses to start and just re-logs
+    // "session expired, not starting" every 5 minutes forever with no alert — this
+    // was a real gap: Michael had no way to know re-init was needed short of reading
+    // logs. Re-init requires a real interactive login (2FA, manual navigation), so
+    // this can only ever be a reminder, never an auto-fix.
+    schedule: '5 8 * * *',
+    name: 'chase_session_reminder',
+    run: async () => {
+      const flagPath = 'C:\\Users\\Assistant\\ChasePoller\\session\\expired.flag';
+      if (!existsSync(flagPath)) return;
+      const msg = 'Chase session has expired — credit card alert coverage via ChasePoller is down '
+        + '(the expense webhook + mailbox poller paths still work independently). '
+        + 'To fix: on the JRB-Assistant machine, open a terminal and run '
+        + '`cd C:\\Users\\Assistant\\ChasePoller; .\\run.ps1 -Init` — log into Chase Business Online, '
+        + 'check "Keep me signed in" and "Remember this device" on 2FA, navigate to the corporate '
+        + 'card\'s Account Activity tab, then press Enter in that terminal. The scheduler watchdog '
+        + 'picks up the new session automatically within 5 minutes — no restart needed.';
+      await sendProactiveMessage(msg);
+      logger.info('chase_session_reminder: sent');
+    },
+  },
   // DISABLED — inbox processor, followup scanner, morning briefing
   // Re-enable when inbox processing behavior is ready.
   // {
