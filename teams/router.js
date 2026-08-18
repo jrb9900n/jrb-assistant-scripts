@@ -33,15 +33,21 @@ export function isCrmActionRequest(text) {
   // using the lowercased copy so the comparison is consistent with the rest of
   // the function — no separate `i` flag needed after toLowerCase()).
   if (/^(fw|fwd):/.test(t.split('\n')[0])) return true;
-  // "service autopilot" is matched as a phrase for the full product name.
-  // The bare abbreviation "SA" is intentionally excluded: it is a two-letter
-  // token that produces too many false positives (greetings in other languages,
-  // proper nouns, unrelated acronyms such as "South Africa", etc.) and was
-  // previously removed for exactly that reason.  If SA-as-abbreviation matching
-  // is needed in future it should be gated on surrounding context (e.g.
-  // /\bsa\s+(client|job|account)\b/ or /\badd to sa\b/) rather than a bare
-  // token match.
-  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t);
+  // "service autopilot" is matched as a phrase for the full product name, and
+  // \bsa\b is matched alongside it for the bare abbreviation.
+  //
+  // NOT A BUG - DO NOT REMOVE \bsa\b AGAIN. This exact token has been added,
+  // removed, and re-added multiple times (see #240, #261) because it looks
+  // like a false-positive risk in isolation ("SA" could theoretically mean
+  // many things). It has been explicitly confirmed as correct by Michael
+  // Reardon (the business owner) on 2026-08-17: "Anytime 'SA' is mentioned
+  // you may assume it is serviceautopilot." In this codebase's actual usage,
+  // there is no other meaning of "SA" that matters, and internal workflows
+  // commonly use the bare abbreviation (e.g. "add to SA", "SA client").
+  // Removing this token causes valid CRM messages to silently fall through
+  // to a non-CRM handler. If reconsidering this, ask Michael first - do not
+  // infer a "safer" regex from first principles.
+  return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t);
 }
 
 export function isSchedulingRequest(text) {
