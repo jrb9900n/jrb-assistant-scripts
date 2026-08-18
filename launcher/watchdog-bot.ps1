@@ -3,8 +3,13 @@
 
 $listening = netstat -ano | Select-String ":3978 .*LISTENING"
 if (-not $listening) {
-    $log = "C:\Users\Assistant\JRBAgent\agent\logs\watchdog.log"
-    $ts  = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    # Derive the script root dynamically so this works from any install location,
+    # matching bot-wrapper.ps1's approach (finding #5 - hardcoded path removed).
+    $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $logDir  = Join-Path $scriptRoot "..\logs"
+    $log     = [System.IO.Path]::GetFullPath((Join-Path $logDir "watchdog.log"))
+    $ts      = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Add-Content -Path $log -Value "$ts  Bot not found on :3978 - restarting"
-    Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
+    $startAgent = Join-Path $scriptRoot "start-agent.ps1"
+    Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"$startAgent`" teams" -WindowStyle Hidden
 }

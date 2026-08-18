@@ -20,12 +20,14 @@ public class CredWriter {
     public static bool Save(string target, string user, string pass) {
         byte[] blob = Encoding.Unicode.GetBytes(pass);
         IntPtr ptr = Marshal.AllocHGlobal(blob.Length);
-        Marshal.Copy(blob, 0, ptr, blob.Length);
-        CREDENTIAL c = new CREDENTIAL { Type=1, TargetName=target, UserName=user,
-            CredentialBlob=ptr, CredentialBlobSize=(uint)blob.Length, Persist=2 };
-        bool ok = CredWrite(ref c, 0);
-        Marshal.FreeHGlobal(ptr);
-        return ok;
+        try {
+            Marshal.Copy(blob, 0, ptr, blob.Length);
+            CREDENTIAL c = new CREDENTIAL { Type=1, TargetName=target, UserName=user,
+                CredentialBlob=ptr, CredentialBlobSize=(uint)blob.Length, Persist=2 };
+            return CredWrite(ref c, 0);
+        } finally {
+            Marshal.FreeHGlobal(ptr);
+        }
     }
 }
 "@
@@ -43,7 +45,7 @@ Write-Host "`nBTA Reporting - Credential Manager Setup" -ForegroundColor Cyan
 Write-Host "=========================================`n"
 
 Write-Host "GOOGLE_SHEET_ID - The Google Sheets spreadsheet ID for BTA reporting output."
-Write-Host "  Found in .env: 1CG6D9MCtkkqDE0-OJGXG4ATb0JNAtmwHxQMHQKI1u2c"
+Write-Host "  (Check your .env file or the BTA Reporting setup notes for the value.)"
 Set-JRBSecret "GOOGLE_SHEET_ID"
 
 Write-Host "`nDone. Restart the scheduler to pick up the new credential."
