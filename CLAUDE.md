@@ -345,6 +345,47 @@ Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users
 
 ---
 
+## FleetSharp GPS/Telematics Read Tools (built 2026-08-19)
+
+FleetSharp has no public API. Discovered via a real login capture: cookie-session auth (no
+Incapsula/reCAPTCHA/CSRF token seen — much simpler than SA), landing on an ExtJS/Sencha portal
+at `<api-origin>/ng/portal` (the origin varies per account — captured live at login, e.g.
+`https://app02.fleetsharp.com`, never hardcoded). The REST layer under `/ibis/rest/*` white-labels
+the Linxup telematics platform.
+
+### Available FleetSharp tools (read-only)
+- `fleetsharp_get_vehicle_list` — device inventory (VIN, serial, device type) joined with live position/odometer
+- `fleetsharp_get_live_positions` — current lat/lng, speed, odometer for every tracker
+- `fleetsharp_get_daily_mileage` — per-vehicle daily `milesDriven`/`kilometersDriven` + idle/drive/stop time + harsh-driving score, for a date range
+- `fleetsharp_get_tracker_names` — driverId/trackerId → display name map (rows from the other three tools are keyed by driverId, not name)
+
+### Key endpoints (discovered, all GET unless noted)
+- `/ibis/rest/setup/tracker-setup` — device/vehicle inventory
+- `/ibis/rest/linxup/map/getPositions` — live GPS + odometer (`linxupPosition.odo`, `.trueOdometer`, `.lat`, `.lng`, `.speed`)
+- `/ibis/rest/linxup/reports/reportFilterTrackers` — id → vehicle/driver name map
+- POST `/ibis/rest/linxup/reports/getFleetActivityDispatch` — daily mileage/activity report. Body is `application/x-www-form-urlencoded`: `startDate`/`endDate` as `YYYYMMDD`, `startEpoch`/`endEpoch` as ms, `driverIds` (comma-separated, empty = all), `dispatch=true`, `safetyScoreHardwareType=ALL`. Response: `data.dailyByDriver[]` with `milesDriven`, `kilometersDriven`, `idleTime`, `driveTime`, `stopTime`, `score`, `grade`.
+
+### Auth model
+Plain form login (`#username`/`#password` POST to `/authentication/v2/login`), then pure
+cookie-session auth for every API call — no bearer token, no CSRF header. `tools/impl/fleetsharp.js`
+follows the same puppeteer-core browser-session pattern as `serviceautopilot.js` (keeps a browser+page
+open for `SESSION_TTL_MS`, routes calls through `page.evaluate(fetch(...))` so cookies ride along
+automatically), but has none of SA's Incapsula backoff/proxy machinery since no bot protection has
+been observed yet. Session cookies cache to `fleetsharp-session-cache.json` for restart survival.
+
+### Known limitations / not yet built
+- Read-only. No write/mutation endpoint has been probed or wired up — production account, so
+  discovery so far has been GET/read-only POSTs (report generation) by design, per explicit
+  scope agreement with Michael (2026-08-19).
+- Trip-level route/breadcrumb history and geofence-event endpoints not yet explored — daily
+  mileage was the first target. `getFleetActivityDispatch`'s response also carries harsh-braking/
+  acceleration/phone-use/speeding event counts per day, unused by the current tools but available
+  if driver-safety scoring becomes a priority.
+- `FLEETSHARP_URL`/`FLEETSHARP_EMAIL`/`FLEETSHARP_PASSWORD` must be in Credential Manager
+  (`launcher/save-fleetsharp-secrets.ps1` sets them up interactively).
+
+---
+
 ## Terminology note: "SA" always means ServiceAutopilot
 
 Confirmed directly by Michael 2026-08-17: "Anytime 'SA' is mentioned you may assume it is serviceautopilot." This applies both to interpreting his messages and to intent-matching code (see `teams/router.js`'s `isCrmActionRequest` - the bare `\bsa\b` token has been added/removed/re-added several times by well-meaning "cleanup"; it must stay). Do not narrow this based on a first-principles false-positive argument - ask Michael before changing it again.
@@ -354,7 +395,7 @@ Confirmed directly by Michael 2026-08-17: "Anytime 'SA' is mentioned you may ass
 ## Credentials
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
-Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`
+Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`, `FLEETSHARP_URL`, `FLEETSHARP_EMAIL`, `FLEETSHARP_PASSWORD`
 
 Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 

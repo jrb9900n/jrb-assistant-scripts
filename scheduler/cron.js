@@ -37,12 +37,18 @@ let _shuttingDown = false;
 async function gracefulShutdown(signal) {
   if (_shuttingDown) return;
   _shuttingDown = true;
-  logger.info(`Scheduler: received ${signal}, closing SA session before exit`);
+  logger.info(`Scheduler: received ${signal}, closing SA/FleetSharp sessions before exit`);
   try {
     const { closeSaSession } = await import('../tools/impl/serviceautopilot.js');
     await closeSaSession();
   } catch (err) {
     logger.warn('Scheduler: closeSaSession failed during shutdown', { err: err.message });
+  }
+  try {
+    const { closeFleetSharpSession } = await import('../tools/impl/fleetsharp.js');
+    await closeFleetSharpSession();
+  } catch (err) {
+    logger.warn('Scheduler: closeFleetSharpSession failed during shutdown', { err: err.message });
   }
   process.exit(0);
 }
