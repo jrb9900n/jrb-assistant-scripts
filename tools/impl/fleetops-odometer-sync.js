@@ -58,6 +58,10 @@ export async function syncOdometerToFleetOps() {
 
   const today = new Date().toISOString().split('T')[0];
   const readingsToInsert = [];
+  // Collect asset updates separately — only apply after readings insert succeeds
+  // so that a failed batch insert doesn't leave assets updated with no corresponding
+  // odometer_readings row (partial-failure inconsistency).
+  const assetUpdates = [];
 
   for (const v of vehicles) {
     const assetId = truckNameToAssetId(v.vehicleName);
@@ -84,15 +88,8 @@ export async function syncOdometerToFleetOps() {
         assetId, existing: existingOdo, incoming: v.odometer,
       });
     } else {
-      const { error: updateErr } = await fleetops
-        .from('assets')
-        .update({ odometer: String(v.odometer), odometer_date: today })
-        .eq('id', assetId);
-      if (updateErr) {
-        logger.error('fleetops_odometer_sync: asset update failed', { assetId, err: updateErr.message });
-        result.assetsSkipped++;
-        continue;
-      }
+      // Queue the asset update — applied only after readings insert succeeds below.
+      assetUpdates.push({ assetId, odometer: String(v.odometer), odometer_date: today });
     }
 
     readingsToInsert.push({
@@ -106,9 +103,29 @@ export async function syncOdometerToFleetOps() {
   }
 
   if (readingsToInsert.length > 0) {
-    const { error: insertErr } = await fleetops.from('odometer_readings').insert(readingsToInsert);
+    // Use upsert with onConflict so re-runs (cron restart, retry) are idempotent.
+    // The odometer_readings table must have a unique constraint on
+    // (asset_id, recorded_at, source) for this to deduplicate correctly.
+    const { error: insertErr } = await fleetops
+      .from('odometer_readings')
+      .upsert(readingsToInsert, { onConflict: 'asset_id,recorded_at,source', ignoreDuplicates: true });
     if (insertErr) throw new Error(`odometer_readings insert failed: ${insertErr.message}`);
     result.readingsWritten = readingsToInsert.length;
+  }
+
+  // Apply asset snapshot updates only after readings have been durably written.
+  // This keeps odometer_readings and assets.odometer consistent: if the insert
+  // above threw, we never reach here and assets remain at their prior values.
+  for (const { assetId, odometer, odometer_date } of assetUpdates) {
+    const { error: updateErr } = await fleetops
+      .from('assets')
+      .update({ odometer, odometer_date })
+      .eq('id', assetId);
+    if (updateErr) {
+      // Log and continue — a failed snapshot update is recoverable on the next
+      // daily run; throwing here would leave the remaining assets un-updated.
+      logger.error('fleetops_odometer_sync: asset update failed', { assetId, err: updateErr.message });
+    }
   }
 
   return result;
