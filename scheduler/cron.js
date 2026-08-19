@@ -72,6 +72,22 @@ function releaseRunLock(taskName) {
   try { unlinkSync(lockFile); } catch { }
 }
 
+// Waits briefly for a sibling task's lock file to appear before concluding it isn't
+// running this cycle. Two call sites (weekly_finance_report/ame_weekly_sync,
+// bta_qb_revenue_report/qb_weekly_sync) previously checked existsSync exactly once —
+// a latent TOCTOU gap that mattered little when the two tasks in each pair fired
+// several hours/minutes apart on schedule, but is worth closing now that
+// recoverMissedExecutions (2026-08-19) means both could in principle recover close
+// together. Short grace window by design — the work before a lock file is written in
+// both producer tasks is a single synchronous statement, so 10s is ample margin
+// without adding meaningful latency to the common (no-catch-up) case.
+async function waitForLockToAppear(lockFile, graceMs = 10_000, pollMs = 2000) {
+  const start = Date.now();
+  while (!existsSync(lockFile) && Date.now() - start < graceMs) {
+    await new Promise(r => setTimeout(r, pollMs));
+  }
+}
+
 let saWasDown = false;
 let qbWasDown = false;
 let adsHealthWasDown = false;
@@ -114,10 +130,24 @@ const SCHEDULED_TASKS = [
     // runAudit() refreshes audit_issues so reconciliation sections have current data.
     schedule: '0 6 * * 1',
     name: 'weekly_finance_report',
+    // Confirmed 2026-08-19: this task never fired on its own schedule since at least
+    // 2026-08-10 despite the scheduler being continuously alive through multiple
+    // qualifying Monday windows — same node-cron missed-tick bug documented in full
+    // on qb_health_check below. Idempotent per ISO week (getPriorWeekRange), safe to
+    // catch up.
+    recoverMissedExecutions: true,
     run: async () => {
       const ameLockFile = join(tmpdir(), 'ame-weekly-sync.lock');
       let delayed = false;
       let delayMinutes = 0;
+
+      // Grace period first: the original check only ever looked once (existsSync),
+      // never waiting for the lock to appear — a pre-existing TOCTOU gap that mattered
+      // little when ame_weekly_sync (00:01) and this task (6 AM) fired 6 hours apart on
+      // schedule, but is worth closing now that both independently gained
+      // recoverMissedExecutions (2026-08-19) and could in principle recover close
+      // together. See waitForLockToAppear() above.
+      await waitForLockToAppear(ameLockFile);
 
       if (existsSync(ameLockFile)) {
         delayed = true;
@@ -176,6 +206,10 @@ const SCHEDULED_TASKS = [
     // Sunday 11 PM — synthesize week's observations into reusable patterns
     schedule: '0 23 * * 0',
     name: 'weekly_synthesis',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // never fired on schedule since at least 2026-08-10. Read-mostly synthesis, safe
+    // to catch up.
+    recoverMissedExecutions: true,
     run: async () => {
       const { runWeeklySynthesis } = await import('../tools/impl/feedback.js');
       await runWeeklySynthesis();
@@ -184,6 +218,11 @@ const SCHEDULED_TASKS = [
   {
     schedule: '0 9 * * 3,5',
     name: 'invoice_aging_check',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // never fired on schedule since at least 2026-08-10 (confirmed missed even on
+    // 2026-08-19, a Wednesday, despite the scheduler being alive at 9 AM that day).
+    // Only drafts reminder emails (never auto-sends), safe to catch up.
+    recoverMissedExecutions: true,
     run: () => runAgent({
       task: 'Query QuickBooks for all open invoices. Flag invoices past due more than 14 days. Draft polite payment reminder emails. Do NOT send - save drafts to M365 Drafts folder. Return summary list.',
       taskType: 'crm',
@@ -204,6 +243,11 @@ const SCHEDULED_TASKS = [
     // Monday 3 AM — full SA weekly pipeline (estimates, tickets, waiting list, lead matching, sheets)
     schedule: '0 3 * * 1',
     name: 'sa_weekly_sync',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // never fired on schedule since at least 2026-08-10, despite the scheduler being
+    // continuously alive through the 2026-08-17 Monday window. weekly-sync.js re-syncs
+    // current state, safe to catch up.
+    recoverMissedExecutions: true,
     run: () => new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['weekly-sync.js'], {
         cwd: 'C:\\Users\\Assistant\\BTA Reporting',
@@ -233,9 +277,27 @@ const SCHEDULED_TASKS = [
     // risks one process rotating the token out from under the other mid-refresh.
     schedule: '0 4 * * 1',
     name: 'qb_weekly_sync',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // never fired on schedule since at least 2026-08-10. This is the direct root cause
+    // of qb_invoices/qb_payments (AME's QB-side Supabase cache) sitting ~14 days stale,
+    // found 2026-08-19 while investigating a phantom-sync audit finding. Re-pulls prior
+    // ISO week's data, safe to catch up.
+    recoverMissedExecutions: true,
     run: () => {
-      acquireRunLock('qb_weekly_sync', 6 * 60_000);
+      // Actually honor the lock's return value (previously discarded) — hardens the
+      // existing dedup mechanism against any overlapping run, regardless of cause.
+      if (!acquireRunLock('qb_weekly_sync', 6 * 60_000)) {
+        logger.warn('qb_weekly_sync: skipped — already running (lock held)');
+        return Promise.resolve();
+      }
       return new Promise((resolve, reject) => {
+        // NOTE: derives the target ISO week from actual execution time, not the intended
+        // 4 AM Monday slot. Harmless for the sub-minute catch-up delays actually observed
+        // so far, but a catch-up firing many hours/days late (long stall, or a genuine
+        // scheduler restart landing after the missed tick) would pull/label the wrong
+        // week. Not fixed here — reworking this to anchor on the intended slot deserves
+        // its own dedicated, tested change to a live financial sync script, not a rushed
+        // addition alongside enabling recoverMissedExecutions.
         const prev = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
         const jan1 = new Date(prev.getFullYear(), 0, 1);
         const wn = Math.ceil((((prev - jan1) / 86400000) + jan1.getDay() + 1) / 7);
@@ -272,12 +334,25 @@ const SCHEDULED_TASKS = [
     // failure here alerts via both Teams and email, not Teams alone.
     schedule: '15 4 * * 1',
     name: 'bta_qb_revenue_report',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // never fired on schedule since at least 2026-08-10. Directly relevant to the
+    // "stale QB revenue package went unnoticed for over a month" risk called out
+    // above — this task existing wasn't sufficient if it never actually ran. Waits on
+    // qb_weekly_sync's own lock (hardened below to close a pre-existing TOCTOU gap).
+    recoverMissedExecutions: true,
     run: async () => {
       try {
         // qb_weekly_sync (4:00 AM) independently refreshes/rotates the same
         // Credential-Manager QB refresh token — wait for its lock to clear
         // (up to 6 min, matching the lock TTL) before also touching QB.
+        // Grace period first: the original check only ever looked once (existsSync),
+        // never waiting for the lock to appear — a pre-existing TOCTOU gap that mattered
+        // little when these fired 15 min apart on schedule, but is worth closing now that
+        // both independently gained recoverMissedExecutions (2026-08-19) and could in
+        // principle recover close together. See waitForLockToAppear() near the top of
+        // this file.
         const qbSyncLock = join(tmpdir(), 'jrb-scheduler-qb_weekly_sync.lock');
+        await waitForLockToAppear(qbSyncLock);
         const waitStart = Date.now();
         while (existsSync(qbSyncLock) && Date.now() - waitStart < 6 * 60_000) {
           await new Promise(r => setTimeout(r, 5000));
@@ -323,6 +398,10 @@ const SCHEDULED_TASKS = [
     // two counting bugs here 2026-07-30/31 (see funnel-summary read below).
     schedule: '30 4 * * 1',
     name: 'bta_sp_funnel_report',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // never fired on schedule since at least 2026-08-10. Non-fatal/read-mostly per the
+    // note above, safe to catch up.
+    recoverMissedExecutions: true,
     run: async () => {
       try {
         await new Promise((resolve, reject) => {
@@ -1385,16 +1464,47 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
     // Hard ceiling: aborts remaining steps after 5 h to protect the 6 AM finance report.
     schedule: '1 0 * * 1',
     name: 'ame_weekly_sync',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // never fired on schedule since at least 2026-08-10, despite the scheduler being
+    // continuously alive through the 2026-08-17 Monday 00:01 window. This is the direct
+    // root cause of qb_invoices/qb_payments (this task's own QB sync steps) sitting
+    // ~14 days stale, found 2026-08-19 while investigating a phantom-sync audit
+    // finding — the fix from PR #256 was only ever applied to qbo_sync_watchdog and
+    // qb_health_check, never extended here despite this being the single most
+    // consequential task on this exact bug class. Self-healing/idempotent per its own
+    // design (see comment above), safe to catch up.
+    recoverMissedExecutions: true,
     run: async () => {
       const notify = (msg) => import('../teams/notify.js')
         .then(({ sendProactiveMessage }) => sendProactiveMessage(msg))
         .catch(() => {});
 
       const ameLockFile = join(tmpdir(), 'ame-weekly-sync.lock');
-      writeFileSync(ameLockFile, String(Date.now()), 'utf8');
-
       const AME_PS1 = 'C:\\Users\\Assistant\\AuditMatchingEngine\\ame-run.ps1';
       const MAX_RUN_MS = 5 * 60 * 60 * 1000; // abort by 5 AM so the 6 AM finance report can run
+
+      // Guard against a genuine overlapping run — previously this lock file was written
+      // unconditionally, purely as a side-channel signal for weekly_finance_report to poll,
+      // with nothing stopping ame_weekly_sync itself from clobbering a still-fresh lock
+      // and running twice concurrently (both instances rotating the same QB refresh
+      // token). A pre-existing latent gap, hardened here while touching this task anyway.
+      // NOTE: this can't distinguish "still genuinely running" from "crashed without
+      // reaching the finally block's unlinkSync, lock left behind, <5h old" — no PID
+      // check, unlike the Chase daemon's liveness check elsewhere in this file. Alerting
+      // via Teams (not just a log line) so a false skip doesn't silently repeat next week
+      // too, which would be a real regression: this task gaining recoverMissedExecutions
+      // is meant to make exactly that scenario self-heal, not fail a second, quieter way.
+      if (existsSync(ameLockFile)) {
+        const existingTs = Number(readFileSync(ameLockFile, 'utf8') || 0);
+        if (existingTs && Date.now() - existingTs < MAX_RUN_MS) {
+          const runningMin = Math.round((Date.now() - existingTs) / 60000);
+          logger.warn('ame_weekly_sync: skipped — a run is already in progress (lock held)', { runningMin });
+          await notify(`ame_weekly_sync skipped this run — lock file shows another instance started ${runningMin} min ago. If that's not actually still running (e.g. a prior crash left the lock behind), it'll block catch-up until the lock ages past 5h — check manually if AME data still looks stale.`);
+          return;
+        }
+      }
+      writeFileSync(ameLockFile, String(Date.now()), 'utf8');
+
       const runStart = Date.now();
 
       function runStep(script) {
@@ -1553,6 +1663,10 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
     // commission-report-reply.js for the reply-driven approval loop.
     schedule: '0 6 3 * *',
     name: 'pm_commission_report',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // monthly cadence makes a stall-coincidence less likely than the weekly tasks, but
+    // still unprotected. Sends a draft, not a final, so safe to catch up.
+    recoverMissedExecutions: true,
     run: async () => {
       try {
         const { previousQuarter, currentQuarter } = await import('../tools/impl/commission-engine.js');
