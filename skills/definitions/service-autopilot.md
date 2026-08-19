@@ -221,6 +221,53 @@ queued." There's no `SentAt`/`LastEmailed` field anywhere on the `GetInvoice`
 response; `CustomerData.EmailInvoice`/`PrintInvoice` there are just the
 client's delivery-method *default*, not per-invoice status.
 
+### Manual flag-clearing — `ClearFlags` (discovered/confirmed 2026-08-19)
+
+The Invoices grid's "Actions" dropdown has a **"Clear Flags"** action (dialog
+`#dialog-clear-flags`, checkboxes `#chkEmailFlag`/`#chkPrintFlag`/`#chkLockFlag`)
+that resets `NeedToPrint`/`NeedToEmail` **without actually sending an email or
+printing anything**:
+
+```
+POST /WebServices/InvoiceList.asmx/ClearFlags
+{ "IDs": ["<guid>", ...], "ClearEmailFlag": true|false, "ClearPrintFlag": true|false, "LockInvoiceFlag": true|false }
+```
+
+**This directly undermines the `Action` field above as a bulk/scale signal** —
+`Action` is derived from the same `NeedToPrint`/`NeedToEmail` flags this
+endpoint resets, so a flag-cleared-but-never-sent invoice and a genuinely-sent
+one can look identical in a bulk `Action` read. There is no way to
+distinguish them without checking further.
+
+**However — the audit trail DOES catch it, contrary to what the client-side
+JS implies.** `ClearFlags`'s own client-side code (`InvoiceList.js`,
+`doClear()`) makes exactly one AJAX call with no visible second logging call —
+which looks like a silent mutation if you only read the JS. **Do not trust
+that inference; verify empirically.** A real live test (2 real invoices,
+2026-08-19) confirmed SA's backend writes a distinct audit trail entry
+server-side (same pattern as `EmailWs.asmx/SendEmail`, whose "successfully
+emailed"/"delivered"/"opened" entries are also written server-side with no
+second client call):
+
+```
+"Cleared the email and print flags" — ChangedBy: <real user name>, exact timestamp
+```
+
+This is textually distinct from `"Invoice #N was successfully emailed to the
+recipient..."` and from `"Invoice was printed"` (a genuine print, confirmed as
+its own separate entry too) — so **per-invoice, `sa_get_audit_trail` reliably
+tells clear-flags-only apart from a genuine send/print.** The gap is scale:
+there is currently no known bulk-list field that carries this distinction —
+only the per-invoice audit trail does, so checking many invoices at once for
+this specific gaming pattern means an audit-trail call per invoice, not a
+single bulk query.
+
+**General lesson reinforced here:** don't conclude "no server-side logging"
+from the absence of a visible second AJAX call in client-side JS — SA's
+backend can and does write audit trail entries invisibly to the client. Only
+trust "no audit trail effect" claims that have been verified against a real
+action, not inferred from reading code alone.
+
 ### Payments (NEW account)
 ```
 POST /WebServices/PaymentListWs.asmx/Query
