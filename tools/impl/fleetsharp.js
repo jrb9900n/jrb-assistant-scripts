@@ -222,6 +222,47 @@ async function rawPost(page, url, formBody) {
   }, { url, formBody });
 }
 
+// getLinxupTripsReport/getFleetActivityDispatch take application/x-www-form-urlencoded,
+// but runAsyncReport (used by getAdvancedTripsExport) takes a raw JSON body instead —
+// a separate content-type from the rest of this module's POST calls.
+async function fsPostJson(path, jsonBody) {
+  let { page, apiBase } = await getSession();
+  let res = await rawPostJson(page, `${apiBase}${path}`, jsonBody);
+  if (sessionExpired(res)) {
+    ({ page, apiBase } = await getSession(true));
+    res = await rawPostJson(page, `${apiBase}${path}`, jsonBody);
+  }
+  return parseJson(res, path);
+}
+
+async function rawPostJson(page, url, jsonBody) {
+  return page.evaluate(async ({ url, jsonBody }) => {
+    const res = await window.fetch(url, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(jsonBody),
+    });
+    const text = await res.text();
+    return { status: res.status, text };
+  }, { url, jsonBody });
+}
+
+// Downloads a signed GCS URL (from getAsyncReportStatus's excelSignedLink) as a Buffer.
+// The signed URL carries its own auth (GoogleAccessId/Expires/Signature query params),
+// so no FleetSharp session cookies are needed — and it must NOT be fetched via the
+// page's own window.fetch(): storage.googleapis.com is a different origin than the
+// FleetSharp page, and GCS signed URLs don't send permissive CORS headers, so a
+// same-page fetch is blocked by the browser with a generic "Failed to fetch" (confirmed
+// live 2026-08-19). Node's own fetch has no CORS enforcement — it's a browser-only
+// restriction — so downloading directly in Node sidesteps the problem entirely.
+async function downloadAsBuffer(signedUrl) {
+  const res = await fetch(signedUrl);
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+  const arrayBuffer = await res.arrayBuffer();
+  return Buffer.from(arrayBuffer);
+}
+
 function toFormBody(params) {
   return Object.entries(params)
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v ?? '')}`)
@@ -342,6 +383,76 @@ export async function getDailyMileage({ startDate, endDate, driverIds = [] }) {
     score: r.score,
     grade: r.grade,
   }));
+}
+
+/**
+ * Runs FleetSharp's "Advanced Trips" report for a date range and returns the
+ * resulting per-event rows as an .xlsx Buffer — the same report + format the
+ * manual monthly accounting workflow already pastes into a spreadsheet by hand
+ * (Reports > Advanced Trips > Export). This is an async report on FleetSharp's
+ * side: submit -> poll until COMPLETE -> download a signed result URL. Confirmed
+ * 2026-08-19 via a live capture of that exact manual flow.
+ *
+ * startDate/endDate: 'YYYY-MM-DD'. Returns a Buffer (parse with the `xlsx` package).
+ */
+export async function getAdvancedTripsExport({ startDate, endDate, pollIntervalMs = 5000, maxPolls = 36 }) {
+  if (!startDate || !endDate) throw new Error('getAdvancedTripsExport requires startDate and endDate (YYYY-MM-DD)');
+
+  const startEpoch = new Date(`${startDate}T00:00:00`).getTime();
+  const endEpoch = new Date(`${endDate}T23:59:59`).getTime();
+
+  await fsPostJson('/ibis/rest/scheduled-reports/runAsyncReport', {
+    reportType: 'ADVANCED_TRIPS',
+    appDriverIds: [],
+    sort: 'Tracker',
+    startEpoch,
+    endEpoch,
+    driverIds: [],
+    customerId: null,
+    customerGroupId: null,
+    dispatch: true,
+    coordinatesLocation: false,
+    metricUnits: false,
+    tzName: 'America/Chicago',
+    stopType: null,
+    getGeofenceVisits: true,
+    getAlerts: false,
+    getCustomerVisits: false,
+    emailReport: false,
+    groupSummary: 'All',
+    trackerSummary: 'All',
+    appDriverSummary: 'All',
+    alertTypeSummary: null,
+    stopTypeSummary: '',
+    alertType: null,
+    geofenceId: null,
+    bidVsActualStatus: 'MATCHED',
+    safetyScoreHardwareType: 'ALL',
+  });
+
+  // Poll getAsyncReportStatus until it reports OUR job as COMPLETE. This endpoint
+  // returns "the account's latest ADVANCED_TRIPS report" rather than something keyed
+  // to a job ID from the submit call (which returns an empty body) — so a stale
+  // completed report from a different date range could otherwise be mistaken for
+  // ours. Guard against that by checking the embedded criteria's startEpoch/endEpoch
+  // match what we actually requested before accepting a status as "ours."
+  let status = null;
+  for (let i = 0; i < maxPolls; i++) {
+    await new Promise(r => setTimeout(r, pollIntervalMs));
+    const res = await fsGet('/ibis/rest/scheduled-reports/getAsyncReportStatus/ADVANCED_TRIPS');
+    const data = res?.data;
+    if (!data) continue;
+    let criteria = null;
+    try { criteria = JSON.parse(data.criteria); } catch {}
+    if (criteria?.startEpoch === startEpoch && criteria?.endEpoch === endEpoch && data.status === 'COMPLETE') {
+      status = data;
+      break;
+    }
+  }
+  if (!status) throw new Error(`FleetSharp Advanced Trips report did not complete within ${(pollIntervalMs * maxPolls) / 1000}s`);
+  if (!status.excelSignedLink) throw new Error(`FleetSharp Advanced Trips report completed with no download link: ${status.errorMsg || 'unknown error'}`);
+
+  return downloadAsBuffer(status.excelSignedLink);
 }
 
 /**
