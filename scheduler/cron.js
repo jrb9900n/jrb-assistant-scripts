@@ -586,6 +586,19 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // 5:35 AM daily — pull live odometer readings from FleetSharp for the ~18 trucks
+    // matched by ID convention (FLV018 = "Truck 18") and sync into FleetOps
+    // (assets.odometer/odometer_date + odometer_readings history + odometer_sync_log).
+    // Supersedes the FleetOps repo's Vercel-cron sync, which called a FleetSharp API
+    // that never existed and synced 0 readings across 152 runs since 2026-03-25.
+    schedule: '35 5 * * *',
+    name: 'fleetops_odometer_sync',
+    run: async () => {
+      const { runOdometerSync } = await import('../tools/impl/fleetops-odometer-sync.js');
+      await runOdometerSync();
+    },
+  },
+  {
     // 8 AM daily — warn if QB refresh token is within 14 days of its 101-day expiry
     schedule: '0 8 * * *',
     name: 'qb_reauth_reminder',
