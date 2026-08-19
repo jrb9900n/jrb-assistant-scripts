@@ -701,6 +701,22 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // 6 AM on the 1st of each month — transport accounting report (short/long trip-day
+    // counts per truck) for the prior full calendar month, replacing the manual FleetSharp
+    // export-and-paste workflow that had a formula bug always classifying every day "Short".
+    schedule: '0 6 1 * *',
+    name: 'transport_accounting_report',
+    run: async () => {
+      const { runTransportAccountingReport } = await import('../tools/impl/transport-accounting-report.js');
+      const now = new Date();
+      const firstOfThisMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+      const firstOfPriorMonth = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const lastOfPriorMonth = new Date(firstOfThisMonth.getTime() - 86400000);
+      const toDateStr = (d) => d.toISOString().slice(0, 10);
+      await runTransportAccountingReport({ startDate: toDateStr(firstOfPriorMonth), endDate: toDateStr(lastOfPriorMonth) });
+    },
+  },
+  {
     // 8 AM daily — warn if QB refresh token is within 14 days of its 101-day expiry
     schedule: '0 8 * * *',
     name: 'qb_reauth_reminder',
