@@ -48,8 +48,12 @@ export async function syncOdometerToFleetOps() {
       result.assetsSkipped++;
       continue;
     }
-    if (v.odometer === null || v.odometer === undefined) {
-      logger.info('fleetops_odometer_sync: no odometer reading from FleetSharp', { assetId, vehicleName: v.vehicleName });
+    // Treat 0 as untrustworthy too, not just null/undefined — a real truck never
+    // legitimately reads 0 miles, so it's a sensor glitch or an unconfigured device,
+    // and would otherwise slip past the "existing < incoming" guard below entirely
+    // for any asset with no prior odometer on file (existingOdo is NaN there).
+    if (v.odometer === null || v.odometer === undefined || v.odometer <= 0) {
+      logger.info('fleetops_odometer_sync: no usable odometer reading from FleetSharp', { assetId, vehicleName: v.vehicleName, odometer: v.odometer });
       result.assetsSkipped++;
       continue;
     }
