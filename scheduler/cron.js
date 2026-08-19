@@ -37,12 +37,18 @@ let _shuttingDown = false;
 async function gracefulShutdown(signal) {
   if (_shuttingDown) return;
   _shuttingDown = true;
-  logger.info(`Scheduler: received ${signal}, closing SA session before exit`);
+  logger.info(`Scheduler: received ${signal}, closing SA/FleetSharp sessions before exit`);
   try {
     const { closeSaSession } = await import('../tools/impl/serviceautopilot.js');
     await closeSaSession();
   } catch (err) {
     logger.warn('Scheduler: closeSaSession failed during shutdown', { err: err.message });
+  }
+  try {
+    const { closeFleetSharpSession } = await import('../tools/impl/fleetsharp.js');
+    await closeFleetSharpSession();
+  } catch (err) {
+    logger.warn('Scheduler: closeFleetSharpSession failed during shutdown', { err: err.message });
   }
   process.exit(0);
 }
@@ -577,6 +583,19 @@ const SCHEDULED_TASKS = [
       const { runFleetopsHealthcheck } = await import('../tools/impl/fleetops-healthcheck.js');
       const result = await runFleetopsHealthcheck();
       logger.info('fleetops_healthcheck complete', result);
+    },
+  },
+  {
+    // 5:35 AM daily — pull live odometer readings from FleetSharp for the ~18 trucks
+    // matched by ID convention (FLV018 = "Truck 18") and sync into FleetOps
+    // (assets.odometer/odometer_date + odometer_readings history + odometer_sync_log).
+    // Supersedes the FleetOps repo's Vercel-cron sync, which called a FleetSharp API
+    // that never existed and synced 0 readings across 152 runs since 2026-03-25.
+    schedule: '35 5 * * *',
+    name: 'fleetops_odometer_sync',
+    run: async () => {
+      const { runOdometerSync } = await import('../tools/impl/fleetops-odometer-sync.js');
+      await runOdometerSync();
     },
   },
   {

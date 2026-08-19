@@ -927,10 +927,41 @@ const SCHEDULING_TOOLS = [
   },
 ];
 
+const FLEETSHARP_TOOLS = [
+  {
+    name: 'fleetsharp_get_vehicle_list',
+    description: 'List every vehicle/tracker on the FleetSharp GPS account, joining device inventory (VIN, serial number, device type) with the live position snapshot (lat/lng, odometer, speed, status). Use this to resolve a vehicle name to its driverId/deviceId before calling fleetsharp_get_daily_mileage.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'fleetsharp_get_live_positions',
+    description: 'Get current GPS position, speed, and odometer for every FleetSharp tracker, without the device-inventory join. Cheaper than fleetsharp_get_vehicle_list when only current location/odometer is needed.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'fleetsharp_get_daily_mileage',
+    description: 'Get daily mileage and drive-activity (idle time, drive time, stop time, harsh-driving score) per vehicle over a date range from FleetSharp. Rows are keyed by driverId, not vehicle name — cross-reference with fleetsharp_get_vehicle_list or fleetsharp_get_tracker_names to label them.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        startDate: { type: 'string', description: 'Start of the range, YYYY-MM-DD' },
+        endDate:   { type: 'string', description: 'End of the range, YYYY-MM-DD' },
+        driverIds: { type: 'array', items: { type: 'number' }, description: 'Optional list of driverId/trackerId values to filter to specific vehicles. Omit for all vehicles.' },
+      },
+      required: ['startDate', 'endDate'],
+    },
+  },
+  {
+    name: 'fleetsharp_get_tracker_names',
+    description: 'Get the driverId/trackerId -> display name map for all FleetSharp trackers. Use to label rows returned by fleetsharp_get_daily_mileage or fleetsharp_get_live_positions.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+];
+
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
   crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS],
-  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
+  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   // Unattended investigate-and-fix pass (self_heal_watcher) -- same tools as
   // 'code' minus github_merge_pr, so it can open a PR for Michael but can
@@ -942,7 +973,7 @@ const TOOL_MAP = {
   scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
 };
 
 export function getTools(taskType) {

@@ -7,6 +7,7 @@ core/logs/
 *.backup-*
 sa-session-cache.json
 sa-incapsula-backoff.json
+fleetsharp-session-cache.json
 qbo-sync-watchdog-state.json
 
 # Runtime state (not source)

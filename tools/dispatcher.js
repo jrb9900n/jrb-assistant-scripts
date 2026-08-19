@@ -20,6 +20,7 @@ import * as scripts     from './impl/scripts.js';
 import * as vercel      from './impl/vercel.js';
 import * as scheduling  from './impl/scheduling.js';
 import * as sa          from './impl/serviceautopilot.js';
+import * as fleetsharp  from './impl/fleetsharp.js';
 import * as carddav     from './impl/carddav.js';
 import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
@@ -159,6 +160,12 @@ const HANDLERS = {
   sa_get_client_profile:   (i) => sa.getClientProfile(i),
   sa_get_client_notes:     (i) => sa.getClientNotes(i),
   sa_get_audit_trail:      (i) => sa.getAuditTrail(i),
+
+  // FleetSharp
+  fleetsharp_get_vehicle_list:    () => fleetsharp.getVehicleList(),
+  fleetsharp_get_live_positions:  () => fleetsharp.getLivePositions(),
+  fleetsharp_get_daily_mileage:   (i) => fleetsharp.getDailyMileage(i),
+  fleetsharp_get_tracker_names:   () => fleetsharp.getTrackerNames(),
 
   // CardDAV
   carddav_provision:      (i) => carddav.provisionCredential(i),
