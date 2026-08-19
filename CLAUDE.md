@@ -305,7 +305,7 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 - `sa_update_estimate_notes` — re-save estimate with filled placeholder values
 - `sa_create_job` — schedule waiting-list job from estimate via CreateServiceJobFromQuote + SaveWaitingListService
 - `sa_set_billing_defaults` — set Taxable=Tax, InvoiceDelivery=Email on a client (call ~5 min after `sa_create_client`)
-- `sa_list_tag_categories` / `sa_list_tags` / `sa_get_client_tags` / `sa_add_tag_to_client` — read/write client tags (built 2026-08-19, see Tags section below)
+- `sa_list_tag_categories` / `sa_list_tags` / `sa_get_client_tags` / `sa_add_tag_to_client` / `sa_remove_tag_from_client` — read/write client tags (built 2026-08-19, see Tags section below)
 
 ### Key constants
 - `EMPTY_GUID` = `00000000-0000-0000-0000-000000000000`
@@ -328,6 +328,7 @@ Discovered via a live DevTools capture while Michael manually tagged a client �
 - `getClientTags({ clientId })` — `CRMBFF/TagsAppliedManager/GetSavedTags`, body `{parentID: clientId, viewAutomationTag: false}`. This is an MVC action (no `d` wrapper in the response), not a `TagsWs.asmx` web method — param names (`parentID`, `viewAutomationTag`) were recovered live off the ASP.NET MVC binder's own "null entry for parameter" error message on a deliberately-wrong probe call, same trick used for `listTags`'s `GetTagsByType`. Reads tags applied to one client.
 - `addTagToClient({ clientId, tagId })` — `webservices/TagsWs.asmx/AddTagToClient`, body `{CustomerTag:{TagID, CustomerID: clientId}}`. `clientId` here is the same GUID as the `rk` query param on `ClientView.aspx?rk=...` — confirmed by comparing both against one live capture. Like `saveClientFields`, never trusts the write response alone — always re-verifies via `getClientTags` after saving.
 - `addTagToClientByName({ clientId, tagName, categoryId, tagType })` — convenience wrapper combining the two steps above; this is what the `sa_add_tag_to_client` agent tool calls.
+- `removeTagFromClient({ clientId, tagId })` — `webservices/TagsWs.asmx/RemoveTag`, body `{TagData:{CustomerID, ParentID, TagID}}` (clientId passed under two different names, both confirmed equal via a live DevTools capture 2026-08-19 of Michael manually removing a tag). Only removes the client's application of the tag — the tag definition itself is untouched. Same re-verify-via-`getClientTags` convention as `addTagToClient`.
 
 ---
 

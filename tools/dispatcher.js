@@ -155,6 +155,7 @@ const HANDLERS = {
   sa_list_tags:            ()  => sa.listTags(),
   sa_get_client_tags:      (i) => sa.getClientTags(i),
   sa_add_tag_to_client:    (i) => sa.addTagToClientByName(i),
+  sa_remove_tag_from_client: (i) => sa.removeTagFromClient(i),
   sa_set_billing_defaults: (i) => sa.setClientBillingDefaults(i),
   sa_set_crackfill:        (i) => sa.setClientCrackfill(i),
   sa_list_resources:       ()  => sa.listSAResources(),

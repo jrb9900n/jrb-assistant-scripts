@@ -742,6 +742,18 @@ const SA_TOOLS = [
     },
   },
   {
+    name: 'sa_remove_tag_from_client',
+    description: 'Remove a tag from a Service Autopilot client account (the tag definition itself is untouched, only its application to this client is removed). Verifies the removal stuck via sa_get_client_tags before returning.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID from sa_search_clients' },
+        tagId:    { type: 'string', description: 'Tag GUID from sa_list_tags or sa_get_client_tags' },
+      },
+      required: ['clientId', 'tagId'],
+    },
+  },
+  {
     name: 'sa_set_billing_defaults',
     description: 'Set billing defaults on an existing SA client: Taxable=Tax, InvoiceDelivery=Email. Call as a separate step ~5 minutes after sa_create_client to allow SA indexing to complete. Returns { clientId, sendInvoiceBy, taxable }.',
     input_schema: {

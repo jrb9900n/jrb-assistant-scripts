@@ -2003,6 +2003,37 @@ export async function addTagToClient({ clientId, tagId }) {
 }
 
 /**
+ * Remove a tag from a client account (the tag definition itself is untouched —
+ * only the client's application of it is removed). clientId is passed twice in
+ * the request body under two different names (CustomerID and ParentID) — both
+ * confirmed equal to the same client GUID in a live DevTools capture 2026-08-19
+ * (Michael manually removing a tag in the SA UI). Mirrors addTagToClient's
+ * conventions: never trusts the write response alone, always re-verifies via
+ * getClientTags afterward.
+ *
+ * Source endpoint: webservices/TagsWs.asmx/RemoveTag, body
+ * {TagData: {CustomerID, ParentID, TagID}}.
+ */
+export async function removeTagFromClient({ clientId, tagId }) {
+  await getClientDetails({ clientId });
+
+  const res = await post('/webservices/TagsWs.asmx/RemoveTag', {
+    TagData: { CustomerID: clientId, ParentID: clientId, TagID: tagId },
+  }, 'ClientView.aspx');
+  const errors = res.data?.d?.Errors;
+  if (errors?.length > 0) {
+    throw new Error(`SA removeTagFromClient failed: ${JSON.stringify(errors)}`);
+  }
+
+  const remaining = await getClientTags({ clientId });
+  if (remaining.some(t => t.tagId === tagId)) {
+    throw new Error(`SA removeTagFromClient: verification failed — tag ${tagId} still present in GetSavedTags after removal`);
+  }
+  logger.info('SA: tag removed from client', { clientId, tagId });
+  return { clientId, tagId, tags: remaining };
+}
+
+/**
  * Convenience wrapper: find-or-create a tag by name, then apply it to a
  * client in one call. Returns { clientId, tagId, tagName, created, tags }.
  */
