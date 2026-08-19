@@ -5,6 +5,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { query } from './quickbooks.js';
+import { nameSimilarity } from './weekly-finance-report.js';
 import { logger } from '../../core/logger.js';
 
 const fleetops = createClient(
@@ -23,6 +24,14 @@ const SA_OPEN_BALANCE_THRESHOLD = 100;  // flag SA client with > $100 open invoi
 const SA_OPEN_BALANCE_GRACE_DAYS = 14;  // ignore invoices < 14 days past due (recently issued)
 const SNOW_BILLING_LOOKBACK_DAYS = 180; // QB invoice fetch window for SALT/ICE coverage check
 const SALT_INVOICE_WINDOW_DAYS = 90;   // QB invoice must fall within 90 days after SALT/ICE service date
+const PHANTOM_SYNC_LOOKBACK_DAYS = 180;      // wider than LOOKBACK_DAYS — this bug can sit silent for a while
+const PHANTOM_SYNC_MIN_AMOUNT = 10;          // ignore trivial/near-zero invoices
+const QB_INVOICES_FRESHNESS_HOURS = 72;      // don't trust a "not found" verdict if qb_invoices itself is stale
+const QB_PAYMENTS_FRESHNESS_HOURS = 72;      // same idea for qb_payments — annotate rather than suppress (fuzzy match is inherently softer than the ID-based invoice check, so a stale-but-real gap is still worth surfacing)
+const UNRECORDED_PAYMENT_LOOKBACK_DAYS = 90;
+const UNRECORDED_PAYMENT_DATE_WINDOW_DAYS = 21;
+const UNRECORDED_PAYMENT_MIN_AMOUNT = 25;    // ignore trivial gaps/rounding noise
+const UNRECORDED_PAYMENT_HIGH_THRESHOLD = 1000;
 
 // Word-bounded regex so "service", "price", "device" do not match "ice"
 const SALT_ICE_RE = /\bsalt\b|\bice\b/i;
@@ -389,6 +398,148 @@ async function checkSAOpenBalances(runId) {
   return issues;
 }
 
+// ── Check 6: "Phantom-synced" invoices — SA reports a healthy sync that never happened ──
+// SA can show QBStatus 0 (its own "synced" code) with a populated QboID on an invoice
+// that was never actually created in QBO — this is invisible to SA's own error reporting
+// (no QBStatus 2/3, nothing in SA's "QuickBooks Online Sync Errors" report) and to the
+// AME matching engine's broader "unmatched_sa" bucket only by coincidence, not by design.
+// Found via a real case 2026-08-19 (Debbie Howell-1 invoice #33296) surfaced only by
+// manually cross-referencing the weekly report's mismatch sections against live QBO.
+// Fingerprint per SA invoice — auto-resolves once the QboID resolves to a real QBO invoice.
+//
+// Guard: qb_invoices is populated by AuditMatchingEngine's separate sync process, not by
+// this check. If that table hasn't refreshed recently, a "not found" verdict is not
+// trustworthy — a real, already-existing QBO invoice can simply be missing from a stale
+// local cache (confirmed false-positive case, same 2026-08-19 investigation: invoice
+// #33296 actually existed live in QBO but was absent from a 2-week-stale qb_invoices
+// snapshot). Skip the check entirely rather than risk a false alarm when stale.
+
+export async function checkPhantomSyncedInvoices(runId) {
+  const { data: freshRow, error: freshErr } = await fleetops
+    .from('qb_invoices')
+    .select('synced_at')
+    .order('synced_at', { ascending: false })
+    .limit(1);
+  if (freshErr) throw new Error(`phantom_synced_invoice freshness query failed: ${freshErr.message}`);
+
+  const newestSync = freshRow?.[0]?.synced_at ? new Date(freshRow[0].synced_at).getTime() : 0;
+  const ageHours = newestSync ? (Date.now() - newestSync) / 3600000 : Infinity;
+  if (ageHours > QB_INVOICES_FRESHNESS_HOURS) {
+    logger.warn('phantom_synced_invoice check skipped — qb_invoices cache too stale to trust a "not found" verdict', {
+      ageHours: Math.round(ageHours),
+    });
+    return [];
+  }
+
+  const { data: candidates, error } = await fleetops
+    .from('sa_invoices')
+    .select('sa_id, invoice_number, client, qbo_id, invoice_total, date')
+    .eq('deleted', false)
+    .eq('qb_status', '0')
+    .not('qbo_id', 'is', null)
+    .gt('invoice_total', PHANTOM_SYNC_MIN_AMOUNT)
+    .gte('date', dateStr(PHANTOM_SYNC_LOOKBACK_DAYS));
+
+  if (error) throw new Error(`phantom_synced_invoice query failed: ${error.message}`);
+  if (!candidates?.length) return [];
+
+  const qboIds = [...new Set(candidates.map(c => c.qbo_id))];
+  const { data: found, error: qbErr } = await fleetops
+    .from('qb_invoices')
+    .select('qb_id')
+    .in('qb_id', qboIds);
+  if (qbErr) throw new Error(`phantom_synced_invoice qb_invoices lookup failed: ${qbErr.message}`);
+
+  const foundSet = new Set((found ?? []).map(r => r.qb_id));
+
+  return candidates
+    .filter(c => !foundSet.has(c.qbo_id))
+    .map(c => ({
+      fingerprint: `phantom_synced_invoice|${c.sa_id}`,
+      issue_type: 'phantom_synced_invoice',
+      severity: 'high',
+      sa_client: c.client,
+      sa_amount: parseFloat(c.invoice_total),
+      description: `SA invoice #${c.invoice_number} for ${c.client} shows QBStatus 0 (synced) with QboID ${c.qbo_id}, but no QBO invoice with that Id exists — $${parseFloat(c.invoice_total).toFixed(2)}, dated ${c.date}. SA believes this synced; it did not. Verify directly in QBO before assuming money is missing from the books.`,
+      last_audit_run_id: runId,
+    }));
+}
+
+// ── Check 7: SA payments with no matching QBO payment (tracked) ───────────────
+// Same underlying "phantom sync" bug class as Check 6, but on the payment side, where
+// SA's own qbo_id field is unreliable even on genuinely-synced payments (frequently null
+// either way) — so an ID-based lookup doesn't work here. Falls back to fuzzy matching
+// (customer name + amount ±$1 + date ±21 days), identical in spirit to the ad hoc check
+// already run fresh every week in weekly-finance-report.js's gatherUnrecordedPayments().
+// Reuses weekly-finance-report.js's nameSimilarity (imported above) rather than a second
+// copy of the same matching logic — this becomes a persistent, deduped, auto-resolving
+// audit_issue, while the weekly report's own gatherUnrecordedPayments() is recomputed
+// from scratch every run with no memory of what's new vs. long-standing; keeping the
+// matching logic itself in one place means the two can't silently drift apart.
+// Fingerprint per SA payment — auto-resolves once a matching QBO payment appears.
+
+export async function checkUnrecordedPayments(runId) {
+  const cutoff = dateStr(UNRECORDED_PAYMENT_LOOKBACK_DAYS);
+
+  const [{ data: saPmts, error: e1 }, { data: qbPmts, error: e2 }, { data: freshRow, error: e3 }] = await Promise.all([
+    fleetops
+      .from('sa_payments')
+      .select('sa_id, client, payment_amount, payment_date')
+      .gte('payment_date', cutoff)
+      .eq('deleted', false),
+    fleetops
+      .from('qb_payments')
+      .select('customer_name, amount, date')
+      .gte('date', cutoff),
+    fleetops
+      .from('qb_payments')
+      .select('synced_at')
+      .order('synced_at', { ascending: false })
+      .limit(1),
+  ]);
+  if (e1) throw new Error(`unrecorded_payment SA query failed: ${e1.message}`);
+  if (e2) throw new Error(`unrecorded_payment QB query failed: ${e2.message}`);
+  if (e3) throw new Error(`unrecorded_payment freshness query failed: ${e3.message}`);
+
+  const newestSync = freshRow?.[0]?.synced_at ? new Date(freshRow[0].synced_at).getTime() : 0;
+  const ageHours = newestSync ? (Date.now() - newestSync) / 3600000 : Infinity;
+  // Unlike checkPhantomSyncedInvoices, a stale cache doesn't suppress this check — a fuzzy
+  // amount/date/name match is inherently softer, and a real gap is still worth surfacing.
+  // Instead, annotate every finding so a stale-cache false positive (confirmed real case,
+  // 2026-08-19: Debbie Howell-1's $231.05 payment, fixed directly in QBO the day before,
+  // still showed up here because qb_payments hadn't refreshed) reads as "verify first," not
+  // "still broken."
+  const staleCaveat = ageHours > QB_PAYMENTS_FRESHNESS_HOURS
+    ? ` (qb_payments cache is ${Math.round(ageHours)}h old — this may already be fixed and not yet reflected here; check live QBO before treating it as new.)`
+    : '';
+
+  const issues = [];
+  for (const sa of (saPmts ?? [])) {
+    const amt = parseFloat(sa.payment_amount || 0);
+    if (amt < UNRECORDED_PAYMENT_MIN_AMOUNT) continue;
+
+    const saDate = new Date(sa.payment_date + 'T12:00:00Z');
+    const hasMatch = (qbPmts ?? []).some(qb => {
+      if (Math.abs(parseFloat(qb.amount || 0) - amt) > 1) return false;
+      const qbDate = new Date(qb.date + 'T12:00:00Z');
+      if (Math.abs(saDate - qbDate) > UNRECORDED_PAYMENT_DATE_WINDOW_DAYS * 86400000) return false;
+      return nameSimilarity(sa.client, qb.customer_name) >= 0.5;
+    });
+    if (hasMatch) continue;
+
+    issues.push({
+      fingerprint: `unrecorded_payment|${sa.sa_id}`,
+      issue_type: 'unrecorded_payment',
+      severity: amt > UNRECORDED_PAYMENT_HIGH_THRESHOLD ? 'high' : 'medium',
+      sa_client: sa.client,
+      sa_amount: amt,
+      description: `${sa.client} — $${amt.toFixed(2)} payment recorded in SA on ${sa.payment_date} with no matching QBO payment within 21 days. May be a real gap in QBO's books (the same "phantom sync" pattern as invoices — SA recorded it, QBO never got it) rather than simple sync lag — verify before assuming it will resolve on its own.${staleCaveat}`,
+      last_audit_run_id: runId,
+    });
+  }
+  return issues;
+}
+
 // ── Main audit runner ─────────────────────────────────────────────────────────
 
 export async function runAudit() {
@@ -403,14 +554,16 @@ export async function runAudit() {
 
   let allIssues = [];
   try {
-    const [unbilled, overdue, mismatches, stalledAR, saOpenBalances] = await Promise.all([
+    const [unbilled, overdue, mismatches, stalledAR, saOpenBalances, phantomInvoices, unrecordedPayments] = await Promise.all([
       checkUnbilledComplete(runId),
       checkOverdueInvoices(runId),
       checkAmountMismatches(runId),
       checkStalledAR(runId),
       checkSAOpenBalances(runId),
+      checkPhantomSyncedInvoices(runId),
+      checkUnrecordedPayments(runId),
     ]);
-    allIssues = [...unbilled, ...overdue, ...mismatches, ...stalledAR, ...saOpenBalances];
+    allIssues = [...unbilled, ...overdue, ...mismatches, ...stalledAR, ...saOpenBalances, ...phantomInvoices, ...unrecordedPayments];
   } catch (err) {
     await fleetops.from('audit_runs')
       .update({ status: 'error', error_message: err.message })

@@ -77,7 +77,7 @@ function categorizeByItemName(lines) {
 
 // ── Customer name similarity (reduces false "unrecorded" payment flags) ─────
 
-function nameSimilarity(nameA, nameB) {
+export function nameSimilarity(nameA, nameB) {
   if (!nameA || !nameB) return 0;
   const norm = s => s.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
   const a = norm(nameA), b = norm(nameB);
@@ -826,10 +826,12 @@ function buildEmail({ weekLabel, displayRange, payments, arAging, invoices, depo
 
   // overdue_invoice omitted — already covered by Section 2 AR Aging
   const issueTypes = {
-    unbilled_complete: { label: 'SA Completed — No QB Invoice',            color: '#c0392b' },
-    amount_mismatch:   { label: 'Invoice Amount Mismatches',                color: '#b35900' },
-    stalled_ar:        { label: 'QB Open AR — No Payment in 90 Days',       color: '#7b2d8b' },
-    sa_open_balance:   { label: 'SA Open Invoice Balances',                 color: '#1a6b3c' },
+    unbilled_complete:      { label: 'SA Completed — No QB Invoice',            color: '#c0392b' },
+    amount_mismatch:        { label: 'Invoice Amount Mismatches',                color: '#b35900' },
+    stalled_ar:             { label: 'QB Open AR — No Payment in 90 Days',       color: '#7b2d8b' },
+    sa_open_balance:        { label: 'SA Open Invoice Balances',                 color: '#1a6b3c' },
+    phantom_synced_invoice: { label: 'Invoices Flagged Synced But Missing in QBO', color: '#c0392b' },
+    unrecorded_payment:     { label: 'SA Payments Not Yet Recorded in QB (Tracked)', color: '#7b2d8b' },
   };
   let hasAnyIssue = false;
   for (const [type, meta] of Object.entries(issueTypes)) {
