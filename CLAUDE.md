@@ -423,6 +423,29 @@ Built after the 2026-08-12 KB5121003 incident wiped all 35 `JRBAgent:*` Credenti
 - **Known limitation**: DPAPI encryption ties the backup to this specific Windows user profile. It protects against exactly the failure mode that actually happened (Credential Manager vault wiped, DPAPI keys intact) but would NOT be decryptable if the entire profile/machine were lost. That's an accepted tradeoff for now - a passphrase-based fallback layer would close that gap if ever wanted.
 - Tested end-to-end 2026-08-17 against the real 35 production credentials: enumerate, encrypt, local write, OneDrive upload, healthcheck (clean), decrypt, and a disposable-key CredWrite/CredRead round-trip all verified working.
 
+### Bypassing the agent loop for direct tool calls (confirmed useful 2026-08-19)
+
+`start-agent.ps1 cli "..."` always runs through `runAgent()`, which requires a working `ANTHROPIC_API_KEY`
+with available credit — if the Anthropic account is out of credit, every CLI/Teams/scheduler call fails with
+`BadRequestError: Your credit balance is too low`, even though the underlying `tools/impl/*.js` functions
+have no Anthropic dependency at all. When that happens (or for any quick read-only check that doesn't need
+an LLM to decide anything), read only the specific env vars a given impl file actually needs
+(`grep process.env tools/impl/<file>.js` — e.g. `serviceautopilot.js` only needs
+`SA_EMAIL`/`SA_PASSWORD`/`SA_PROXY_URL`) via a `CredRead` PowerShell snippet, then call the exported
+function directly from a plain Node script instead of going through the agent:
+
+```powershell
+$env:SA_EMAIL = [CredReader]::GetPassword("JRBAgent:SA_EMAIL")
+$env:SA_PASSWORD = [CredReader]::GetPassword("JRBAgent:SA_PASSWORD")
+$env:SA_PROXY_URL = [CredReader]::GetPassword("JRBAgent:SA_PROXY_URL")
+node scratch\my-probe-script.mjs   # imports { getInvoice, getAuditTrail, ... } from 'tools/impl/serviceautopilot.js'
+```
+
+(`CredReader`'s `CredRead`-based `Add-Type` definition is the same pattern the launcher itself uses to read
+Credential Manager entries — see `Get-Secret` in `launcher/start-agent.ps1` for the reference
+implementation; give the class a unique name per PowerShell session to avoid an `Add-Type` redefinition
+error.) Works for any `tools/impl/*.js` export — SA, QBO, Supabase, etc.
+
 ---
 
 ## GitHub Repos (scoped access only)
