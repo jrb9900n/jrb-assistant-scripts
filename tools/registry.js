@@ -708,6 +708,40 @@ const SA_TOOLS = [
     },
   },
   {
+    name: 'sa_list_tag_categories',
+    description: 'List Service Autopilot tag categories (e.g. "Client Type", "General", "GC Information"). Needed to create a brand-new tag via sa_add_tag_to_client — pick the categoryId that best fits, or ask Michael which category to use.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'sa_list_tags',
+    description: 'List all defined Service Autopilot client tags (the master tag list — not what\'s applied to any one client). Use to check whether a tag with a given name already exists before creating a duplicate.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'sa_get_client_tags',
+    description: 'List the tags currently applied to a Service Autopilot client.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId: { type: 'string', description: 'SA client GUID from sa_search_clients' },
+      },
+      required: ['clientId'],
+    },
+  },
+  {
+    name: 'sa_add_tag_to_client',
+    description: 'Apply a tag to a Service Autopilot client account, by tag name. Reuses an existing tag if one matches the name (case-insensitive); otherwise creates it — pass categoryId from sa_list_tag_categories when the tag is new (required only in that case). Verifies the tag stuck via sa_get_client_tags before returning.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientId:   { type: 'string', description: 'SA client GUID from sa_search_clients' },
+        tagName:    { type: 'string', description: 'Tag name, e.g. "Commercial - HOA"' },
+        categoryId: { type: 'string', description: 'Tag category GUID from sa_list_tag_categories — required only if tagName doesn\'t already exist' },
+      },
+      required: ['clientId', 'tagName'],
+    },
+  },
+  {
     name: 'sa_set_billing_defaults',
     description: 'Set billing defaults on an existing SA client: Taxable=Tax, InvoiceDelivery=Email. Call as a separate step ~5 minutes after sa_create_client to allow SA indexing to complete. Returns { clientId, sendInvoiceBy, taxable }.',
     input_schema: {

@@ -305,6 +305,7 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 - `sa_update_estimate_notes` — re-save estimate with filled placeholder values
 - `sa_create_job` — schedule waiting-list job from estimate via CreateServiceJobFromQuote + SaveWaitingListService
 - `sa_set_billing_defaults` — set Taxable=Tax, InvoiceDelivery=Email on a client (call ~5 min after `sa_create_client`)
+- `sa_list_tag_categories` / `sa_list_tags` / `sa_get_client_tags` / `sa_add_tag_to_client` — read/write client tags (built 2026-08-19, see Tags section below)
 
 ### Key constants
 - `EMPTY_GUID` = `00000000-0000-0000-0000-000000000000`
@@ -316,6 +317,17 @@ SA has no public API. Uses puppeteer-core browser login + internal BFF endpoints
 - SA_EMAIL and SA_PASSWORD must be in Credential Manager as `JRBAgent:SA_EMAIL` and `JRBAgent:SA_PASSWORD`
 - **No dedicated API endpoint exists for `Taxable` or `InvoiceDelivery` fields.** Exhaustive probing of ClientView-minified.js (207 KB), ClientList.js (171 KB), and sa-minified.js (1.1 MB) confirmed zero save endpoints for these fields specifically. Workaround: `sa_set_billing_defaults` calls `ClientEditOverlayWs.asmx/GetClientInfo` to get the full client record, overrides `SalesTaxCodeID` (JRB "Tax" code `c432e644-…`) and `SendInvoiceBy` ("Email"), then POSTs to `ClientEditOverlayWs.asmx/SaveClient` with the full payload. No puppeteer UI clicking required.
 - `sa_set_billing_defaults` — set `Taxable=Tax`, `InvoiceDelivery=Email` on a client (call ~5 min after `sa_create_client`)
+
+### Client Tags (built 2026-08-19)
+
+Discovered via a live DevTools capture while Michael manually tagged a client — this replaces an earlier wrong conclusion (an exhaustive code search of `saveClientFields`'s field list had found no tag mechanism, because tags aren't a client field at all — they're a separate CRM subsystem with their own endpoints).
+
+- `getTagCategories()` — `webservices/TagsWs.asmx/GetAllTagCategories`, no body. Returns categories like "Client Type", "General", "GC Information".
+- `listTags({ tagType })` — `CRMBFF/TagsAppliedManager/GetTagsByType`, body `{TagTypes:[tagType], AddAutomationTags:false}` (param names recovered the same MVC-binder-error way as `getClientTags`). Returns the full master tag list across all categories (tagType 1 = client tags, the only type confirmed so far).
+- `findOrCreateTag({ name, categoryId, tagType })` — creates via `webservices/TagsWs.asmx/AddTag` (body `{Tag:{ID:EMPTY_GUID, CategoryID, Name, TagType}}`) only if `listTags` doesn't already have a case-insensitive name match. `AddTag`'s response never returns the new tag's ID (just `{Errors:[]}`), so the new ID is recovered by re-calling `listTags` and matching by name.
+- `getClientTags({ clientId })` — `CRMBFF/TagsAppliedManager/GetSavedTags`, body `{parentID: clientId, viewAutomationTag: false}`. This is an MVC action (no `d` wrapper in the response), not a `TagsWs.asmx` web method — param names (`parentID`, `viewAutomationTag`) were recovered live off the ASP.NET MVC binder's own "null entry for parameter" error message on a deliberately-wrong probe call, same trick used for `listTags`'s `GetTagsByType`. Reads tags applied to one client.
+- `addTagToClient({ clientId, tagId })` — `webservices/TagsWs.asmx/AddTagToClient`, body `{CustomerTag:{TagID, CustomerID: clientId}}`. `clientId` here is the same GUID as the `rk` query param on `ClientView.aspx?rk=...` — confirmed by comparing both against one live capture. Like `saveClientFields`, never trusts the write response alone — always re-verifies via `getClientTags` after saving.
+- `addTagToClientByName({ clientId, tagName, categoryId, tagType })` — convenience wrapper combining the two steps above; this is what the `sa_add_tag_to_client` agent tool calls.
 
 ---
 

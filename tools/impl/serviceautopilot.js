@@ -46,6 +46,10 @@ const STATE_IDS = {
 // SA TicketStatus values — TicketList default view filters for Status:1 (Open); Status:0 tickets are hidden
 const TICKET_STATUS_OPEN = 1;
 
+// SA tag TagType values — 1 = client tags, the only type confirmed so far (30/31 seen in the wild on
+// existing tags are believed to be "automation"/"marketplace" tags per AddTagOverlay.js, unconfirmed).
+const CLIENT_TAG_TYPE = 1;
+
 // SA ticket category IDs (from TicketEdit_TicketCategoryDropdown_GetByCompany)
 const TICKET_CATEGORIES = {
   OTHER:            'e74cbced-0bf3-43ef-9fee-f7564af541da',
@@ -1854,6 +1858,124 @@ export async function addTicket({ clientId, subject, body = '', ticketType = 'Ta
   }
   logger.info('SA: ticket created', { ticketId, clientId, ticketType });
   return { ticketId, clientId };
+}
+
+/**
+ * List SA's tag categories (e.g. "Client Type", "General", "GC Information").
+ * Source: webservices/TagsWs.asmx/GetAllTagCategories (confirmed via live
+ * capture 2026-08-19 — DevTools network log while adding a tag in the SA UI).
+ * Returns [{ categoryId, name }].
+ */
+export async function getTagCategories() {
+  const res = await post('/webservices/TagsWs.asmx/GetAllTagCategories', {}, 'Clients.aspx');
+  const items = res.data?.d || [];
+  return items.map(c => ({ categoryId: c.Value, name: c.Text }));
+}
+
+/**
+ * List all defined client tags (the master tag list, not what's applied to
+ * any one client). Source: CRMBFF/TagsAppliedManager/GetTagsByType, body
+ * {TagTypes: [n], AddAutomationTags: bool} — param names confirmed live
+ * 2026-08-19 by reading the MVC binder's own "null entry for parameter"
+ * error message off a deliberately-wrong probe call. tagType 1 = client tags
+ * (the only type confirmed so far).
+ * Returns [{ tagId, name, categoryId }].
+ */
+export async function listTags({ tagType = CLIENT_TAG_TYPE } = {}) {
+  const res = await post('/CRMBFF/TagsAppliedManager/GetTagsByType', { TagTypes: [tagType], AddAutomationTags: false }, 'ClientView.aspx');
+  const items = res.data?.Items || [];
+  return items.map(t => ({ tagId: t.ID, name: t.Name, categoryId: t.CategoryID }));
+}
+
+/**
+ * Find an existing tag by exact name (case-insensitive), or create it if it
+ * doesn't exist yet. AddTag's response never echoes the new tag's ID (only
+ * {Errors:[]}), so after creating we re-list tags and look the new one up by
+ * name — same read-after-write pattern as getTicket/saveClientFields.
+ * Returns { tagId, name, categoryId, created }.
+ */
+function findTagByName(tags, name) {
+  return tags.find(t => t.name.toLowerCase() === name.toLowerCase());
+}
+
+export async function findOrCreateTag({ name, categoryId, tagType = CLIENT_TAG_TYPE }) {
+  const existing = findTagByName(await listTags({ tagType }), name);
+  if (existing) return { ...existing, created: false };
+
+  if (!categoryId) throw new Error(`SA findOrCreateTag: tag "${name}" doesn't exist yet — categoryId is required to create it`);
+
+  const res = await post('/webservices/TagsWs.asmx/AddTag', {
+    Tag: { ID: EMPTY_GUID, CategoryID: categoryId, Name: name, TagType: tagType },
+  }, 'ClientView.aspx');
+  const errors = res.data?.d?.Errors;
+  if (errors?.length > 0) {
+    throw new Error(`SA findOrCreateTag AddTag errors: ${JSON.stringify(errors)}`);
+  }
+
+  const created = findTagByName(await listTags({ tagType }), name);
+  if (!created) throw new Error(`SA findOrCreateTag: AddTag reported success but "${name}" isn't in GetTagsByType afterward`);
+  logger.info('SA: tag created', { tagId: created.tagId, name, categoryId });
+  return { ...created, created: true };
+}
+
+/**
+ * Read the tags currently applied to a client. Source:
+ * CRMBFF/TagsAppliedManager/GetSavedTags(Guid parentID, Boolean viewAutomationTag)
+ * — this is an MVC action, not a TagsWs.asmx web method (its JSON response has
+ * no "d" wrapper), confirmed live 2026-08-19 the same way as listTags: the
+ * exact param name ("parentID", then "viewAutomationTag") came from the MVC
+ * binder's own null-parameter error message on a deliberately-wrong probe call.
+ * Returns [{ tagId, name }].
+ */
+export async function getClientTags({ clientId }) {
+  const res = await post('/CRMBFF/TagsAppliedManager/GetSavedTags', { parentID: clientId, viewAutomationTag: false }, 'ClientView.aspx');
+  const items = res.data?.Items || [];
+  return items.map(t => ({ tagId: t.Value, name: t.Text }));
+}
+
+/**
+ * Attach an existing tag to a client account. clientId is the SA client GUID
+ * (same value as the `rk` param on ClientView.aspx and as CustomerID here —
+ * confirmed by matching both against a live capture 2026-08-19). Pass an
+ * existing tagId (from listTags/findOrCreateTag) — this call does not create
+ * tag definitions, only applies one.
+ *
+ * Source endpoint: webservices/TagsWs.asmx/AddTagToClient, body
+ * {CustomerTag: {TagID, CustomerID}}. Response is just {Errors:[]} with no
+ * confirmation of what changed, so this always verifies via getClientTags
+ * afterward — same "never trust the write response alone" rule as
+ * saveClientFields. Validates clientId exists first (same convention as
+ * addNote/addTicket/saveClientFields) — AddTagToClient doesn't reject a
+ * bad CustomerID on its own, so without this check a wrong clientId would
+ * otherwise only surface as an unhelpful "verification failed" error below.
+ */
+export async function addTagToClient({ clientId, tagId }) {
+  await getClientDetails({ clientId });
+
+  const res = await post('/webservices/TagsWs.asmx/AddTagToClient', {
+    CustomerTag: { TagID: tagId, CustomerID: clientId },
+  }, 'ClientView.aspx');
+  const errors = res.data?.d?.Errors;
+  if (errors?.length > 0) {
+    throw new Error(`SA addTagToClient failed: ${JSON.stringify(errors)}`);
+  }
+
+  const applied = await getClientTags({ clientId });
+  if (!applied.some(t => t.tagId === tagId)) {
+    throw new Error(`SA addTagToClient: verification failed — tag ${tagId} not present in GetSavedTags after saving`);
+  }
+  logger.info('SA: tag applied to client', { clientId, tagId });
+  return { clientId, tagId, tags: applied };
+}
+
+/**
+ * Convenience wrapper: find-or-create a tag by name, then apply it to a
+ * client in one call. Returns { clientId, tagId, tagName, created, tags }.
+ */
+export async function addTagToClientByName({ clientId, tagName, categoryId, tagType = CLIENT_TAG_TYPE }) {
+  const tag = await findOrCreateTag({ name: tagName, categoryId, tagType });
+  const result = await addTagToClient({ clientId, tagId: tag.tagId });
+  return { ...result, tagName: tag.name, created: tag.created };
 }
 
 /**
