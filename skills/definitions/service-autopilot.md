@@ -159,6 +159,68 @@ POST /AccountingBFF/InvoiceList/V2InvoiceList_Query
 `PaymentType`, `Frequency`, `PrepaymentBalance`, `CreditBalance`,
 `Deleted`, `ContractID`, `QBStatus`
 
+> **2026-08-19: currently erroring server-side.** Every call returns HTTP 200
+> with `{ "Invoices": [], "Errors": ["StatusCode = InternalServerError ... An
+> error has occured."] }` — SA's own internal microservice
+> (`app.sa.prod.local:2100`) is throwing, not a request-format issue on our
+> end. No body variation fixes it; this is on SA's side. Also: hitting a
+> *wrong* path variant (e.g. `/InvoiceBFF/InvoiceList/InvoiceList_Query`)
+> returns an HTML login-redirect page instead of JSON, which trips
+> Incapsula and triggers ~45 min of bot-detection backoff on the whole
+> shared SA session — be careful when probing path variants live.
+
+### Invoice Delivery Status — `Action` field (distinct from `Status`)
+
+`Status` above is payment state (Open/Paid/Past Due) — it says nothing about
+whether an invoice was ever sent to the client. That's a **separate field**,
+`Action`, confirmed 2026-08-19 from a real browser network capture of
+`InvoiceList.aspx` (the page the classic Invoices grid lives on) right after
+clicking "Send Email":
+
+```
+POST /WebServices/InvoiceList.asmx/QueryModified
+{ "IDs": ["<invoice GUID 1>", "<invoice GUID 2>", ...] }
+```
+
+This is a **batch-fetch-by-known-IDs** endpoint, not a date-range list —
+`{ IDs: [] }` returns `{ Invoices: null, Total: 0 }`; `IDs: null` errors
+("Object reference not set", confirming `IDs` is a `String[]` server-side).
+It's exactly what the SA UI itself calls to refresh a row's delivery state
+after a Send/Print action — pair it with invoice IDs already known (e.g. from
+`sa_invoices`) rather than trying to browse by date through it.
+
+**`Action` values observed** (confirmed against ~350 real invoices, cross-checked
+against `sa_get_audit_trail` entries for several of them):
+| Value | Meaning |
+|---|---|
+| `Sent` | Emailed and delivered. Confirmed against the audit trail — every `Sent` invoice checked had matching "was successfully emailed to..." / "email was delivered" log entries. |
+| `Email` | Queued to be emailed, not yet actually sent — seen only on very recent invoices (last ~1–2 days), consistent with SA running a batch send job that hasn't processed them yet. |
+| `Print` | Queued for print delivery, not emailed at all. Confirmed against the audit trail on invoice #33933 (Craig Butler) — `Action: "Print"` matched an audit trail with zero email-related entries. |
+| `Print & Email` | Queued for both. |
+
+No blank/empty `Action` value has been observed — every invoice in a full
+356-row snapshot had one of the four values above, including ones created
+that same day. Whether `Print`-only invoices ever flip to `Sent` once
+actually printed (there's no "printed" completion event confirmed anywhere)
+is unconfirmed — the one `Print` invoice seen hadn't crossed that boundary
+during observation.
+
+**Agent tool:** `sa_get_invoice_status` (`tools/impl/serviceautopilot.js` →
+`getInvoiceStatuses`) wraps this endpoint — pass a list of invoice GUIDs, get
+back `{ invoiceId, invoiceNumber, status, action, client, date, invoiceTotal,
+invoiceBalance }` per invoice. Use this over `sa_get_audit_trail` when
+checking send status across many invoices at once; use `sa_get_audit_trail`
+when you need the exact historical detail (timestamp, delivery/open receipts)
+for one invoice.
+
+Also confirmed **not a reliable source** for this question:
+`InvoiceOverlay.asmx/GetInvoice`'s `NeedToPrint`/`NeedToEmail` booleans are
+live *queue-pending* flags (true only while sitting in an unprocessed
+batch), not history — `false` is ambiguous between "already sent" and "never
+queued." There's no `SentAt`/`LastEmailed` field anywhere on the `GetInvoice`
+response; `CustomerData.EmailInvoice`/`PrintInvoice` there are just the
+client's delivery-method *default*, not per-invoice status.
+
 ### Payments (NEW account)
 ```
 POST /WebServices/PaymentListWs.asmx/Query
