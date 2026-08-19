@@ -164,6 +164,7 @@ const HANDLERS = {
   sa_get_client_profile:   (i) => sa.getClientProfile(i),
   sa_get_client_notes:     (i) => sa.getClientNotes(i),
   sa_get_audit_trail:      (i) => sa.getAuditTrail(i),
+  sa_get_invoice_status:   (i) => sa.getInvoiceStatuses(i),
 
   // FleetSharp
   fleetsharp_get_vehicle_list:    () => fleetsharp.getVehicleList(),

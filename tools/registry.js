@@ -866,6 +866,17 @@ const SA_TOOLS = [
       required: ['entityId', 'type'],
     },
   },
+  {
+    name: 'sa_get_invoice_status',
+    description: 'Batch-fetch delivery/payment status for a known list of Service Autopilot invoice IDs. Returns, per invoice: `status` (payment state: Open/Paid/Past Due) and `action` (delivery state: "Sent" = emailed and delivered; "Email"/"Print"/"Print & Email" = still queued, not yet actually sent). This is the fastest way to check whether invoices are unsent vs. emailed across many invoices at once — for the full historical detail (exact timestamps, delivery/open receipts) on a single invoice, use sa_get_audit_trail instead. Requires invoice IDs already known (e.g. from the sa_invoices Supabase table) — this does not browse/list invoices by date range.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        invoiceIds: { type: 'array', items: { type: 'string' }, description: 'SA invoice GUIDs to check' },
+      },
+      required: ['invoiceIds'],
+    },
+  },
 ];
 
 const SCHEDULING_TOOLS = [

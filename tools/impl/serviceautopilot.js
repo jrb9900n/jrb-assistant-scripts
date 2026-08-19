@@ -1225,6 +1225,40 @@ export async function getInvoice({ invoiceId }) {
   return d;
 }
 
+/**
+ * Batch-fetch the `Status`/`Action` fields for a known set of SA invoice IDs, via
+ * InvoiceList.asmx/QueryModified — the exact endpoint InvoiceList.aspx itself calls
+ * to refresh a row's delivery state after Send/Print. Confirmed 2026-08-19 from a
+ * live browser network capture (not guessed).
+ *
+ * This is a batch-by-ID lookup, NOT a date-range list — `{ IDs: [] }` requires a
+ * known set of invoice IDs (e.g. pulled from the `sa_invoices` Supabase table).
+ * `Action` ("Sent" | "Email" | "Print" | "Print & Email") tracks delivery/queue
+ * state and is distinct from `Status` (payment state: Open/Paid/Past Due) — the
+ * bulk date-range endpoint (`V2InvoiceList_Query`, see getEstimateList-style
+ * callers) does not expose `Action` at all; this is the only known place it lives.
+ *
+ * "Sent" means the invoice has been emailed and delivered (confirm exact timestamp/
+ * delivery/open receipts via getAuditTrail). "Email"/"Print"/"Print & Email" mean
+ * still queued/pending — not yet actually sent by SA's send batch job.
+ */
+export async function getInvoiceStatuses({ invoiceIds }) {
+  const res = await post('/WebServices/InvoiceList.asmx/QueryModified',
+    { IDs: invoiceIds }, 'InvoiceList.aspx');
+  const d = res.data?.d;
+  if (!d) throw new Error(`SA getInvoiceStatuses: no data returned: ${res.text?.slice(0, 200)}`);
+  return (d.Invoices || []).map(inv => ({
+    invoiceId:      inv.ID,
+    invoiceNumber:  inv.InvoiceNumber,
+    status:         inv.Status,
+    action:         inv.Action,
+    client:         inv.Client,
+    date:           inv.Date,
+    invoiceTotal:   inv.InvoiceTotal,
+    invoiceBalance: inv.InvoiceBalance,
+  }));
+}
+
 // ── Audit trail — AuditTrailsWs.asmx ─────────────────────────────────────────
 
 // SA's per-record "view history" dialog (ShowAuditTrailDialog) always passes one
