@@ -101,6 +101,29 @@ try { branchWasDrifted = JSON.parse(readFileSync(BRANCH_DRIFT_STATE_FILE, 'utf8'
 function saveBranchDriftState(drifted) {
   try { writeFileSync(BRANCH_DRIFT_STATE_FILE, JSON.stringify({ drifted }), 'utf8'); } catch {}
 }
+// Startup-time sanity check: if the persisted state says "drifted" but the repo
+// is actually clean right now (on main, 0 commits behind), clear the stale flag
+// immediately rather than waiting up to 15 min for the next cron tick. This
+// handles the common case where a scheduler restart itself included a git pull
+// or reset that fixed the deployment — without this, the new instance inherits
+// branchWasDrifted=true and spends the first cycle needlessly attempting an
+// auto-correct git pull that's already a no-op.
+if (branchWasDrifted) {
+  try {
+    const REPO_DIR = 'C:\\Users\\Assistant\\JRBAgent';
+    const startupBranch = execSync('git rev-parse --abbrev-ref HEAD', { cwd: REPO_DIR, encoding: 'utf8', timeout: 10_000 }).trim();
+    execSync('git fetch origin main --quiet', { cwd: REPO_DIR, timeout: 20_000 });
+    const startupBehind = parseInt(execSync('git rev-list --count HEAD..origin/main', { cwd: REPO_DIR, encoding: 'utf8', timeout: 10_000 }).trim(), 10) || 0;
+    if (startupBranch === 'main' && startupBehind === 0) {
+      branchWasDrifted = false;
+      saveBranchDriftState(false);
+      logger.info('branch_drift_check: stale drift state cleared at startup — repo is clean');
+    }
+  } catch {
+    // git not available or fetch failed — leave branchWasDrifted as-is; the
+    // first cron tick will re-evaluate and send the appropriate message.
+  }
+}
 // Throttles repeat "still stuck" notifications during an ongoing drift
 // episode to once/hour, while the actual auto-correct attempt itself still
 // retries silently on every 15-min tick underneath. Separate timers per
