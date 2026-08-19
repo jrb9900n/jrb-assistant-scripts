@@ -14,10 +14,25 @@ import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getVehicleList } from './fleetsharp.js';
 
-const fleetops = createClient(
-  process.env.FLEETOPS_SUPABASE_URL,
-  process.env.FLEETOPS_SUPABASE_SERVICE_KEY
-);
+// Lazy singleton — defer client construction until first use so that env vars
+// injected by the credential manager at startup are guaranteed to be present.
+// Constructing at module load time (before injection completes) would silently
+// pass `undefined` to createClient and cause all subsequent calls to fail with
+// confusing errors rather than a clear missing-credential message.
+let _fleetops = null;
+function getFleetOpsClient() {
+  if (!_fleetops) {
+    const url = process.env.FLEETOPS_SUPABASE_URL;
+    const key = process.env.FLEETOPS_SUPABASE_SERVICE_KEY;
+    if (!url || !key) {
+      throw new Error(
+        'FLEETOPS_SUPABASE_URL and FLEETOPS_SUPABASE_SERVICE_KEY must be set before running the odometer sync'
+      );
+    }
+    _fleetops = createClient(url, key);
+  }
+  return _fleetops;
+}
 
 const TRUCK_NAME_RE = /^Truck\s+(\d+)$/i;
 
@@ -28,6 +43,7 @@ function truckNameToAssetId(vehicleName) {
 }
 
 export async function syncOdometerToFleetOps() {
+  const fleetops = getFleetOpsClient();
   const result = { assetsSynced: 0, assetsSkipped: 0, readingsWritten: 0 };
 
   const vehicles = await getVehicleList();
@@ -37,7 +53,8 @@ export async function syncOdometerToFleetOps() {
     .select('id, odometer')
     .like('id', 'FLV%');
   if (assetsErr) throw new Error(`FleetOps assets fetch failed: ${assetsErr.message}`);
-  const assetById = new Map(assets.map(a => [a.id, a]));
+  // Guard against Supabase returning null data alongside a null error on edge conditions
+  const assetById = new Map((assets || []).map(a => [a.id, a]));
 
   const today = new Date().toISOString().split('T')[0];
   const readingsToInsert = [];
@@ -48,7 +65,10 @@ export async function syncOdometerToFleetOps() {
       result.assetsSkipped++;
       continue;
     }
-    if (v.odometer === null || v.odometer === undefined) {
+    // Treat null, undefined, and zero/negative values as invalid — a zero odometer
+    // is almost certainly a FleetSharp glitch (no real truck has 0 miles) and would
+    // overwrite valid historical data if allowed through.
+    if (v.odometer === null || v.odometer === undefined || v.odometer <= 0) {
       logger.info('fleetops_odometer_sync: no odometer reading from FleetSharp', { assetId, vehicleName: v.vehicleName });
       result.assetsSkipped++;
       continue;
@@ -94,6 +114,7 @@ export async function syncOdometerToFleetOps() {
 }
 
 export async function runOdometerSync() {
+  const fleetops = getFleetOpsClient();
   try {
     const result = await syncOdometerToFleetOps();
     await fleetops.from('odometer_sync_log').insert({
