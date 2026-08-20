@@ -239,7 +239,8 @@ export async function getEmailAttachmentBytes({ email_id, attachment_id, userEma
   return Buffer.from(data.contentBytes, 'base64');
 }
 
-export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago' }) {
+export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail } = {}) {
+  const user = userEmail ?? USER();
   const event = {
     subject,
     body: { contentType: 'text', content: body },
@@ -248,8 +249,8 @@ export async function createCalendarEvent({ subject, start, end, body = '', time
     isReminderOn: true,
     reminderMinutesBeforeStart: 1440,
   };
-  const data = await graph('POST', `/users/${USER()}/events`, event);
-  return { created: true, event_id: data.id, subject, start };
+  const data = await graph('POST', `/users/${user}/events`, event);
+  return { created: true, event_id: data.id, subject, start, calendar: user };
 }
 
 // ── Inbox folder management ───────────────────────────────────
