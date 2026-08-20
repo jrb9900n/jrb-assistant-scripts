@@ -2016,6 +2016,28 @@ function findTagByName(tags, name) {
   return tags.find(t => t.name.toLowerCase() === name.toLowerCase());
 }
 
+/**
+ * Find an existing tag category by exact name (case-insensitive), or create
+ * it. Source: webservices/TagsWs.asmx/AddCategory, body {CategoryName},
+ * response {CategoryID, Errors} — found in AddTagOverlay.js's self.AddCategory
+ * (the "+ New Category" path in SA's own "Add Tag" dialog). Unlike AddTag,
+ * this one DOES echo back the new ID directly, so no re-list-and-match-by-
+ * name step is needed.
+ * Returns { categoryId, name, created }.
+ */
+export async function findOrCreateTagCategory({ name }) {
+  const existing = (await getTagCategories()).find(c => c.name.toLowerCase() === name.toLowerCase());
+  if (existing) return { ...existing, created: false };
+
+  const res = await post('/webservices/TagsWs.asmx/AddCategory', { CategoryName: name }, 'ClientView.aspx');
+  const categoryId = res.data?.d?.CategoryID;
+  if (!categoryId || categoryId === EMPTY_GUID) {
+    throw new Error(`SA findOrCreateTagCategory: AddCategory failed for "${name}" — you do not have permission, or: ${res.text?.slice(0, 300)}`);
+  }
+  logger.info('SA: tag category created', { categoryId, name });
+  return { categoryId, name, created: true };
+}
+
 export async function findOrCreateTag({ name, categoryId, tagType = CLIENT_TAG_TYPE }) {
   const existing = findTagByName(await listTags({ tagType }), name);
   if (existing) return { ...existing, created: false };
@@ -2084,6 +2106,54 @@ export async function addTagToClient({ clientId, tagId }) {
   }
   logger.info('SA: tag applied to client', { clientId, tagId });
   return { clientId, tagId, tags: applied };
+}
+
+/**
+ * Bulk-find every client/lead carrying a given tag, via V2AccountList_Query's
+ * FieldColumn:31 (Tags) filter — confirmed live 2026-08-19 by filtering on
+ * the "Commercial - HOA" tag's ID and getting back exactly the one real
+ * client known to carry it. ContainOperator:'7' is the one that actually
+ * filters (matches the "enable all statuses" flag elsewhere in this file,
+ * which also uses op 7) — '1' and '8' silently no-op and return the
+ * unfiltered default list instead, so don't change this without re-testing.
+ * This lets classification work (e.g. "who already has a GC: <company>
+ * tag") run as one cheap query per tag instead of one GetSavedTags call per
+ * client — critical at the ~9,900-account scale, where per-client calls
+ * would be too slow and risk another Incapsula lockout.
+ * Returns [{ clientId, name }].
+ */
+export async function getClientsByTag({ tagId, max = 5000 }) {
+  const filterData = JSON.stringify({
+    FilterData: [
+      { FieldColumn: '31', ContainOperator: '7', FieldItems: [tagId], Order: 0, SCFilterID: EMPTY_GUID },
+      { FieldColumn: '28', ContainOperator: '7', FieldItems: [], Order: 0, SCFilterID: EMPTY_GUID },
+    ],
+    CustomFields: [],
+    QuerySelection: 3,
+  });
+
+  const results = [];
+  let startRow = 1;
+  const pageSize = 500;
+  while (results.length < max) {
+    const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
+      QueryInput: {
+        Settings: { FilterData: filterData },
+        StartRow: startRow,
+        Max: pageSize,
+        SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
+      },
+    }, 'Clients.aspx');
+    const accounts = (res.data?.d || res.data)?.Accounts || [];
+    if (accounts.length === 0) break;
+    // Trim the final page so a caller's `max` is a real ceiling, not just a
+    // loop-continuation check — without this, results could overshoot max by
+    // up to pageSize-1 whenever the last page pushed it past the limit.
+    results.push(...accounts.slice(0, max - results.length).map(a => ({ clientId: a.ClientID, name: a.ClientName })));
+    if (accounts.length < pageSize) break;
+    startRow += pageSize;
+  }
+  return results;
 }
 
 /**
@@ -2174,6 +2244,7 @@ function mapSAAccount(a) {
     state:    a.State || a.StateAbbr || '',
     zip:      a.Zip || a.ZipCode || a.PostalCode || '',
     phone:    a.HomePhone || a.CellPhone || a.WorkPhone || a.OtherPhone || a.Phone1 || a.PhoneNumber || '',
+    email:    a.Email || '',
     qboId:    a.QboID || a.QboId || '',
     isLead:   a.Type === 'Lead',
     type:     a.Type || '',

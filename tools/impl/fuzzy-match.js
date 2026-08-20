@@ -154,14 +154,14 @@ const ADDR_ABBR = [
   // common ordinal abbreviations already match (1st, 2nd, etc.)
 ];
 
-function normalizeAddress(addr) {
+export function normalizeAddress(addr) {
   if (!addr) return '';
   let s = addr.toLowerCase().replace(/[.,#]/g, '').replace(/\s+/g, ' ').trim();
   for (const [re, abbr] of ADDR_ABBR) s = s.replace(re, abbr);
   return s.replace(/\s+/g, ' ').trim();
 }
 
-function streetNumberOf(addr) {
+export function streetNumberOf(addr) {
   return normalizeAddress(addr).match(/^(\d+[a-z]?)/)?.[1] ?? null;
 }
 
@@ -193,7 +193,7 @@ function samePhone(a, b) {
 }
 
 // ── Email normalization ───────────────────────────────────────────────────────
-function normalizeEmail(e) {
+export function normalizeEmail(e) {
   return e ? e.toLowerCase().trim() : null;
 }
 
