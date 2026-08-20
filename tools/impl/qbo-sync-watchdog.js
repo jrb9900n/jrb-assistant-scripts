@@ -8,11 +8,15 @@
 //      cycle has had a chance to run.
 //   2. Two confirmed-safe auto-fixable categories (malformed semicolon-joined email,
 //      oversized ClientTitle) — fixed via saveClientFields (metadata-only, never
-//      touches billing).
-//   3. Everything else — a one-time diagnosed Teams alert per new signature, no
+//      touches billing), then explicitly resent via ReSendSyncEntity so the corrected
+//      row is retried now rather than waiting on an unrelated future sync.
+//   3. 429/Throttle Exception rows — transient QBO-side rate limit, SA's data is
+//      already correct — resent via the same real "Actions -> Re-Send" action, retried
+//      once per SA batch cycle if still present.
+//   4. Everything else — a one-time diagnosed Teams alert per new signature, no
 //      auto-write, because the SA-QBO sync playbook marks those fixes as unconfirmed
 //      or higher-risk (deleted QBO customer reference, parent-not-found, payment
-//      required-param-missing, etc.).
+//      required-param-missing, "Cannot Change Who Customer Bills With", etc.).
 //
 // State (dedup across runs) is a local JSON file — this only needs to persist a
 // handful of signatures with timestamps between scheduler ticks on this one machine,
@@ -71,9 +75,11 @@ function signatureFor(row) {
 const RE_UNAUTHORIZED       = /unauthorized|\b401\b/i;
 const RE_MALFORMED_EMAIL    = /email address is not valid/i;
 const RE_OVERSIZED_TITLE    = /string length is either shorter or longer than supported by specification/i;
+const RE_THROTTLE           = /throttle exception/i; // deliberately not a bare \b429\b — that can match an unrelated numeric id embedded in other error text
 const RE_DELETED_CUSTOMER   = /customer you have specified has been deleted/i;
 const RE_PARENT_NOT_FOUND   = /parent not found|parent cannot be child/i;
 const RE_REQUIRED_PARAM     = /required param|missing.*required value/i;
+const RE_BILLING_RELATIONSHIP = /cannot change who customer bills with/i;
 
 const CLIENT_ENTITY_TYPE = 1; // per QBoSyncErrors.js's ShowOverlay switch: case 1 = client
 
@@ -86,6 +92,9 @@ function classify(row) {
   }
   if (row.entityType === CLIENT_ENTITY_TYPE && RE_OVERSIZED_TITLE.test(row.message)) {
     return 'oversized_client_title';
+  }
+  if (RE_THROTTLE.test(row.message)) {
+    return 'throttle_429';
   }
   return 'diagnosed_unfixable';
 }
@@ -108,6 +117,12 @@ function diagnosisFor(row) {
     return 'Likely a payment-to-invoice application failure (client/invoice sync fine, ' +
       'payment not linking) — root cause of the missing field is not confirmed in past ' +
       'investigations. Needs manual review.';
+  }
+  if (RE_BILLING_RELATIONSHIP.test(row.message)) {
+    return 'QBO\'s "bill with" / sub-customer billing relationship for this customer conflicts ' +
+      'with what SA is trying to set. This touches customer relationship structure, not a plain ' +
+      'data value — needs manual review of the parent/bill-with link directly in QBO or SA rather ' +
+      'than an automated field fix.';
   }
   return 'Does not match a known root-cause pattern from the SA-QBO sync playbook. Needs manual investigation.';
 }
@@ -222,6 +237,15 @@ export async function runQboSyncWatchdog() {
           await saveClientFields({ clientId: row.entityId, overrides: { ClientTitle: '' }, expect: { ClientTitle: '' } });
           logger.info('qbo-sync-watchdog: auto-fixed oversized ClientTitle', { clientId: row.entityId, name: row.name });
         }
+        // Fixing the underlying field does not itself re-attempt this queued error row —
+        // confirmed live (2026-08-20) that a corrected client sat on the error list for
+        // 1.5h+ after the field fix alone. Explicitly resend via SA's own "Actions -> Re-Send"
+        // so the corrected data is retried now instead of waiting on an unrelated future sync.
+        try {
+          await resendQboSyncErrors({ ids: [row.id] });
+        } catch (resendErr) {
+          logger.warn('qbo-sync-watchdog: field fixed but resend failed', { category, name: row.name, error: resendErr.message });
+        }
         state.entries[sig] = { category, lastAttemptAt: new Date(now).toISOString(), fixedAt: new Date(now).toISOString(), name: row.name };
         summary.autoFixed.push({ category, name: row.name });
       } catch (e) {
@@ -240,6 +264,51 @@ export async function runQboSyncWatchdog() {
         }
         state.entries[sig] = { ...(entry || {}), category, lastAttemptAt: new Date(now).toISOString(), fixFailedAlerted: true, name: row.name };
       }
+      continue;
+    }
+
+    if (category === 'throttle_429') {
+      // Transient QBO-side rate limit — SA's data is already correct, this is just SA's own
+      // "Actions -> Re-Send" retry. Gate re-attempts the same way as the 401 cluster: once per
+      // signature, then wait a full batch cycle before trying again if it's still present.
+      const firstSeenAt = entry?.firstSeenAt ? new Date(entry.firstSeenAt).getTime() : now;
+      const lastAttemptAt = entry?.resendAttemptedAt ? new Date(entry.resendAttemptedAt).getTime() : 0;
+      if (entry?.resendAttemptedAt && (now - lastAttemptAt) < BATCH_CYCLE_MS) continue;
+
+      let resendFailed = false;
+      try {
+        await resendQboSyncErrors({ ids: [row.id] });
+        summary.resendAttempted.push(row.name);
+      } catch (e) {
+        resendFailed = true;
+        logger.warn('qbo-sync-watchdog: resend failed for 429 throttle row', { name: row.name, error: e.message });
+      }
+
+      // A "transient" throttle that's still here after many retry cycles probably isn't
+      // transient — stop silently retrying forever and tell Michael once.
+      const stuckLongEnough = (now - firstSeenAt) >= FIX_RETRY_COOLDOWN_MS;
+      if (stuckLongEnough && !entry?.stuckAlerted) {
+        try {
+          await sendProactiveMessage(
+            `⚠️ SA-QBO sync watchdog: ${row.name} has been stuck with a 429/Throttle Exception for ` +
+            `over ${Math.round(FIX_RETRY_COOLDOWN_MS / 3_600_000)}h despite repeated automatic resends — ` +
+            `this may not actually be a transient rate limit. Needs manual review.`,
+            { suppressSelfHeal: true }
+          );
+          summary.alertsSent.push(sig);
+        } catch (alertErr) {
+          logger.warn('qbo-sync-watchdog: failed to send throttle-stuck alert', { error: alertErr.message });
+        }
+      }
+
+      state.entries[sig] = {
+        category,
+        firstSeenAt: new Date(firstSeenAt).toISOString(),
+        resendAttemptedAt: new Date(now).toISOString(),
+        resendFailed,
+        stuckAlerted: stuckLongEnough || !!entry?.stuckAlerted,
+        name: row.name,
+      };
       continue;
     }
 
