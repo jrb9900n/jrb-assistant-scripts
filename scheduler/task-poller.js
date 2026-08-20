@@ -3,6 +3,7 @@ import { runAgent } from '../core/agent.js';
 import { logger } from '../core/logger.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 import { sendEmail } from '../tools/impl/m365.js';
+import { saveTurn } from '../memory/conversation.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -99,6 +100,7 @@ async function pollTasks() {
         task: row.task,
         taskType: row.task_type || 'general',
         ...(row.system_prompt_override ? { systemPromptOverride: row.system_prompt_override } : {}),
+        ...(row.extra_messages ? { extraMessages: row.extra_messages } : {}),
       });
 
       // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
@@ -154,8 +156,19 @@ async function pollTasks() {
       const preview = (result || '').slice(0, 800);
       const attemptNum = row.retry_count || 0;
 
+      const teamsMsg = `**${label}** (queued SA task, attempt ${attemptNum}):\n\n${preview}`;
       try {
-        await sendProactiveMessage(`**${label}** (queued SA task, attempt ${attemptNum}):\n\n${preview}`);
+        await sendProactiveMessage(teamsMsg);
+        // Record the real outcome as the conversation's assistant turn --
+        // otherwise conversation_turns only ever has the generic "I've
+        // queued this task..." placeholder bot.js saved when it first
+        // deferred the task, and a follow-up like "what did you find"
+        // would be answered from stale context.
+        if (row.session_id) {
+          saveTurn(row.session_id, 'assistant', teamsMsg).catch(err =>
+            logger.warn('[task-poller] saveTurn (assistant) failed', { err: err.message })
+          );
+        }
       } catch (e) {
         logger.warn('[task-poller] Could not send Teams notification', { err: e.message });
       }

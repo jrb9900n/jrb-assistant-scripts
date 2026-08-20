@@ -152,6 +152,11 @@ export async function runAgent({
       rawContext: task.slice(0, 300),
     }).catch(err => logger.warn('logObservation failed', { err: err.message }));
 
-    if (saveContext) saveMemory({ messages, topic: taskType, runId }).catch(err => logger.warn('Memory save failed', { err: err.message }));
+    // Slice off extraMessages (prior turns loaded for short-term conversation
+    // context) so saveMemory only summarizes what happened in *this* run --
+    // otherwise every call re-ingests and re-summarizes turns already
+    // captured in earlier agent_memory rows, wasting tokens and compounding
+    // redundant summaries that loadContext later re-injects.
+    if (saveContext) saveMemory({ messages: messages.slice(extraMessages.length), topic: taskType, runId }).catch(err => logger.warn('Memory save failed', { err: err.message }));
     return { result: finalText, messages, usage: { input: totalInput, output: totalOutput, model } };
 }
