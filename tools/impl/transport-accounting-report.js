@@ -51,6 +51,10 @@ function toDateKey(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+// Matches "Truck 18", "Truck 193 (Fert)", etc. — excludes non-vehicle trackers on the same
+// FleetSharp account (e.g. "CAT 262D3", a skid steer) that this report isn't billed for.
+const VEHICLE_NAME_RE = /^Truck\s+\d+/i;
+
 /**
  * Parses the raw Advanced Trips export buffer into per-truck Short/Long day counts.
  * Exported separately from the FleetSharp pull so the classification logic can be
@@ -74,6 +78,7 @@ export function classifyFromExportBuffer(buffer) {
     const startGeo = r[6];
     const endGeo = r[9];
     if (!tracker || !startTimeRaw) continue; // group-header/summary rows have no Tracker+Start Time
+    if (!VEHICLE_NAME_RE.test(tracker)) continue; // equipment (e.g. "CAT 262D3" skid steer) isn't billed as a trip-day vehicle
 
     const dt = parseSADate(startTimeRaw);
     if (!dt) continue;
