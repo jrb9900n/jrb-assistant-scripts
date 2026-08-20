@@ -18,23 +18,42 @@ public class CredWriter {
     }
     [DllImport("advapi32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     public static extern bool CredWrite(ref CREDENTIAL credential, uint flags);
-    public static bool Save(string target, string user, string pass) {
-        byte[] blob = Encoding.Unicode.GetBytes(pass);
-        IntPtr ptr = Marshal.AllocHGlobal(blob.Length);
-        Marshal.Copy(blob, 0, ptr, blob.Length);
-        CREDENTIAL c = new CREDENTIAL { Type=1, TargetName=target, UserName=user,
-            CredentialBlob=ptr, CredentialBlobSize=(uint)blob.Length, Persist=2 };
-        bool ok = CredWrite(ref c, 0);
-        Marshal.FreeHGlobal(ptr);
+
+    // Accepts a SecureString so the plaintext never lives in a managed string.
+    // The SecureString's unmanaged buffer is passed directly to CredWrite, then
+    // zeroed and freed before this method returns.
+    public static bool Save(string target, string user, System.Security.SecureString pass) {
+        // Marshal the SecureString to unmanaged Unicode memory (already maintained
+        // as Unicode internally by SecureString on Windows).
+        IntPtr ptr = IntPtr.Zero;
+        bool ok = false;
+        try {
+            ptr = Marshal.SecureStringToGlobalAllocUnicode(pass);
+            int byteLen = pass.Length * 2; // UTF-16LE: 2 bytes per char
+            CREDENTIAL c = new CREDENTIAL {
+                Type=1, TargetName=target, UserName=user,
+                CredentialBlob=ptr, CredentialBlobSize=(uint)byteLen, Persist=2
+            };
+            ok = CredWrite(ref c, 0);
+        } finally {
+            if (ptr != IntPtr.Zero) {
+                // Zero the unmanaged buffer before releasing it so the
+                // plaintext password does not linger in freed memory.
+                Marshal.ZeroFreeGlobalAllocUnicode(ptr);
+            }
+        }
         return ok;
     }
 }
 "@
 
 function Set-JRBSecret([string]$Name) {
-    $value = Read-Host "Enter value for $Name"
-    if ($value) {
-        $ok = [CredWriter]::Save("JRBAgent:$Name", "JRBAgent", $value)
+    # -AsSecureString keeps the keystrokes out of a plain managed string.
+    $secure = Read-Host "Enter value for $Name" -AsSecureString
+    if ($secure -and $secure.Length -gt 0) {
+        $ok = [CredWriter]::Save("JRBAgent:$Name", "JRBAgent", $secure)
+        # Dispose the SecureString immediately after use.
+        $secure.Dispose()
         if ($ok) { Write-Host "  Saved $Name" -ForegroundColor Green }
         else     { Write-Host "  Failed $Name" -ForegroundColor Red }
     } else { Write-Host "  Skipped $Name" -ForegroundColor Yellow }
