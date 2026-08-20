@@ -20,8 +20,6 @@
 
 import XLSX from 'xlsx';
 import { getAdvancedTripsExport } from './fleetsharp.js';
-import { sendEmail } from './m365.js';
-import { logger } from '../../core/logger.js';
 
 // Flat per-day rate, matching the existing Invoice tab's simple billing model (as opposed
 // to the Management tab's more granular per-person hourly-rate x roundtrip-hours system,
@@ -32,6 +30,33 @@ export const RATE_CONFIG = {
   shortDayRate: 150,
   longDayRate: 375,
 };
+
+// Fixed truck list, in the same order as the real spreadsheet's B8:B26 (Invoice tab) /
+// B3:B21 (Management tab) rows — confirmed identical order in both tabs 2026-08-19. The
+// spreadsheet always lists every one of these trucks even when a truck saw zero activity
+// that month; computeTransportInvoiceTotals/computeManagementEmploymentTotals iterate this
+// list so a quiet truck still shows up as a $0 row instead of silently disappearing.
+export const CANONICAL_TRUCKS = [
+  { number: 4, tracker: 'Truck 4' },
+  { number: 7, tracker: 'Truck 7' },
+  { number: 71, tracker: 'Truck 71' },
+  { number: 9, tracker: 'Truck 9' },
+  { number: 106, tracker: 'Truck 106' },
+  { number: 12, tracker: 'Truck 12' },
+  { number: 13, tracker: 'Truck 13' },
+  { number: 14, tracker: 'Truck 14' },
+  { number: 25, tracker: 'Truck 25' },
+  { number: 18, tracker: 'Truck 18' },
+  { number: 19, tracker: 'Truck 19' },
+  { number: 190, tracker: 'Truck 190' },
+  { number: 191, tracker: 'Truck 191' },
+  { number: 192, tracker: 'Truck 192' },
+  { number: 193, tracker: 'Truck 193 (Fert)' },
+  { number: 194, tracker: 'Truck 194' },
+  { number: 22, tracker: 'Truck 22' },
+  { number: 220, tracker: 'Truck 220' },
+  { number: 24, tracker: 'Truck 24' },
+];
 
 function parseSADate(raw) {
   // FleetSharp's Advanced Trips export writes dates as plain strings: 'MM/DD/YYYY HH:MM AM/PM'.
@@ -59,8 +84,20 @@ const VEHICLE_NAME_RE = /^Truck\s+\d+/i;
  * Parses the raw Advanced Trips export buffer into per-truck Short/Long day counts.
  * Exported separately from the FleetSharp pull so the classification logic can be
  * tested against a saved .xlsx without hitting the live API each time.
+ *
+ * `startDate`/`endDate` ('YYYY-MM-DD', inclusive) are required (not just optional) to
+ * bound the day count to the requested period. Confirmed live 2026-08-19: FleetSharp's
+ * Advanced Trips export for a given date range isn't hard-clipped to it — a real May
+ * 1-31 pull included trailing rows from late April — so without this filter, every
+ * truck picked up 1-2 extra active days from the adjacent month (219 vs. the correct
+ * 193 for May 2026). The manual spreadsheet never hit this because its day columns only
+ * span the target month, so any bled-in row from an adjacent month simply has no column
+ * to match. Required (throws if omitted) rather than defaulting to unfiltered, matching
+ * getAdvancedTripsExport's own convention — an unfiltered call would silently
+ * reintroduce this exact bug rather than erroring.
  */
-export function classifyFromExportBuffer(buffer) {
+export function classifyFromExportBuffer(buffer, { startDate, endDate } = {}) {
+  if (!startDate || !endDate) throw new Error('classifyFromExportBuffer requires startDate and endDate');
   const wb = XLSX.read(buffer, { type: 'buffer' });
   const sheet = wb.Sheets[wb.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: null });
@@ -83,6 +120,8 @@ export function classifyFromExportBuffer(buffer) {
     const dt = parseSADate(startTimeRaw);
     if (!dt) continue;
     const dateKey = toDateKey(dt);
+    if (startDate && dateKey < startDate) continue;
+    if (endDate && dateKey > endDate) continue;
 
     if (!activityByTruck.has(tracker)) activityByTruck.set(tracker, new Set());
     activityByTruck.get(tracker).add(dateKey);
@@ -118,94 +157,79 @@ export function classifyFromExportBuffer(buffer) {
   });
 }
 
+function extractTruckNumber(tracker) {
+  const m = /^Truck\s+(\d+)/i.exec((tracker || '').trim());
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Walks CANONICAL_TRUCKS in its fixed order, looking up each truck's classified day
+ * counts (defaulting to zero for a quiet truck) and running them through `priceFn` —
+ * so a truck with zero activity that month still shows a $0 row instead of disappearing,
+ * matching the real spreadsheet's always-list-every-truck layout. Any tracker seen in
+ * the export that isn't on the fixed list (e.g. a new truck added to the fleet since
+ * this list was last updated) is appended after, not silently dropped. Shared by both
+ * computeTransportInvoiceTotals and computeManagementEmploymentTotals so the alignment
+ * logic — and the canonical truck number, resolved once here instead of re-derived by
+ * every caller — only lives in one place.
+ */
+export function alignToCanonicalTrucks(perTruckClassification, priceFn) {
+  const byTracker = new Map(perTruckClassification.map(t => [t.truck, t]));
+  const seen = new Set();
+  const lines = [];
+
+  for (const { tracker, number } of CANONICAL_TRUCKS) {
+    seen.add(tracker);
+    const t = byTracker.get(tracker);
+    lines.push(priceFn({
+      tracker, truckNumber: number,
+      shortDayCount: t?.shortDayCount ?? 0, longDayCount: t?.longDayCount ?? 0, longDates: t?.longDates ?? [],
+    }));
+  }
+  for (const t of perTruckClassification) {
+    if (seen.has(t.truck)) continue;
+    lines.push(priceFn({
+      tracker: t.truck, truckNumber: extractTruckNumber(t.truck),
+      shortDayCount: t.shortDayCount, longDayCount: t.longDayCount, longDates: t.longDates,
+    }));
+  }
+  return lines;
+}
+
+/**
+ * Prices an already-classified per-truck breakdown (see classifyFromExportBuffer) using
+ * the flat Invoice-tab rate model.
+ */
+export function computeTransportInvoiceTotals(perTruckClassification) {
+  const lines = alignToCanonicalTrucks(perTruckClassification, ({ tracker, shortDayCount, longDayCount, longDates }) => {
+    const amount = shortDayCount * RATE_CONFIG.shortDayRate + longDayCount * RATE_CONFIG.longDayRate;
+    return { truck: tracker, shortDayCount, longDayCount, longDates, amount };
+  });
+
+  return {
+    lines,
+    totalShort: lines.reduce((s, l) => s + l.shortDayCount, 0),
+    totalLong: lines.reduce((s, l) => s + l.longDayCount, 0),
+    totalAmount: lines.reduce((s, l) => s + l.amount, 0),
+  };
+}
+
+/**
+ * Single choke point for "pull the Advanced Trips export, then classify it" — every
+ * report generator goes through this so the date-range filter (see
+ * classifyFromExportBuffer above) is applied exactly once, not re-passed at every call
+ * site.
+ */
+export async function pullAndClassify({ startDate, endDate }) {
+  const buffer = await getAdvancedTripsExport({ startDate, endDate });
+  return classifyFromExportBuffer(buffer, { startDate, endDate });
+}
+
 /**
  * Pulls the Advanced Trips report from FleetSharp for the given period and returns the
  * classified per-truck breakdown plus computed invoice totals.
  */
 export async function generateTransportAccountingReport({ startDate, endDate }) {
-  const buffer = await getAdvancedTripsExport({ startDate, endDate });
-  const perTruck = classifyFromExportBuffer(buffer);
-
-  let totalShort = 0, totalLong = 0, totalAmount = 0;
-  const lines = perTruck.map(t => {
-    const amount = t.shortDayCount * RATE_CONFIG.shortDayRate + t.longDayCount * RATE_CONFIG.longDayRate;
-    totalShort += t.shortDayCount;
-    totalLong += t.longDayCount;
-    totalAmount += amount;
-    return { ...t, amount };
-  });
-
-  return { startDate, endDate, lines, totalShort, totalLong, totalAmount };
-}
-
-function formatCurrency(n) {
-  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
-}
-
-function buildEmailHtml(report) {
-  const rows = report.lines.map(l => `
-    <tr>
-      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">${l.truck}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">${l.shortDayCount}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;${l.longDayCount > 0 ? 'color:#b45309;font-weight:600;' : ''}">${l.longDayCount}</td>
-      <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">${formatCurrency(l.amount)}</td>
-    </tr>
-    ${l.longDates.length > 0 ? `<tr><td colspan="4" style="padding:0 12px 8px 12px;font-size:12px;color:#6b7280;">Long trip date(s): ${l.longDates.join(', ')}</td></tr>` : ''}
-  `).join('');
-
-  return `
-    <div style="font-family:Arial,sans-serif;color:#1f2937;max-width:700px;">
-      <div style="background:#1a1a2e;color:#fff;padding:20px 24px;">
-        <h2 style="margin:0;font-size:20px;">Transport Accounting Report</h2>
-        <p style="margin:4px 0 0 0;color:#cbd5e1;font-size:13px;">${report.startDate} to ${report.endDate}</p>
-      </div>
-      <div style="padding:20px 24px;">
-        <table style="width:100%;border-collapse:collapse;font-size:14px;">
-          <thead>
-            <tr style="background:#f3f4f6;">
-              <th style="padding:8px 12px;text-align:left;">Truck</th>
-              <th style="padding:8px 12px;text-align:right;">Short Days</th>
-              <th style="padding:8px 12px;text-align:right;">Long Days</th>
-              <th style="padding:8px 12px;text-align:right;">Amount</th>
-            </tr>
-          </thead>
-          <tbody>${rows}</tbody>
-          <tfoot>
-            <tr style="background:#1a1a2e;color:#fff;font-weight:600;">
-              <td style="padding:10px 12px;">Total</td>
-              <td style="padding:10px 12px;text-align:right;">${report.totalShort}</td>
-              <td style="padding:10px 12px;text-align:right;">${report.totalLong}</td>
-              <td style="padding:10px 12px;text-align:right;">${formatCurrency(report.totalAmount)}</td>
-            </tr>
-          </tfoot>
-        </table>
-        <p style="font-size:12px;color:#6b7280;margin-top:16px;">
-          Rates: $${RATE_CONFIG.shortDayRate}/short day, $${RATE_CONFIG.longDayRate}/long day (50-mile radius cutoff).
-          Long-day dates are called out below each truck row for reference.
-        </p>
-      </div>
-    </div>
-  `;
-}
-
-/**
- * Generates and emails the transport accounting report for a given period.
- * Called by the monthly cron job with the prior full calendar month.
- */
-export async function runTransportAccountingReport({ startDate, endDate }) {
-  // Does NOT close the FleetSharp session when done — tools/impl/fleetsharp.js keeps a
-  // single shared browser/page open for its full 4-hour SESSION_TTL_MS, reused by every
-  // caller (fleetops_odometer_sync, interactive fleetsharp_get_* agent tools, etc.).
-  // Closing it here would yank that session out from under any concurrent caller. Only
-  // the process-level shutdown handler in scheduler/cron.js should ever close it.
-  const report = await generateTransportAccountingReport({ startDate, endDate });
-  await sendEmail({
-    to: ['michael@jrboehlke.com'],
-    subject: `Transport Accounting Report — ${startDate} to ${endDate}`,
-    body: buildEmailHtml(report),
-  });
-  logger.info('transport_accounting_report complete', {
-    startDate, endDate, totalShort: report.totalShort, totalLong: report.totalLong, totalAmount: report.totalAmount,
-  });
-  return report;
+  const perTruck = await pullAndClassify({ startDate, endDate });
+  return { startDate, endDate, ...computeTransportInvoiceTotals(perTruck) };
 }
