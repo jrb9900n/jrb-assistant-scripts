@@ -151,7 +151,8 @@ async function _post(page, path, body) {
 POST /AccountingBFF/InvoiceList/V2InvoiceList_Query
 { "startDate": "1/1/2015", "endDate": "4/25/2026", "pageSize": 100, "pageNumber": 1 }
 ```
-~8,355 records as of April 2026.
+~8,355 records as of April 2026. **This flat body shape does not actually work** — see the
+corrected shape below; kept here only as a record of what was originally (wrongly) documented.
 
 **Key fields:** `ID`, `InvoiceNumber`, `QboID`, `Status` (Open/Paid/Past Due),
 `InvoiceTotal`, `InvoiceBalance`, `AccountBalance`, `Client`, `CustomerID`,
@@ -159,15 +160,47 @@ POST /AccountingBFF/InvoiceList/V2InvoiceList_Query
 `PaymentType`, `Frequency`, `PrepaymentBalance`, `CreditBalance`,
 `Deleted`, `ContractID`, `QBStatus`
 
-> **2026-08-19: currently erroring server-side.** Every call returns HTTP 200
-> with `{ "Invoices": [], "Errors": ["StatusCode = InternalServerError ... An
-> error has occured."] }` — SA's own internal microservice
-> (`app.sa.prod.local:2100`) is throwing, not a request-format issue on our
-> end. No body variation fixes it; this is on SA's side. Also: hitting a
-> *wrong* path variant (e.g. `/InvoiceBFF/InvoiceList/InvoiceList_Query`)
-> returns an HTML login-redirect page instead of JSON, which trips
-> Incapsula and triggers ~45 min of bot-detection backoff on the whole
-> shared SA session — be careful when probing path variants live.
+> **2026-08-19 — root-caused and fixed, was never actually an SA-side bug.**
+> Earlier same-day testing saw two different failures — a 500 with
+> `"StatusCode = InternalServerError ... app.sa.prod.local:2100"`, and later
+> a clean `count:0` with no error — both from feeding it the wrong request
+> shape above. **The real shape**, confirmed from a live browser capture of
+> `v3/accounting/invoices` changing its date filter:
+> ```json
+> {
+>   "QueryInput": {
+>     "StartRow": 1, "Max": 1000, "ActiveTab": "OpenInvoices",
+>     "ScreenViewFilterTypes": [
+>       { "ScreenViewFilterType": 89, "ScreenViewFilterTypeItems": [{"Value":"2"},{"Value":"0"}], "ScreenViewFilterObjects": [] },
+>       { "ScreenViewFilterType": 6,  "ScreenViewFilterTypeItems": [{"Value":"4"}], "ScreenViewFilterObjects": [] },
+>       { "ScreenViewFilterType": 76, "ScreenViewFilterTypeItems": [{"Value":"6"},{"Value":"{\"Month\":8,\"Day\":2,\"Year\":2026}"},{"Value":"{\"Month\":-1,\"Day\":-1,\"Year\":-1}"}], "ScreenViewFilterObjects": [] }
+>     ],
+>     "SortedColumns": [{"FieldName":"Date","Direction":1,"ColumnEnum":3}]
+>   }
+> }
+> ```
+> `ScreenViewFilterType: 76` is the same date-filter code `getEstimateList()` already uses for
+> estimates. **The gotcha that broke every earlier automated attempt**: an *open-ended* date
+> range's "to" value is the sentinel `{"Month":-1,"Day":-1,"Year":-1}`, not a real date — feeding
+> it a genuine end date for "no upper bound" is presumably what produced the earlier `count:0`.
+> The `ScreenViewFilterType: 89`/`6` filters and `ActiveTab: "OpenInvoices"` were captured as-is
+> from a real request on that tab and are reproduced unchanged rather than guessed at — their
+> exact meaning isn't understood, and removing them hasn't been tested (a caller needing
+> Paid/all invoices, not just Open, will need a fresh capture from that other tab first).
+>
+> **No `d` wrapper** — this is an MVC/BFF action like `getClientTags`'s endpoint, not a classic
+> `.asmx` web method; `res.data` IS `{Invoices:[...]}` directly.
+>
+> Response includes `Action`, `NeedToPrint`, `NeedToEmail` per invoice directly — this endpoint
+> can answer the invoice send-status question (see below) in bulk by date range with no IDs
+> needed in hand, a real upgrade over `sa_get_invoice_status`/`QueryModified` for that use case.
+> Implemented as `getInvoiceList({dateFrom, dateTo, max})` in `serviceautopilot.js`, verified live
+> 2026-08-19 (43 real invoices returned for a date-range query, `claude/sa-invoice-list-bulk`).
+>
+> Also still relevant: hitting a *wrong* path variant (e.g.
+> `/InvoiceBFF/InvoiceList/InvoiceList_Query`) returns an HTML login-redirect page instead of
+> JSON, which trips Incapsula and triggers ~45 min of bot-detection backoff on the whole shared
+> SA session — be careful when probing path variants live.
 
 ### Invoice Delivery Status — `Action` field (distinct from `Status`)
 
