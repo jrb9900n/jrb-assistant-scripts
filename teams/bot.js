@@ -11,6 +11,7 @@ import { listAgents } from '../agents/library.js';
 import { listSkills } from '../skills/library.js';
 import { logger } from '../core/logger.js';
 import { buildContextBlock } from '../tools/impl/feedback.js';
+import { loadRecentTurns, saveTurn } from '../memory/conversation.js';
 import { saveConversationRef, sendProactiveMessage } from './notify.js';
 import { handleCardDAV } from '../tools/impl/carddav.js';
 import {
@@ -249,15 +250,46 @@ async function handleTeamsActivity(req, res) {
   // Persist conversation reference so we can send proactive messages later
   saveConversationRef(activity);
 
-  // Capture any standing rules/corrections before routing — non-blocking
-  try {
-    const { detectAndCaptureFeedback } = await import('../tools/impl/feedback-capture.js');
-    const fb = await detectAndCaptureFeedback(userText, 'teams');
-    if (fb.captured) {
-      logger.info('Teams: feedback rule captured', { rule: fb.rule, agent: fb.agent });
-    }
-  } catch (err) {
-    logger.warn('Teams: feedback capture error (non-fatal)', { err: err.message });
+  // Short-term conversation memory: recent raw turns from this same Teams
+  // conversation, so the agent doesn't lose the thread mid-conversation
+  // (e.g. "test that" right after a message describing what to test).
+  // Fire-and-forget by design (not awaited before loadRecentTurns below) --
+  // known accepted limitation: if Michael sends 3+ messages in the same
+  // conversation faster than they can be processed, a later message's
+  // history load can race an earlier message's still-in-flight insert.
+  // loadRecentTurns' trailing-user-turn trim covers the common 2-message
+  // case; a full fix would need per-conversation request serialization,
+  // which isn't worth the complexity for a single-user Teams bot.
+  const sessionId = `teams-${activity.conversation.id}`;
+  saveTurn(sessionId, 'user', userText).catch(err =>
+    logger.warn('Teams: saveTurn (user) failed', { err: err.message })
+  );
+
+  // Feedback capture and conversation-history load touch unrelated data —
+  // run them concurrently rather than paying both latencies sequentially.
+  const [, extraMessages] = await Promise.all([
+    (async () => {
+      try {
+        const { detectAndCaptureFeedback } = await import('../tools/impl/feedback-capture.js');
+        const fb = await detectAndCaptureFeedback(userText, 'teams');
+        if (fb.captured) {
+          logger.info('Teams: feedback rule captured', { rule: fb.rule, agent: fb.agent });
+        }
+      } catch (err) {
+        logger.warn('Teams: feedback capture error (non-fatal)', { err: err.message });
+      }
+    })(),
+    loadRecentTurns(sessionId).catch(err => {
+      logger.warn('Teams: could not load conversation history', { err: err.message });
+      return [];
+    }),
+  ]);
+
+  async function remember(text) {
+    await replyToTeams(activity, text);
+    saveTurn(sessionId, 'assistant', text).catch(err =>
+      logger.warn('Teams: saveTurn (assistant) failed', { err: err.message })
+    );
   }
 
   const intent = classifyIntent(userText);
@@ -272,9 +304,8 @@ async function handleTeamsActivity(req, res) {
     let result;
 
     if (intent === 'scheduling') {
-      // Use the scheduling system prompt keyed to this Teams conversation so
+      // Uses the scheduling system prompt keyed to this Teams conversation so
       // draft state persists across multiple messages in the same conversation.
-      const sessionId = `teams-${activity.conversation.id}`;
       let rulesBlock = '';
       try {
         const ctx = await buildContextBlock('scheduling');
@@ -295,6 +326,11 @@ async function handleTeamsActivity(req, res) {
       const systemPrompt = buildSchedulingSystemPrompt(sessionId, null, draftContext, rulesBlock, memoryBlock);
       retryTaskType = 'scheduling';
       retrySystemPrompt = systemPrompt;
+      // Deliberately not passed here: scheduling already gets its own
+      // session-keyed continuity via draftContext/rulesBlock/memoryBlock
+      // above. Mixing in raw cross-intent turns (e.g. an earlier CRM or dev
+      // exchange in the same Teams conversation) would just add noise the
+      // model could mistake for scheduling-relevant instructions.
       ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true }));
 
     } else if (intent === 'crm') {
@@ -310,22 +346,22 @@ Message: "${userText}"
 - If Michael asks to list CardDAV credentials: use carddav_list.
 - Always confirm what you did: client name, SA IDs, actions taken.`;
       retryTask = crmTask; retryTaskType = 'crm';
-      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', saveContext: false }));
+      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false }));
 
     } else if (intent === 'dev') {
       const devTask = `Michael sent this Teams message:\n\n"${userText}"\n\nFollow the github-dev skill workflow. Reply with a scope proposal:\n- Restate the goal in 2-3 sentences\n- List the files that will be created or changed\n- Identify which repo this belongs in\n- State any assumptions\n- Ask Michael to confirm before you proceed\n\nDo not write any code yet. Return only the reply text.`;
       retryTask = devTask; retryTaskType = 'code';
-      ({ result } = await runAgent({ task: devTask, taskType: 'code', saveContext: false }));
+      ({ result } = await runAgent({ task: devTask, taskType: 'code', extraMessages, saveContext: false }));
 
     } else if (intent === 'dev_ambiguous') {
       result = `Want to make sure I handle this correctly — are you asking me to build or write code, or looking for information/advice? Reply "yes, build it" and I'll put together a scope plan.`;
 
     } else if (intent === 'report') {
       retryTaskType = 'report';
-      ({ result } = await runAgent({ task: userText, taskType: 'report', saveContext: false }));
+      ({ result } = await runAgent({ task: userText, taskType: 'report', extraMessages, saveContext: false }));
 
     } else {
-      ({ result } = await runAgent({ task: userText, taskType: 'general' }));
+      ({ result } = await runAgent({ task: userText, taskType: 'general', extraMessages }));
     }
 
     // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
@@ -341,19 +377,19 @@ Message: "${userText}"
         await fetch(`${SUPABASE_URL}/rest/v1/agent_tasks`, {
           method: 'POST',
           headers: { apikey: SUPABASE_KEY, Authorization: `Bearer ${SUPABASE_KEY}`, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
-          body: JSON.stringify({ task: retryTask, task_type: retryTaskType, status: 'pending', run_after: runAfter, notify_teams: true, retry_count: 0, ...(retrySystemPrompt ? { system_prompt_override: retrySystemPrompt } : {}) }),
+          body: JSON.stringify({ task: retryTask, task_type: retryTaskType, status: 'pending', run_after: runAfter, notify_teams: true, retry_count: 0, session_id: sessionId, ...(retryTaskType === 'scheduling' ? {} : { extra_messages: extraMessages }), ...(retrySystemPrompt ? { system_prompt_override: retrySystemPrompt } : {}) }),
         });
-        await replyToTeams(activity, `SA is temporarily rate-limited by bot protection. I've queued this task and will retry automatically in ~${remainingMin} min — I'll notify you here when it completes.`);
+        await remember(`SA is temporarily rate-limited by bot protection. I've queued this task and will retry automatically in ~${remainingMin} min — I'll notify you here when it completes.`);
       } catch (queueErr) {
         logger.error('Teams handler: failed to queue SA retry task', { err: queueErr.message });
-        await replyToTeams(activity, result);
+        await remember(result);
       }
     } else {
-      await replyToTeams(activity, result);
+      await remember(result);
     }
   } catch (err) {
     logger.error('Teams handler error', { err: err.message });
-    await replyToTeams(activity, `Error: ${err.message}`);
+    await remember(`Error: ${err.message}`);
   }
 }
 
