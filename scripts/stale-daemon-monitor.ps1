@@ -14,8 +14,12 @@
 # Runs every 5 min via the "JRB Stale Daemon Monitor" Task Scheduler task.
 # NOTE: Must run in the user's logged-in session - Get-WmiObject is session-scoped.
 
-$AGENT_DIR   = "C:\Users\Assistant\JRBAgent\agent"
-$LAUNCHER    = "C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1"
+# Derived from this file's own location rather than hardcoded, so it keeps working
+# if the repo is ever moved - also avoids repeating the 2026-08-17 agent\ dead-path
+# bug (this script's task Action was repointed to scripts\ at root, but these three
+# paths were still hardcoded to the deleted agent\ subtree until this fix).
+$AGENT_DIR   = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
+$LAUNCHER    = Join-Path $AGENT_DIR "launcher\start-agent.ps1"
 $LOG_FILE    = "$AGENT_DIR\logs\stale-daemon-kills.log"
 $MEMORY_FILE = "C:\Users\Assistant\.claude\projects\C--Users-Assistant\memory\project-stale-daemon-kills.md"
 $PID_FILE    = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "jrb-scheduler.pid")
@@ -169,7 +173,7 @@ metadata:
   type: project
 ---
 
-Automated kill log written by ``agent/scripts/stale-daemon-monitor.ps1`` (runs every 5 min via Task Scheduler).
+Automated kill log written by ``scripts/stale-daemon-monitor.ps1`` (runs every 5 min via Task Scheduler).
 Each entry: timestamp, PID, reason (pm2-daemon / orphan-scheduler / orphan-bot / stale-code:filename).
 Read this to understand how often stale daemons appear and which scripts are repeat offenders.
 

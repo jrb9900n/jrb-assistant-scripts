@@ -4,7 +4,7 @@
 # never pass through Claude Code / chat.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\launcher\save-fleetsharp-secrets.ps1"
+#   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\launcher\save-fleetsharp-secrets.ps1"
 
 Add-Type -TypeDefinition @"
 using System; using System.Runtime.InteropServices; using System.Text;

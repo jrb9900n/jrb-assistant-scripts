@@ -24,6 +24,19 @@
 # also pointing at the dead agent\ path, and already not scheduled to run
 # again per its own expired trigger) - left disabled rather than deleted so
 # it's recoverable if this call turns out to be wrong.
+#
+# 2026-08-19 second update: a full audit of every JRB* task (not just the
+# bot/scheduler pair) found one more still pointing at the dead agent\
+# subtree - "JRB Stale Daemon Monitor" (runs every 5 min, LastTaskResult
+# 0xFFFD0000 since 2026-08-17, same as the others). Added below. A second
+# task, "JRB-Supabase-Keepalive", ALSO had a non-zero LastTaskResult
+# (0xFFFD0000) but its Action does NOT reference agent\ - it points at
+# C:\Users\Assistant\JRBAgent\keepalive-supabase.ps1, which did not exist
+# anywhere in the repo (root or otherwise, no git history under that name).
+# That was a different bug (script never committed / lost outside git), now
+# fixed by adding the missing script at that same root path - see
+# keepalive-supabase.ps1. No task repoint was needed for it since its Action
+# already pointed at the correct root path all along.
 
 $ErrorActionPreference = 'Stop'
 
@@ -61,7 +74,8 @@ $pathsToValidate = @(
     'C:\Users\Assistant\JRBAgent\launcher\scheduler-wrapper.ps1',
     'C:\Users\Assistant\JRBAgent\scripts\cloudflared-watchdog.ps1',
     'C:\Users\Assistant\JRBAgent\launcher\watchdog-bot.ps1',
-    'C:\Users\Assistant\JRBAgent\launcher\watchdog-scheduler.ps1'
+    'C:\Users\Assistant\JRBAgent\launcher\watchdog-scheduler.ps1',
+    'C:\Users\Assistant\JRBAgent\scripts\stale-daemon-monitor.ps1'
 )
 $missingPaths = $pathsToValidate | Where-Object { -not (Test-Path -LiteralPath $_) }
 if ($missingPaths) {
@@ -90,6 +104,10 @@ Repoint-Task -TaskName "JRB Scheduler Watchdog" `
     -TargetFilePath 'C:\Users\Assistant\JRBAgent\launcher\watchdog-scheduler.ps1' `
     -Arguments '-ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Users\Assistant\JRBAgent\launcher\watchdog-scheduler.ps1"'
 
+Repoint-Task -TaskName "JRB Stale Daemon Monitor" `
+    -TargetFilePath 'C:\Users\Assistant\JRBAgent\scripts\stale-daemon-monitor.ps1' `
+    -Arguments '-ExecutionPolicy Bypass -WindowStyle Hidden -File "C:\Users\Assistant\JRBAgent\scripts\stale-daemon-monitor.ps1"'
+
 Write-Output ""
 Write-Output "Disabling JRBBotAutoRestart (dead legacy duplicate, see comment above)..."
 # Guard against the task being absent (already deleted, renamed, or environment
@@ -104,13 +122,14 @@ if ($legacyTask) {
 }
 
 Write-Output ""
-Write-Output "All five tasks repointed to root. Restart the two long-running services to verify:"
+Write-Output "All six tasks repointed to root. Restart the two long-running services to verify:"
 Write-Output '  Start-ScheduledTask -TaskName "JRB Teams Bot"'
 Write-Output '  Start-ScheduledTask -TaskName "JRB Scheduler"'
 Write-Output "Check port 3978 is listening and the scheduler log shows 'All schedules registered.'"
 Write-Output ""
-Write-Output "To verify the two watchdogs themselves are now actually working, wait for their next"
+Write-Output "To verify the watchdogs/monitor themselves are now actually working, wait for their next"
 Write-Output "5-min cycle and check LastTaskResult is 0 (not 0xFFFD0000):"
 Write-Output '  Get-ScheduledTaskInfo -TaskName "JRB Bot Watchdog" | Select LastRunTime,LastTaskResult'
 Write-Output '  Get-ScheduledTaskInfo -TaskName "JRB Scheduler Watchdog" | Select LastRunTime,LastTaskResult'
+Write-Output '  Get-ScheduledTaskInfo -TaskName "JRB Stale Daemon Monitor" | Select LastRunTime,LastTaskResult'
 Write-Output "Once all are confirmed healthy running from root, the agent\ subtree is safe to delete."

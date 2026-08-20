@@ -3,7 +3,7 @@
 # in Windows Credential Manager. Values are prompted interactively.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\launcher\save-bta-secrets.ps1"
+#   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\launcher\save-bta-secrets.ps1"
 
 Add-Type -TypeDefinition @"
 using System; using System.Runtime.InteropServices; using System.Text;
