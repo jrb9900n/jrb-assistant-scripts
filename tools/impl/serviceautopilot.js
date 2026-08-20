@@ -1259,6 +1259,90 @@ export async function getInvoiceStatuses({ invoiceIds }) {
   }));
 }
 
+/**
+ * Bulk date-range invoice list — the real fix for V2InvoiceList_Query, which
+ * previously silently ignored a naive {startDate,endDate} body (returned
+ * count:0, no error). Confirmed 2026-08-19 from a live browser capture of the
+ * v3/accounting/invoices page changing its date filter: the working shape is
+ * a QueryInput wrapper with a ScreenViewFilterType:76 entry (same numeric code
+ * getEstimateList() already uses for estimates) — the key gotcha is the *open*
+ * end of a date range is `{Month:-1,Day:-1,Year:-1}`, NOT a real date; a naive
+ * caller supplying a real end date for "no upper bound" gets nothing back.
+ *
+ * This is an MVC/BFF action, not a classic .asmx web method — its response has
+ * NO `d` wrapper (`res.data` IS `{Invoices:[...]}` directly), unlike most other
+ * SA endpoints in this file.
+ *
+ * Response fields are richer than getInvoiceStatuses()/QueryModified's — this
+ * includes `Action`, `NeedToPrint`, `NeedToEmail` per invoice directly, so it
+ * can answer "which invoices in this date range are unsent/emailed" in one
+ * bulk call without needing IDs already in hand (unlike getInvoiceStatuses,
+ * which requires known IDs). `Status` can contain raw HTML for past-due rows
+ * (e.g. `<span style="color:red;">Past Due<br />(1 Days)</span>`) — prefer
+ * `isPastDue`/`daysPastDue` for clean parsing instead of the `status` string.
+ *
+ * The `ActiveTab: 'OpenInvoices'` value and the two extra filter types (89, 6)
+ * were captured as-is from a real request on that tab and are NOT understood —
+ * they're reproduced unchanged rather than guessed at, since removing them
+ * hasn't been tested and blind variation risks Incapsula. If a caller ever
+ * needs Paid/all invoices (not just Open), this function will need revisiting
+ * with a fresh capture from that other tab.
+ */
+export async function getInvoiceList({ dateFrom, dateTo, max = 500 } = {}) {
+  const toBrowserDate = (d) => d
+    ? { Month: d.getMonth() + 1, Day: d.getDate(), Year: d.getFullYear() }
+    : { Month: -1, Day: -1, Year: -1 };
+
+  const filterTypes = [
+    { ScreenViewFilterType: 89, ScreenViewFilterObjects: [], ScreenViewFilterTypeItems: [{ Value: '2' }, { Value: '0' }] },
+    { ScreenViewFilterType: 6,  ScreenViewFilterObjects: [], ScreenViewFilterTypeItems: [{ Value: '4' }] },
+  ];
+  if (dateFrom || dateTo) {
+    filterTypes.push({
+      ScreenViewFilterType: 76,
+      ScreenViewFilterObjects: [],
+      ScreenViewFilterTypeItems: [
+        { Value: '6' },
+        { Value: JSON.stringify(toBrowserDate(dateFrom)) },
+        { Value: JSON.stringify(toBrowserDate(dateTo)) },
+      ],
+    });
+  }
+
+  const body = {
+    QueryInput: {
+      StartRow: 1,
+      Max: max,
+      ActiveTab: 'OpenInvoices',
+      ScreenViewFilterTypes: filterTypes,
+      SortedColumns: [{ FieldName: 'Date', Direction: 1, ColumnEnum: 3 }],
+    },
+  };
+
+  const res = await post('/AccountingBFF/InvoiceList/V2InvoiceList_Query', body, 'v3/accounting/invoices');
+  const invoices = res.data?.Invoices;
+  if (!invoices) throw new Error(`SA getInvoiceList: no data returned: ${res.text?.slice(0, 200)}`);
+
+  return invoices.map(inv => ({
+    invoiceId:      inv.ID,
+    invoiceNumber:  inv.InvoiceNumber,
+    status:         inv.Status,
+    action:         inv.Action,
+    client:         inv.Client,
+    date:           inv.Date,
+    invoiceDueDate: inv.InvoiceDueDate,
+    invoiceTotal:   inv.InvoiceTotal,
+    invoiceBalance: inv.InvoiceBalance,
+    accountBalance: inv.AccountBalance,
+    isPastDue:      inv.IsPastDue,
+    daysPastDue:    inv.DaysPastDue,
+    needToPrint:    inv.NeedToPrint,
+    needToEmail:    inv.NeedToEmail,
+    qboId:          inv.QboID,
+    qbStatus:       inv.QBStatus,
+  }));
+}
+
 // ── Audit trail — AuditTrailsWs.asmx ─────────────────────────────────────────
 
 // SA's per-record "view history" dialog (ShowAuditTrailDialog) always passes one
