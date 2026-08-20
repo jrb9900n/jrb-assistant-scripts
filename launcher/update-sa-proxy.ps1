@@ -3,7 +3,7 @@
 # after switching Webshare plans. Prompts interactively, never echoes the value.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\launcher\update-sa-proxy.ps1"
+#   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\launcher\update-sa-proxy.ps1"
 #
 # Enter the new proxy in the form: http://username:password@host:port
 

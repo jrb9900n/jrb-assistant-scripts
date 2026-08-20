@@ -59,8 +59,14 @@ function Send-TeamsAlert {
 
 $PID_FILE        = Join-Path $env:TEMP "jrb-scheduler.pid"
 $HEARTBEAT_FILE  = Join-Path $env:TEMP "jrb-scheduler-heartbeat.txt"
-$LAUNCHER        = "C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1"
-$LOG_FILE        = "C:\Users\Assistant\JRBAgent\agent\logs\watchdog.log"
+# Derived from this file's own location (matches watchdog-bot.ps1's approach) rather
+# than hardcoded - this task's Action was repointed to launcher\ at root on 2026-08-19,
+# but $LAUNCHER/$LOG_FILE below were still hardcoded to the deleted agent\ subtree,
+# silently broken for exactly the failure path (scheduler down) this watchdog exists
+# to catch, even though the task itself showed LastTaskResult 0 on every healthy run.
+$scriptRoot      = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LAUNCHER        = Join-Path $scriptRoot "start-agent.ps1"
+$LOG_FILE        = [System.IO.Path]::GetFullPath((Join-Path $scriptRoot "..\logs\watchdog.log"))
 $STALL_THRESHOLD = 2 * 60 * 60   # 2 hours in seconds
 $ts              = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
