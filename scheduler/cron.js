@@ -1590,6 +1590,27 @@ Return ONLY the reply text. No preamble, no analysis section, no “Here is my r
       }
     },
   },
+  {
+    // Daily 4:30 AM - going-forward companion to the one-time historical client
+    // classification backfill (2026-08-19/20, ~10,242 accounts tagged with
+    // account type + service line). Finds accounts with no account-type tag yet
+    // (i.e. created since the backfill ran), classifies and tags just those.
+    // Scheduled off the 6-8 AM cluster (weekly finance report, BTA reporting,
+    // QB health check) to avoid contending with them for the SA browser session.
+    schedule: '30 4 * * *',
+    name: 'sa_client_classification_incremental',
+    run: async () => {
+      try {
+        const { runIncrementalClassification } = await import('../tools/impl/sa-client-classification.js');
+        const result = await runIncrementalClassification();
+        if (result.classified > 0) {
+          logger.info('sa_client_classification_incremental: complete', result);
+        }
+      } catch (err) {
+        logger.warn('sa_client_classification_incremental: run failed', { err: err.message });
+      }
+    },
+  },
 ];
 
 // â”€â”€ Dev task detection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

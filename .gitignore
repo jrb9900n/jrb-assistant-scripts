@@ -18,3 +18,6 @@ self-heal-queue.json
 probe-*.mjs
 sa-js-cache-*
 scratch/
+
+# Classification dry-run reports contain real client names/addresses — local only
+dry-run-report*.json
