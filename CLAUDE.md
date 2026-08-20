@@ -171,8 +171,8 @@ powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\laun
 - Teams bot receives Azure Bot Service webhooks at port 3978
 - Cloudflare tunnel exposes agent at `https://agent.jrboehlke.com`
 - Scheduler uses `node-cron`
-- Memory: session summaries stored in Supabase `memory` table, not raw transcripts
-- Feedback loop: `logObservation()` → `knowledge_log` → synthesis → `rules` table → `buildContextBlock()` → injected into every system prompt via `buildSystemPrompt()` in `core/agent.js`
+- Memory: session summaries stored in Supabase `memory` table, not raw transcripts (long-term, Haiku-summarized — see also short-term raw conversation memory below)
+- Feedback loop: `logObservation()` → `knowledge_log` → synthesis → `rules` table → `buildContextBlock()` → injected into every system prompt via `buildSystemPrompt()` in `core/agent.js`. Also: `detectAndCaptureFeedback()` writes directly to `rules` on every Teams/email message that looks like a standing instruction (see Feedback Loop section below)
 - MCP server: `run_task`, `send_teams_message`, `get_status` tools. `run_task` calls `runAgent({task, taskType})` — returns `{result, messages, usage}`
 - **Critical destructure pattern:** `const { result: agentResult } = await runAgent({task, taskType})`
 - Prompt caching: system prompt and tools array use `cache_control: {type:'ephemeral'}` — cached tokens count ~1/10th toward the 30k/min rate limit
@@ -396,6 +396,31 @@ Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users
 
 ---
 
+## Standing Rules Pipeline Fix + Short-Term Teams Conversation Memory (built/fixed 2026-08-20)
+
+Michael reported the Teams bot has no persistent memory across chats and loses context mid-conversation (e.g. asking "test that?" one message after being told exactly what to test). Two separate root causes:
+
+### 1. The standing-rules pipeline was silently dead since 2026-08-10 (fixed, PR #283)
+
+`tools/impl/feedback-capture.js`'s `saveToRules()` has inserted a `source` column into `rules` since the day it was built, but the column never existed on that table — every write 400'd. Confirmed via Supabase edge logs: three of Michael's rule-worthy Teams messages on 2026-08-20 each produced a `400` on `POST .../rules` at the exact timestamps they were sent. **Net effect: the live agent's system prompt received zero new standing rules between 2026-05-09 and 2026-08-20** — every correction/instruction given via Teams or email in that window only ever landed in the local Claude Code memory file (`feedback-runtime-rules.md`), never in production. This is the same class of bug logged once before at row `56a11bc3` in `rules` itself ("FIXED 2026-05-04: feedback.js schema mismatch") — it regressed when `feedback-capture.js` was built without checking the table's actual shape.
+
+Fixed additively: `alter table rules add column source text` (migration `20260820213000_rules_add_source_column.sql`), not by dropping the column reference from the code.
+
+### 2. No short-term conversation memory at all (built, PR #283)
+
+Every Teams message was handled as a fully stateless single-turn LLM call — `core/agent.js`'s `runAgent()` always had an `extraMessages` parameter, but no call site in `teams/bot.js` ever populated it. New module `memory/conversation.js`:
+
+- `saveTurn(sessionId, role, content)` / `loadRecentTurns(sessionId, limit=12)` — raw turns in a new `conversation_turns` table, keyed by `teams-${conversation.id}`, capped at ~40 rows/session via id-ordered pruning (id used instead of `created_at` so ordering survives concurrent requests)
+- Guarantees the returned array strictly alternates user/assistant (merges consecutive same-role rows, trims a dangling trailing user turn) so it's safe to spread directly into `runAgent`'s `messages` array
+- Wired into every Teams intent branch **except scheduling**, which already has its own session-keyed draft/rules/memory context and doesn't need raw cross-intent turns mixed in
+- Threaded through the SA-block retry queue (`agent_tasks.session_id` / `agent_tasks.extra_messages`, migration `20260820213200_agent_tasks_add_session_id.sql`) so a task deferred by SA's Incapsula backoff keeps its context, and `scheduler/task-poller.js` now records the task's real eventual outcome as the assistant turn — not just the "I've queued this" placeholder that was there when it got deferred
+
+Distinct from `memory/memory.js`'s existing Haiku-summarized long-term memory — that system is unchanged and still handles cross-session pattern recall. This new layer is short-term and raw, specifically to stop the bot losing the thread within a live conversation. `core/agent.js`'s `saveMemory` call was also fixed to slice off the `extraMessages` prefix before summarizing, so it doesn't re-summarize turns already captured in earlier `agent_memory` rows on every call.
+
+**Known accepted limitations** (documented inline in `memory/conversation.js` and `teams/bot.js`): a narrow crash-window can drop one genuinely-unanswered turn on the next load; a burst of 3+ messages sent faster than they can be processed can race the fire-and-forget turn-save against a later message's history load. Both judged not worth the complexity of a full fix (state-tracking / per-conversation request serialization) for a single-user bot.
+
+---
+
 ## FleetSharp GPS/Telematics Read Tools (built 2026-08-19)
 
 FleetSharp has no public API. Discovered via a real login capture: cookie-session auth (no
@@ -556,7 +581,7 @@ Table: `carddav_credentials` — columns: `email`, `name`, `token`, `active`, `c
 ---
 
 ## Supabase (jrb-assistant project — znpahinyplccdyoekfeo)
-Key tables: `rules` (agent rules/feedback loop), `knowledge_log` (observations), `memory` (session summaries), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller), `email_catalog` (inbox audit trail), `carddav_credentials` (CardDAV access tokens)
+Key tables: `rules` (agent rules/feedback loop; `source` column added 2026-08-20), `knowledge_log` (observations), `memory`/`agent_memory` (session summaries), `conversation_turns` (short-term raw Teams turn history, added 2026-08-20 — see Standing Rules Pipeline Fix section), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller; `session_id`/`extra_messages` columns added 2026-08-20), `email_catalog` (inbox audit trail), `carddav_credentials` (CardDAV access tokens)
 
 ---
 
