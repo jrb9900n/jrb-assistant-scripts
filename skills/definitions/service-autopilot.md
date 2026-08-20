@@ -193,17 +193,27 @@ after a Send/Print action — pair it with invoice IDs already known (e.g. from
 against `sa_get_audit_trail` entries for several of them):
 | Value | Meaning |
 |---|---|
-| `Sent` | Emailed and delivered. Confirmed against the audit trail — every `Sent` invoice checked had matching "was successfully emailed to..." / "email was delivered" log entries. |
+| `Sent` | **NOT reliably "emailed and delivered" — CONFIRMED UNRELIABLE 2026-08-19, see below.** Originally documented (from the first 2 cross-checks) as meaning genuinely emailed, but a later live re-check found a direct counter-example: it just means nothing is currently pending, which a flag-clear produces identically to a real send. |
 | `Email` | Queued to be emailed, not yet actually sent — seen only on very recent invoices (last ~1–2 days), consistent with SA running a batch send job that hasn't processed them yet. |
 | `Print` | Queued for print delivery, not emailed at all. Confirmed against the audit trail on invoice #33933 (Craig Butler) — `Action: "Print"` matched an audit trail with zero email-related entries. |
 | `Print & Email` | Queued for both. |
 
 No blank/empty `Action` value has been observed — every invoice in a full
 356-row snapshot had one of the four values above, including ones created
-that same day. Whether `Print`-only invoices ever flip to `Sent` once
-actually printed (there's no "printed" completion event confirmed anywhere)
-is unconfirmed — the one `Print` invoice seen hadn't crossed that boundary
-during observation.
+that same day.
+
+**`Sent` reliability — downgraded 2026-08-19, read this before trusting the field:**
+The first two `Sent` invoices cross-checked against the audit trail both had genuine
+"was successfully emailed..." entries, which is why the original version of this doc
+called `Sent` reliable. **That conclusion doesn't hold up.** Re-checked invoice #33968
+(Erica & Tim Mier) after Michael printed it, then cleared its flags (no email, ever) —
+`sa_get_invoice_status` reported `action: "Sent"` for it anyway. Its audit trail, checked
+fresh at the same moment, still showed only `"Invoice was printed"` and `"Cleared the
+email and print flags"` — zero email entries. **`Sent` just means "nothing pending,"
+and both a genuine send and a flag-clear produce that state identically.** Treat `Sent`
+as "not pending," never as proof of an actual send — use `sa_get_audit_trail` whenever
+you need to assert an invoice was actually emailed to a client. See the `ClearFlags`
+section directly below for the mechanism that causes this.
 
 **Agent tool:** `sa_get_invoice_status` (`tools/impl/serviceautopilot.js` →
 `getInvoiceStatuses`) wraps this endpoint — pass a list of invoice GUIDs, get
