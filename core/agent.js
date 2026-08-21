@@ -90,15 +90,26 @@ ${memoryContext}${rulesAndPatterns}`.trim();
 
 export async function runAgent({
     task, taskType = 'general', model: forceModel,
-    systemPromptOverride, extraMessages = [], saveContext = true,
+    systemPromptOverride, extraMessages = [], saveContext = true, images = [],
 }) {
     const runId = randomUUID();
+    // Model routing/logging/observation all key off the text prompt alone --
+    // routeModel does word-count + keyword regexes, neither of which knows
+    // what to do with an image block, so `task` stays a plain string
+    // throughout; only the actual message content sent to the API changes
+    // shape when images are attached.
     const model = routeModel(task, forceModel, taskType);
-    logger.info('Agent run started', { runId, taskType, model, task: task.slice(0, 80) });
+    logger.info('Agent run started', { runId, taskType, model, task: task.slice(0, 80), images: images.length });
 
     const memoryContext = await loadContext({ topic: taskType });
     const tools = getTools(taskType);
-    const messages = [...extraMessages, { role: 'user', content: task }];
+    const userContent = images.length
+        ? [{ type: 'text', text: task }, ...images.map(img => ({
+            type: 'image',
+            source: { type: 'base64', media_type: img.mediaType, data: img.base64 },
+          }))]
+        : task;
+    const messages = [...extraMessages, { role: 'user', content: userContent }];
     const systemPrompt = systemPromptOverride ?? await buildSystemPrompt(memoryContext, taskType);
 
     let totalInput = 0, totalOutput = 0, finalText = '';

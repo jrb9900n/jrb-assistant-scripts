@@ -229,6 +229,40 @@ async function handleList(req, res, type) {
   res.end(JSON.stringify(items));
 }
 
+// ── Teams image attachments ──────────────────────────────────────────────────
+// Teams delivers a pasted/uploaded screenshot as an `image/*` attachment
+// whose contentUrl requires the same Bot Framework bearer token used for
+// proactive sends -- an unauthenticated fetch just 401s. Claude's vision
+// input wants base64, so this downloads, size-checks, and encodes each one.
+const IMAGE_CONTENT_TYPE_RE = /^image\/(png|jpe?g|gif|webp)$/i;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // stay well under Claude's per-image limit
+
+async function extractImageAttachments(activity) {
+  const attachments = activity.attachments || [];
+  const images = [];
+  for (const att of attachments) {
+    if (!att.contentUrl || !IMAGE_CONTENT_TYPE_RE.test(att.contentType || '')) continue;
+    try {
+      const token = await getBotToken();
+      const res = await fetch(att.contentUrl, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) {
+        logger.warn('Teams: image attachment download failed', { status: res.status, contentType: att.contentType });
+        continue;
+      }
+      const buf = Buffer.from(await res.arrayBuffer());
+      if (buf.length > MAX_IMAGE_BYTES) {
+        logger.warn('Teams: image attachment too large, skipping', { size: buf.length, max: MAX_IMAGE_BYTES });
+        continue;
+      }
+      const mediaType = att.contentType.toLowerCase() === 'image/jpg' ? 'image/jpeg' : att.contentType.toLowerCase();
+      images.push({ mediaType, base64: buf.toString('base64') });
+    } catch (err) {
+      logger.warn('Teams: image attachment fetch error', { err: err.message });
+    }
+  }
+  return images;
+}
+
 // ── Teams activity handler ────────────────────────────────────────────────────
 async function handleTeamsActivity(req, res) {
   let body = '';
@@ -265,9 +299,10 @@ async function handleTeamsActivity(req, res) {
     logger.warn('Teams: saveTurn (user) failed', { err: err.message })
   );
 
-  // Feedback capture and conversation-history load touch unrelated data —
-  // run them concurrently rather than paying both latencies sequentially.
-  const [, extraMessages] = await Promise.all([
+  // Feedback capture, conversation-history load, and any image attachment
+  // download all touch unrelated data — run them concurrently rather than
+  // paying three latencies sequentially.
+  const [, extraMessages, images] = await Promise.all([
     (async () => {
       try {
         const { detectAndCaptureFeedback } = await import('../tools/impl/feedback-capture.js');
@@ -281,6 +316,10 @@ async function handleTeamsActivity(req, res) {
     })(),
     loadRecentTurns(sessionId).catch(err => {
       logger.warn('Teams: could not load conversation history', { err: err.message });
+      return [];
+    }),
+    extractImageAttachments(activity).catch(err => {
+      logger.warn('Teams: could not extract image attachments', { err: err.message });
       return [];
     }),
   ]);
@@ -331,7 +370,7 @@ async function handleTeamsActivity(req, res) {
       // above. Mixing in raw cross-intent turns (e.g. an earlier CRM or dev
       // exchange in the same Teams conversation) would just add noise the
       // model could mistake for scheduling-relevant instructions.
-      ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true }));
+      ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true, images }));
 
     } else if (intent === 'crm') {
       const crmTask = `You received a Teams message from Michael. Execute the action he is requesting using your SA, CRM, and CardDAV tools.
@@ -347,7 +386,7 @@ Message: "${userText}"
 - If Michael asks to schedule/book an estimate visit with a client: use schedule_estimate_visit. If it comes back needs_clarification, ask him which client he means instead of guessing.
 - Always confirm what you did: client name, SA IDs, actions taken.`;
       retryTask = crmTask; retryTaskType = 'crm';
-      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false }));
+      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false, images }));
 
     } else if (intent === 'ops_alert') {
       // A system/watchdog alert was posted or pasted into live chat (see
@@ -371,22 +410,22 @@ Message: "${userText}"
       const safeAlertText = sanitizeForPrompt(userText);
       const opsAlertTask = buildAutoFixPrompt(safeAlertText, 'live-chat');
       retryTask = opsAlertTask; retryTaskType = 'auto_fix';
-      ({ result } = await runAgent({ task: opsAlertTask, taskType: 'auto_fix', saveContext: false }));
+      ({ result } = await runAgent({ task: opsAlertTask, taskType: 'auto_fix', saveContext: false, images }));
 
     } else if (intent === 'dev') {
       const devTask = `Michael sent this Teams message:\n\n"${userText}"\n\nFollow the github-dev skill workflow. Reply with a scope proposal:\n- Restate the goal in 2-3 sentences\n- List the files that will be created or changed\n- Identify which repo this belongs in\n- State any assumptions\n- Ask Michael to confirm before you proceed\n\nDo not write any code yet. Return only the reply text.`;
       retryTask = devTask; retryTaskType = 'code';
-      ({ result } = await runAgent({ task: devTask, taskType: 'code', extraMessages, saveContext: false }));
+      ({ result } = await runAgent({ task: devTask, taskType: 'code', extraMessages, saveContext: false, images }));
 
     } else if (intent === 'dev_ambiguous') {
       result = `Want to make sure I handle this correctly — are you asking me to build or write code, or looking for information/advice? Reply "yes, build it" and I'll put together a scope plan.`;
 
     } else if (intent === 'report') {
       retryTaskType = 'report';
-      ({ result } = await runAgent({ task: userText, taskType: 'report', extraMessages, saveContext: false }));
+      ({ result } = await runAgent({ task: userText, taskType: 'report', extraMessages, saveContext: false, images }));
 
     } else {
-      ({ result } = await runAgent({ task: userText, taskType: 'general', extraMessages }));
+      ({ result } = await runAgent({ task: userText, taskType: 'general', extraMessages, images }));
     }
 
     // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
