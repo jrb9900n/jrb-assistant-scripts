@@ -1,23 +1,36 @@
 // tools/impl/overnight-report.js — Daily morning SA activity report
 // Sends at 6 AM to michael@jrboehlke.com via the scheduler/cron.js task.
+// Also serves as the content for Michael's 8:00-8:25 AM "Operations Pulse"
+// calendar block — the 6 AM send time already lands well before that block,
+// so no second cron/send was added; see "Weather Watch" and "Overnight
+// System Exceptions" below, added 2026-08-21 specifically for that block's
+// needs (deliberately folded into this report rather than a new one, since
+// today's dispatch/crew assignments were already fully covered by sections
+// 6 & 7 below).
 //
 // Sections:
-//   1. Jobs accepted since last report  — Won estimates first seen as Won in this run
-//   2. Accepted — awaiting waiting list — Won estimates created ≤45 days ago, not on WL/dispatch
-//   3. Estimates sent since last report — Sent estimates first seen as Sent in this run
-//   4. Estimates created — not yet sent — Current Draft estimates, oldest first
-//   5. Aging estimates                  — Sent 7+ days ago, no acceptance
-//   6. Today's dispatch                 — sa_jobs for today, grouped by crew
-//   7. Waiting list by crew             — sa_waiting_list with crew assignments
+//   1. Weather Watch                    — today's forecast + a schedule-risk flag
+//   2. Overnight System Exceptions      — failed agent_tasks rows + deduped agent.log errors
+//   3. Jobs accepted since last report  — Won estimates first seen as Won in this run
+//   4. Accepted — awaiting waiting list — Won estimates created ≤45 days ago, not on WL/dispatch
+//   5. Estimates sent since last report — Sent estimates first seen as Sent in this run
+//   6. Estimates created — not yet sent — Current Draft estimates, oldest first
+//   7. Aging estimates                  — Sent 7+ days ago, no acceptance
+//   8. Today's dispatch                 — sa_jobs for today, grouped by crew
+//   9. Waiting list by crew             — sa_waiting_list with crew assignments
 //
-// Stage-change detection (sections 1 & 3):
+// Stage-change detection (sections 3 & 5):
 //   Loads estimate IDs from sa_accepted_estimates / sa_sent_estimates BEFORE upserting.
 //   Estimates not yet in the table = first time seen in that stage = transition happened
 //   since the last report run. No QuoteDate dependency; no timestamp windows.
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getEstimateList } from './serviceautopilot.js';
+import { getWeatherForecast } from './scheduling.js';
 
 // ── Supabase clients ──────────────────────────────────────────────────────────
 
@@ -25,6 +38,16 @@ function fleetops() {
   return createClient(
     process.env.FLEETOPS_SUPABASE_URL,
     process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+  );
+}
+
+// agent_tasks lives in the main jrb-assistant Supabase project (SUPABASE_URL/
+// SUPABASE_SERVICE_KEY), not fleetops — see scheduler/task-poller.js and
+// CLAUDE.md's Supabase table list.
+function mainDb() {
+  return createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_KEY,
   );
 }
 
@@ -320,6 +343,118 @@ async function getAssignedWaitingListJobs() {
   return data || [];
 }
 
+// ── Weather Watch ──────────────────────────────────────────────────────────────
+// Reuses the existing Open-Meteo integration in scheduling.js (no API key, no
+// new external dependency) rather than building a separate weather client.
+// Degrades to null on any failure — same "nicety, not critical path" pattern
+// google-maps.js uses for drive-time, per Michael's decision there.
+
+async function getTodayWeather() {
+  try {
+    const days = await getWeatherForecast({ days: 1 });
+    return days[0] || null;
+  } catch (err) {
+    logger.warn('overnight-report: weather fetch failed', { err: err.message });
+    return null;
+  }
+}
+
+// ── Overnight System Exceptions ─────────────────────────────────────────────
+// Two independent, best-effort sources — neither blocks the report if it fails:
+//   1. agent_tasks rows the poller marked status='error' in the last 24h
+//      (covers e.g. a failed sa_add_ticket dispatched via the retry queue).
+//   2. Deduped ERROR-level lines from logs/agent.log in the last 24h (covers
+//      any other agent/system error, e.g. Menards/CardDAV/task-poller failures
+//      already visible in that log today).
+// This is a read of existing signals, not a new failure-tracking system.
+
+async function getFailedTasks({ sinceHours = 24 } = {}) {
+  try {
+    const db = mainDb();
+    const cutoff = new Date(Date.now() - sinceHours * 3600_000).toISOString();
+    // Filtered on updated_at, not created_at: a task can sit `pending` for
+    // days (re-queued repeatedly by SA's Incapsula backoff — see
+    // task-poller.js's retry-count/backoff loop) before finally exhausting
+    // its retries and landing on status='error' today. created_at would miss
+    // that failure forever once it's more than sinceHours old. Confirmed
+    // live 2026-08-21 that agent_tasks rows do carry a real, independently-
+    // maintained updated_at (task-poller.js's PATCH never sets it itself).
+    const { data, error } = await db.from('agent_tasks')
+      .select('id, task, task_type, result, created_at, updated_at')
+      .eq('status', 'error')
+      .gte('updated_at', cutoff)
+      .order('updated_at', { ascending: false })
+      .limit(25);
+    if (error) {
+      logger.warn('overnight-report: agent_tasks error-lookup failed', { error: error.message });
+      return [];
+    }
+    return data || [];
+  } catch (err) {
+    logger.warn('overnight-report: agent_tasks error-lookup threw', { err: err.message });
+    return [];
+  }
+}
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const LOGS_DIR = path.resolve(__dirname, '../../logs');
+// winston's colorize() runs at logger-level format (core/logger.js), so even
+// the File transport's lines carry ANSI escape codes around the level name —
+// strip those before matching.
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+const LOG_LINE_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) \[(\w+)\] (.*)$/;
+
+async function getOvernightLogErrors({ sinceHours = 24 } = {}) {
+  // Read agent.log plus its first rotation (agent1.log — winston's File
+  // transport rotates at 5MB/maxFiles:5). A busy day can rotate mid-window,
+  // and without this the report would silently miss earlier errors that
+  // already scrolled into agent1.log by the time this runs. Bounded to one
+  // extra file (not all maxFiles:5) — enough to cover one rotation within a
+  // 24h window without an unbounded multi-file scan.
+  const candidates = [path.join(LOGS_DIR, 'agent.log'), path.join(LOGS_DIR, 'agent1.log')];
+  const chunks = await Promise.all(candidates.map(async p => {
+    try {
+      return await fs.promises.readFile(p, 'utf8');
+    } catch {
+      return ''; // rotated file may not exist yet — not an error
+    }
+  }));
+  const raw = chunks.join('\n');
+  if (!raw.trim()) {
+    logger.warn('overnight-report: could not read any agent.log file for error summary');
+    return [];
+  }
+
+  const cutoffMs = Date.now() - sinceHours * 3600_000;
+  const grouped = new Map();
+  // \r?\n, not just \n: the log files are written with CRLF line endings, and
+  // a bare '\n' split leaves a trailing \r on every line — which LOG_LINE_RE's
+  // trailing (.*)  $ can never match through, since JS's `.` excludes \r as a
+  // line-terminator char. That silently failed to match every single line
+  // (confirmed live 2026-08-21 against the real agent.log: 0 matches with a
+  // bare '\n' split vs. 11,546 with this fix), which would have made this
+  // section report "no agent errors" even on a day full of them.
+  for (const line of raw.split(/\r?\n/)) {
+    const clean = line.replace(ANSI_RE, '');
+    const m = clean.match(LOG_LINE_RE);
+    if (!m) continue;
+    const [, tsStr, level] = m;
+    if (level.toLowerCase() !== 'error') continue;
+    const ts = new Date(tsStr.replace(' ', 'T'));
+    if (isNaN(ts.getTime()) || ts.getTime() < cutoffMs) continue;
+    // Group by the message text alone (trailing {...} meta json stripped) so
+    // e.g. 50 identical "body upload failed" lines with different reportIds
+    // collapse into one row with a count, instead of flooding the email.
+    const msg = m[3].replace(/\s*\{.*\}\s*$/, '').trim();
+    const key = (msg || '(no message)').slice(0, 140);
+    const entry = grouped.get(key) || { message: key, count: 0, lastSeen: tsStr };
+    entry.count++;
+    entry.lastSeen = tsStr;
+    grouped.set(key, entry);
+  }
+  return [...grouped.values()].sort((a, b) => b.count - a.count);
+}
+
 // ── HTML builders — inline styles, email-safe, matches weekly finance report ──
 
 // Style fragments
@@ -518,18 +653,90 @@ function waitingListByCrewHtml(jobs) {
   return dataTable(['Client', 'Service', 'Target Date', 'Amount'], body);
 }
 
+// escapeHtml — same convention as field-briefing-report.js. Needed here (and
+// not needed by the file's other sections above) because these two new
+// sections interpolate free-text sourced from agent.log lines and agent_tasks
+// error results — unvalidated text that can contain '&'/'<'/'>' (a URL query
+// string, an error message quoting a value in angle brackets, etc.) — unlike
+// the SA-sourced client/service names elsewhere in this file, which are
+// comparatively low-risk plain names/addresses.
+function escapeHtml(s = '') {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// Weather Watch
+function weatherRiskHtml(day) {
+  if (!day) return emptyMsg('Weather forecast unavailable.');
+  const risky = day.condition === 'snow' || day.condition === 'rain' || day.wind_mph >= 25 || day.temp_low <= 20;
+  const icon = day.condition === 'snow' ? '❄️' : day.condition === 'rain' ? '🌧️' : day.condition === 'cloudy' ? '☁️' : '☀️';
+  const bg = risky ? '#fff8f0' : '#f0f4ff';
+  const label = risky
+    ? `${icon} ${day.condition === 'snow' ? 'Snow' : day.condition === 'rain' ? 'Rain' : 'Weather'} risk today &mdash; may affect crew scheduling.`
+    : `${icon} No weather-driven schedule risk expected today.`;
+  const precipBits = [];
+  if (day.morning)   precipBits.push(`AM precip ${day.morning.precip_prob}%`);
+  if (day.afternoon) precipBits.push(`PM precip ${day.afternoon.precip_prob}%`);
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:${bg};border-radius:4px;margin-bottom:6px;"><tr><td style="padding:12px 16px;font-size:13px;color:#1a1a2e;">
+    <strong>${label}</strong><br>
+    <span style="font-size:12px;color:#666666;">High ${day.temp_high}&deg;F / Low ${day.temp_low}&deg;F &bull; Wind ${day.wind_mph} mph${precipBits.length ? ` &bull; ${precipBits.join(' &bull; ')}` : ''}</span>
+  </td></tr></table>`;
+}
+
+// Overnight System Exceptions
+function systemExceptionsHtml(failedTasks, logErrors) {
+  if (!failedTasks.length && !logErrors.length) {
+    return emptyMsg('No agent errors or failed background tasks in the last 24 hours.');
+  }
+  let html = '';
+  if (failedTasks.length) {
+    html += `<p style="margin:4px 0 6px;font-size:12px;font-weight:bold;color:#555577;">Failed background tasks (${failedTasks.length})</p>`;
+    let body = '';
+    for (const [i, t] of failedTasks.entries()) {
+      const bg = i % 2 ? 'background-color:#f8f8f8;' : '';
+      const snippet = escapeHtml((t.result || '').replace(/^Error:\s*/, '').slice(0, 140)) || '—';
+      const whenSrc = t.updated_at || t.created_at;
+      const when = whenSrc
+        ? new Date(whenSrc).toLocaleString('en-US', { timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+        : '—';
+      body += `<tr style="${bg}">
+        <td style="${_TD}">${escapeHtml(t.task_type || 'general')}</td>
+        <td style="${_TD}">${snippet}</td>
+        <td style="${_TD}font-size:12px;color:#888888;white-space:nowrap;">${when}</td>
+      </tr>`;
+    }
+    html += dataTable(['Task Type', 'Error', 'When'], body);
+  }
+  if (logErrors.length) {
+    html += `<p style="margin:16px 0 6px;font-size:12px;font-weight:bold;color:#555577;">Agent/system log errors (${logErrors.length} distinct)</p>`;
+    let body = '';
+    for (const [i, e] of logErrors.entries()) {
+      const bg = i % 2 ? 'background-color:#f8f8f8;' : '';
+      body += `<tr style="${bg}">
+        <td style="${_TD}">${escapeHtml(e.message)}</td>
+        <td style="${_TD}font-size:12px;color:#888888;text-align:center;">${e.count}&times;</td>
+        <td style="${_TD}font-size:12px;color:#888888;white-space:nowrap;">${e.lastSeen}</td>
+      </tr>`;
+    }
+    html += dataTable(['Message', 'Count', 'Last Seen'], body);
+  }
+  return html;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 export async function generateOvernightReport() {
   logger.info('overnight-report: starting');
 
-  const [wonResult, sentResult, draftResult, agingResult, jobsResult, wlResult] = await Promise.allSettled([
+  const [wonResult, sentResult, draftResult, agingResult, jobsResult, wlResult, weatherResult, failedTasksResult, logErrorsResult] = await Promise.allSettled([
     syncWonEstimates(),
     syncSentEstimates(),
     getDraftEstimates(),
     getAgingEstimates(),
     getTodayJobs(),
     getAssignedWaitingListJobs(),
+    getTodayWeather(),
+    getFailedTasks(),
+    getOvernightLogErrors(),
   ]);
 
   const { acceptedYesterday = [], outstanding = [] } =
@@ -539,6 +746,9 @@ export async function generateOvernightReport() {
   const aging         = agingResult.status === 'fulfilled' ? agingResult.value : [];
   const todayJobs     = jobsResult.status === 'fulfilled'  ? jobsResult.value : [];
   const wlJobs        = wlResult.status === 'fulfilled'    ? wlResult.value   : [];
+  const weather       = weatherResult.status === 'fulfilled' ? weatherResult.value : null;
+  const failedTasks   = failedTasksResult.status === 'fulfilled' ? failedTasksResult.value : [];
+  const logErrors     = logErrorsResult.status === 'fulfilled' ? logErrorsResult.value : [];
 
   if (wonResult.status === 'rejected')
     logger.error('overnight-report: won sync failed',   { err: wonResult.reason?.message });
@@ -552,6 +762,12 @@ export async function generateOvernightReport() {
     logger.error('overnight-report: jobs failed',       { err: jobsResult.reason?.message });
   if (wlResult.status === 'rejected')
     logger.error('overnight-report: wl jobs failed',    { err: wlResult.reason?.message });
+  if (weatherResult.status === 'rejected')
+    logger.error('overnight-report: weather failed',    { err: weatherResult.reason?.message });
+  if (failedTasksResult.status === 'rejected')
+    logger.error('overnight-report: failed-tasks lookup failed', { err: failedTasksResult.reason?.message });
+  if (logErrorsResult.status === 'rejected')
+    logger.error('overnight-report: log-errors lookup failed',   { err: logErrorsResult.reason?.message });
 
   const dateLabel        = formatDate(yesterday());
   const outstandingTotal = outstanding.reduce((s, e) => s + (parseFloat(e.amount) || 0), 0);
@@ -577,6 +793,12 @@ export async function generateOvernightReport() {
   </td></tr>
 
   <tr><td style="padding:4px 32px 32px;">
+
+    ${sectionTitle('Weather Watch — Today')}
+    ${weatherRiskHtml(weather)}
+
+    ${sectionTitle('Overnight System Exceptions', failedTasks.length + logErrors.length)}
+    ${systemExceptionsHtml(failedTasks, logErrors)}
 
     ${sectionTitle('Jobs Accepted Since Yesterday\'s Report', acceptedYesterday.length)}
     ${wonEstimatesHtml(acceptedYesterday)}
@@ -614,12 +836,15 @@ export async function generateOvernightReport() {
   const subject = `JRB Morning Report — ${dateLabel} | ${acceptedYesterday.length} accepted, ${sentYesterday.length} sent, ${outstanding.length} awaiting WL, ${todayJobs.length} dispatched`;
 
   logger.info('overnight-report: complete', {
-    accepted:    acceptedYesterday.length,
-    outstanding: outstanding.length,
-    sent:        sentYesterday.length,
-    drafts:      draftEstimates.length,
-    aging:       aging.length,
-    todayJobs:   todayJobs.length,
+    accepted:      acceptedYesterday.length,
+    outstanding:   outstanding.length,
+    sent:          sentYesterday.length,
+    drafts:        draftEstimates.length,
+    aging:         aging.length,
+    todayJobs:     todayJobs.length,
+    weather:       weather?.condition ?? 'unavailable',
+    failedTasks:   failedTasks.length,
+    logErrors:     logErrors.length,
   });
 
   return { subject, body: html };
