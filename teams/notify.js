@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import path from 'path';
 import { randomUUID } from 'crypto';
 import { logger } from '../core/logger.js';
+import { saveTurn } from '../memory/conversation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const CONV_REF_PATH = path.join(__dirname, 'conversation-ref.json');
@@ -198,6 +199,19 @@ export async function sendProactiveMessage(message, { suppressSelfHeal = false }
     throw new Error(`Teams proactive message failed: ${res.status} ${body}`);
   }
   logger.info('Proactive Teams message sent', { preview: message.slice(0, 60), suppressSelfHeal });
+
+  // Record this as an assistant turn in the same conversation-memory store
+  // bot.js's own reactive request/response handler uses (see teams/bot.js,
+  // sessionId = `teams-${activity.conversation.id}`). Without this, every
+  // proactive send -- expense alerts, calendar-change notices, self-heal
+  // summaries, credential/QB reauth reminders -- is invisible to the next
+  // real conversation turn, even though Michael sees it in the same Teams
+  // thread and reasonably expects "the thing you just messaged me about" to
+  // work. Best-effort: a failure here must not fail the notification itself,
+  // which already succeeded.
+  saveTurn(`teams-${ref.conversationId}`, 'assistant', message).catch(err =>
+    logger.warn('Could not save proactive message as a conversation turn', { err: err.message })
+  );
 
   if (!suppressSelfHeal && ERROR_SIGNAL_RE.test(message)) {
     await enqueueSelfHeal(message);
