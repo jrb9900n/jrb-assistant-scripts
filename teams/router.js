@@ -62,21 +62,57 @@ export function isReportRequest(text) {
   return /\b(how much|how many|revenue|invoices?|ar aging|balance sheet|weekly report|show me|what('s| is) (our|the|my)|list (all|open|pending|today)|total|year.?to.?date|ytd|month(ly)?|outstanding|cash flow|profit|loss)\b/.test(t);
 }
 
+// Detects a system/watchdog alert being posted or pasted into live chat (e.g.
+// Michael forwarding a health-check failure). Deliberately narrower than
+// notify.js's ERROR_SIGNAL_RE, which also matches bare FAILED/WARNING, or a
+// bare phrase like "health check failed" — those are safe to gate an
+// outbound-message queue on (the source is this codebase's own alert text),
+// but would false-positive on Michael's own free-text chat ("yeah the health
+// check failed on the ads box again, don't worry about it") if used to gate
+// an autonomous investigate-and-fix path with file-edit/branch/PR access.
+// The ⚠️ sigil is this system's actual, consistently-used alert convention —
+// every sendProactiveMessage-based watchdog/health-check alert uses it, and
+// it's not something Michael would casually type in ordinary chat — so it's
+// a much stronger signal that this text IS a pasted/forwarded alert rather
+// than merely mentioning one.
+export function isOpsAlertLike(text) {
+  return typeof text === 'string' && /⚠️/.test(text);
+}
+
 /**
- * Classify a message into one of: scheduling | crm | dev | dev_ambiguous | report | general
+ * Classify a message into one of: ops_alert | scheduling | crm | dev | dev_ambiguous | report | general
  * Used by both the Teams bot and the email poller.
  *
  * Priority order rationale:
- *   1. CRM is checked before scheduling because a message can contain both
+ *   1. Ops-alert is checked FIRST, ahead of every other classifier. This
+ *      system's real alerts (see the sendProactiveMessage call sites in
+ *      scheduler/cron.js) very often name the exact subsystem that broke —
+ *      "SA connectivity lost — ticket creation offline", a deploy/branch
+ *      drift alert, etc. — so they'd otherwise match isCrmActionRequest's
+ *      \bsa\b/ticket tokens or isAmbiguousDevTask's branch/deploy tokens and
+ *      get misrouted into a generic CRM/dev reply, never reaching the
+ *      investigate-and-fix workflow this check exists for — silently
+ *      defeating the feature for most real alerts. The accepted tradeoff:
+ *      Michael typing "⚠️" for emphasis on an ordinary request would also
+ *      route here instead of CRM/scheduling. That's judged the safer
+ *      direction — auto_fix has no SA/CRM/Teams tools and can only
+ *      investigate/branch/open a PR (never merge), so a rare misfire costs
+ *      an off-topic reply Michael can just repeat, whereas silently missing
+ *      real alerts (the common case, per above) would make this feature
+ *      not actually work. Revisit with Michael before changing this
+ *      ordering again — see [[feedback-sa-terminology]]'s "ask before
+ *      narrowing a heuristic" precedent for the same class of judgment call.
+ *   2. CRM is checked before scheduling because a message can contain both
  *      scheduling vocabulary AND explicit CRM signals (e.g. "schedule a follow-
  *      up call with new lead Dave").  A CRM signal is a stronger, more specific
  *      routing indicator and must not be silently dropped.
- *   2. Scheduling follows CRM — purely scheduling messages have no CRM tokens.
- *   3. Dev intents come next (explicit before ambiguous).
- *   4. Report last before the generic fallback.
+ *   3. Scheduling follows CRM — purely scheduling messages have no CRM tokens.
+ *   4. Dev intents come next (explicit before ambiguous).
+ *   5. Report last before the generic fallback.
  */
 export function classifyIntent(text) {
   if (typeof text !== 'string' || !text) return 'general';
+  if (isOpsAlertLike(text))      return 'ops_alert';
   if (isCrmActionRequest(text))  return 'crm';
   if (isSchedulingRequest(text)) return 'scheduling';
   if (isExplicitDevTask(text))   return 'dev';

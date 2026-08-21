@@ -105,7 +105,12 @@ async function pollTasks() {
 
       // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
       // Check the backoff timer directly to detect if SA was blocked mid-run.
-      const backoffUntil = getSABackoffUntil();
+      // 'auto_fix' never has SA tools (see tools/registry.js TOOL_MAP), so it
+      // structurally cannot be the thing a live SA backoff is about — treat
+      // it as never backed off, same bypass as teams/bot.js's identical
+      // check, so a stale/unrelated backoff can't discard an already-
+      // completed auto_fix result (which may include an opened PR).
+      const backoffUntil = (row.task_type === 'auto_fix') ? 0 : getSABackoffUntil();
       if (backoffUntil > Date.now()) {
         const retryCount = (row.retry_count || 0) + 1;
         if (retryCount <= MAX_RETRIES) {
