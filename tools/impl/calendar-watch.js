@@ -85,6 +85,15 @@ function bootstrapUrl(mailbox, lookAheadDays) {
  * @param {number} [opts.lookAheadDays] - only used when bootstrapping (default 60)
  */
 export async function getCalendarChanges({ mailbox, lookAheadDays = 60 }) {
+  // A lookAheadDays <= REBOOTSTRAP_MARGIN_MS's 7-day equivalent would make
+  // windowStale true on effectively every call, permanently re-bootstrapping
+  // (which always returns [] by design) with zero visible symptom -- the
+  // task would look healthy forever while detecting nothing. Not reachable
+  // by the current caller (cron.js always uses the 60-day default), but
+  // guard it so a future caller can't silently hit this.
+  if (lookAheadDays * 24 * 60 * 60 * 1000 <= REBOOTSTRAP_MARGIN_MS) {
+    throw new Error(`getCalendarChanges: lookAheadDays (${lookAheadDays}) must exceed the ${REBOOTSTRAP_MARGIN_MS / 86400000}-day re-bootstrap margin, or every call would permanently re-bootstrap and never detect a change`);
+  }
   const state = await getDeltaState(mailbox);
   const windowStale = state?.window_end && (new Date(state.window_end).getTime() - Date.now() < REBOOTSTRAP_MARGIN_MS);
 

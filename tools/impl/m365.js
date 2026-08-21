@@ -259,6 +259,13 @@ export async function createCalendarEvent({ subject, start, end, body = '', time
   // there's no equivalent case to preserve.
   if (location) event.location = { displayName: location };
   if (recurrenceDaysOfWeek?.length) {
+    // tools/dispatcher.js does no schema validation before dispatch --
+    // registry.js's `required: ['subject','start','end']` is advisory to the
+    // LLM only. Without recurrenceStartDate, a call that also omits/mistypes
+    // `start` would otherwise crash here on `.slice` of a non-string.
+    if (!recurrenceStartDate && typeof start !== 'string') {
+      throw new Error('createCalendarEvent: recurrenceDaysOfWeek requires either recurrenceStartDate or a valid string `start`');
+    }
     event.recurrence = {
       pattern: { type: 'weekly', interval: 1, daysOfWeek: recurrenceDaysOfWeek },
       range: { type: 'noEnd', startDate: recurrenceStartDate ?? start.slice(0, 10) },
@@ -403,15 +410,20 @@ export async function listCalendarEvents({ userEmail, startDateTime, endDateTime
 export async function updateCalendarEvent({ userEmail, event_id, subject, start, end, body, bodyContentType = 'text', timezone = 'America/Chicago', categories } = {}) {
   const user = userEmail ?? USER();
   const patch = {};
-  if (subject)         patch.subject = subject;
+  // `!== undefined` for subject/body, matching the categories fix below --
+  // an explicit '' must clear the field, not silently no-op. start/end stay
+  // on a truthy check: a calendar event always needs a valid dateTime, so
+  // "clear the start time" isn't a meaningful operation the way "clear the
+  // notes" is -- that case means delete the event, not blank a required field.
+  if (subject !== undefined) patch.subject = subject;
   // bodyContentType defaults to 'text' (unchanged default behavior) but callers
   // appending to an existing body must pass whatever contentType that body
   // already has (from getCalendarEvent) -- hardcoding 'text' here would silently
   // downgrade an 'html' body, causing Outlook to render its markup as literal
   // escaped text on the next PATCH.
-  if (body)            patch.body = { contentType: bodyContentType, content: body };
-  if (start)           patch.start = { dateTime: start, timeZone: timezone };
-  if (end)             patch.end   = { dateTime: end,   timeZone: timezone };
+  if (body !== undefined)    patch.body = { contentType: bodyContentType, content: body };
+  if (start)                  patch.start = { dateTime: start, timeZone: timezone };
+  if (end)                    patch.end   = { dateTime: end,   timeZone: timezone };
   // `!== undefined`, not `?.length` -- an explicit [] must still patch through
   // to actually clear existing categories (e.g. un-tagging a former block-
   // schedule event), matching the tool's documented "replaces" semantics.
