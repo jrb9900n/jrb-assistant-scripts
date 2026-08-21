@@ -282,6 +282,74 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Tuesday 1:15 PM — Estimating Pipeline report, ahead of the Tue 1:30-4:30 PM
+    // "Estimating / Proposal Production" calendar block. Refreshed before EACH of
+    // the block's 3 weekly occurrences (Tue/Thu/Fri) rather than once a week —
+    // the backlog/aging numbers genuinely move day to day as estimates get built,
+    // sent, and won/lost, so a Monday-only snapshot would already be stale by
+    // Thursday. See PR description for the full timing rationale.
+    schedule: '15 13 * * 2',
+    name: 'estimating_pipeline_report_tue',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendEstimatingPipelineReport } = await import('../tools/impl/estimating-pipeline-report.js');
+        const result = await generateAndSendEstimatingPipelineReport({ blockLabel: "today's 1:30-4:30 PM Estimating/Proposal Production block" });
+        logger.info('estimating_pipeline_report_tue: done', result);
+      } catch (err) {
+        logger.error('estimating_pipeline_report_tue: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Estimating Pipeline Report (Tue) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('estimating_pipeline_report_tue: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Thursday 12:45 PM — same report, ahead of the Thu 1:00-4:30 PM occurrence.
+    schedule: '45 12 * * 4',
+    name: 'estimating_pipeline_report_thu',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendEstimatingPipelineReport } = await import('../tools/impl/estimating-pipeline-report.js');
+        const result = await generateAndSendEstimatingPipelineReport({ blockLabel: "today's 1:00-4:30 PM Estimating/Proposal Production block" });
+        logger.info('estimating_pipeline_report_thu: done', result);
+      } catch (err) {
+        logger.error('estimating_pipeline_report_thu: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Estimating Pipeline Report (Thu) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('estimating_pipeline_report_thu: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Friday 12:45 PM — same report, ahead of the Fri 1:00-3:00 PM occurrence.
+    schedule: '45 12 * * 5',
+    name: 'estimating_pipeline_report_fri',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendEstimatingPipelineReport } = await import('../tools/impl/estimating-pipeline-report.js');
+        const result = await generateAndSendEstimatingPipelineReport({ blockLabel: "today's 1:00-3:00 PM Estimating/Proposal Production block" });
+        logger.info('estimating_pipeline_report_fri: done', result);
+      } catch (err) {
+        logger.error('estimating_pipeline_report_fri: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Estimating Pipeline Report (Fri) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('estimating_pipeline_report_fri: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Sunday 11 PM — synthesize week's observations into reusable patterns
     schedule: '0 23 * * 0',
     name: 'weekly_synthesis',
