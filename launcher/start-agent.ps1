@@ -94,6 +94,15 @@ if (-not (Validate-Email -Value $accountantEmail -SecretName "ACCOUNTANT_EMAIL")
 $qbRealmId = Get-Secret "QB_REALM_ID"
 if (-not $qbRealmId) { $qbRealmId = "9130357265584656" }
 
+# JRB Transport LLC — second QBO company authorized under the same QB_CLIENT_ID/
+# QB_CLIENT_SECRET app (see tools/impl/qb-token.js). No fallback hardcode here —
+# unlike QB_REALM_ID above, this company has no history yet; until Michael
+# completes the one-time OAuth at /qb-reauth?company=transport these both stay
+# unset, and every 'transport'-scoped QBO call/health-check cron already
+# handles that as "not connected yet" rather than an error.
+$qbRefreshTokenTransport = Get-Secret "QB_REFRESH_TOKEN_TRANSPORT"
+$qbRealmIdTransport      = Get-Secret "QB_REALM_ID_TRANSPORT"
+
 $secrets = @{
     "ANTHROPIC_API_KEY"    = Get-Secret "ANTHROPIC_API_KEY"
     "SUPABASE_URL"         = "https://znpahinyplccdyoekfeo.supabase.co"
@@ -106,6 +115,8 @@ $secrets = @{
     "QB_CLIENT_SECRET"     = Get-Secret "QB_CLIENT_SECRET"
     "QB_REFRESH_TOKEN"     = Get-Secret "QB_REFRESH_TOKEN"
     "QB_REALM_ID"          = $qbRealmId
+    "QB_REFRESH_TOKEN_TRANSPORT" = $qbRefreshTokenTransport
+    "QB_REALM_ID_TRANSPORT"      = $qbRealmIdTransport
     "GITHUB_TOKEN"         = Get-Secret "GITHUB_TOKEN"
     "GITHUB_USERNAME" = "jrb9900n"
     "GITHUB_REPOS"    = "jrb-assistant-scripts,FleetOps,FieldOps,AuditMatchingEngine"
