@@ -19,7 +19,11 @@ if (!isExplicitRun) {
   process.exit(1);
 }
 
-import { generateAndSendApprovalsQueueReport } from './tools/impl/approvals-queue-report.js';
+// Dynamic import ensures module-level side effects (Supabase client init,
+// credential loading, etc.) only occur when --run is explicitly passed.
+// A static import would be hoisted and execute those side effects before
+// the guard above runs, defeating the safety check.
+const { generateAndSendApprovalsQueueReport } = await import('./tools/impl/approvals-queue-report.js');
 
 console.log('[TEST] Generating Approvals Queue report...');
 const result = await generateAndSendApprovalsQueueReport();
