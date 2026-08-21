@@ -59,6 +59,32 @@ export async function gatherSAARaging() {
   return { buckets, flagged, total };
 }
 
+// Monday (UTC) of the week containing referenceDate, as YYYY-MM-DD.
+// Shared by ar-collections-report.js and cash-forecast-report.js so both
+// reports agree on "week start" without each re-deriving it.
+export function mondayOf(referenceDate = new Date()) {
+  const d = new Date(Date.UTC(referenceDate.getUTCFullYear(), referenceDate.getUTCMonth(), referenceDate.getUTCDate()));
+  const dow = d.getUTCDay(); // 0=Sun
+  const diff = dow === 0 ? -6 : 1 - dow;
+  d.setUTCDate(d.getUTCDate() + diff);
+  return d.toISOString().slice(0, 10);
+}
+
+// SA sync freshness check — shared by any report reading sa_invoices, so a
+// stale scrape is flagged consistently rather than each report re-deriving
+// its own staleness logic.
+export async function gatherSAFreshness({ staleHours = 24 } = {}) {
+  const { data } = await supabase
+    .from('sa_invoices')
+    .select('synced_at')
+    .order('synced_at', { ascending: false })
+    .limit(1);
+  const ts = data?.[0]?.synced_at ? new Date(data[0].synced_at).getTime() : 0;
+  if (!ts) return { stale: true, ageHours: 999 };
+  const ageHours = Math.round((Date.now() - ts) / 3600000);
+  return { stale: ageHours > staleHours, ageHours };
+}
+
 // ── Formatting helpers ──────────────────────────────────────────────────────
 
 export const f$ = n => '$' + Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
