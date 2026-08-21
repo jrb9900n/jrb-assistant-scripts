@@ -232,6 +232,31 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 8:45 AM — AR/Collections report, ahead of the 9:00-10:00 AR/Collections
+    // calendar block. Queries Supabase directly (sa_invoices/audit_issues) rather than
+    // waiting on weekly_finance_report/AME locks — worst case it reports on slightly
+    // stale data (flagged in the email itself) rather than risking not landing by 8:45
+    // if AME is delayed up to its own 4h timeout.
+    schedule: '45 8 * * 1',
+    name: 'ar_collections_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendARCollectionsReport } = await import('../tools/impl/ar-collections-report.js');
+        const result = await generateAndSendARCollectionsReport();
+        logger.info('ar_collections_report: done', result);
+      } catch (err) {
+        logger.error('ar_collections_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`AR/Collections Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('ar_collections_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Sunday 11 PM — synthesize week's observations into reusable patterns
     schedule: '0 23 * * 0',
     name: 'weekly_synthesis',
