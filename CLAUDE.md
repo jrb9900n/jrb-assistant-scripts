@@ -143,11 +143,13 @@ tunnel.config.cjs      — pm2 config for Cloudflare tunnel
 Start-ScheduledTask -TaskName "JRB Cloudflare Tunnel"
 # Tunnel logs: C:\Users\Assistant\.cloudflared\tunnel.log (written on watchdog-triggered restarts)
 
-# Start Teams bot
-Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
+# Start Teams bot — prefer the registered Task Scheduler task (supervised, restarts on crash)
+Start-ScheduledTask -TaskName "JRB Teams Bot"
+# Direct launch (bypasses the Task Scheduler task — only if you need to run it unsupervised):
+Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
 
 # Run a CLI test task
-powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1" cli "your task here"
+powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\launcher\start-agent.ps1" cli "your task here"
 ```
 
 > **Note:** PM2 is no longer used. The tunnel, Teams bot, and scheduler are managed by Windows Task Scheduler tasks ("JRB Cloudflare Tunnel", "JRB Teams Bot", "JRB Scheduler"). A "JRB Cloudflare Watchdog" task runs every 5 minutes to restart cloudflared if it crashes.
@@ -386,12 +388,16 @@ The agent can send unprompted Teams messages to Michael — for task completion 
 ### Restart gotcha
 `pm2 restart all` has EPERM from Claude Code context and also doesn't re-inject secrets from Credential Manager. Correct restart flow:
 ```powershell
-# 1. Find and kill the node process on port 3978
+# 1. Find and kill the node process on port 3978 (only needed if something is
+#    already bound there — e.g. a stray process Task Scheduler isn't tracking)
 $p = (netstat -ano | Select-String ":3978 .*LISTENING" | ForEach-Object { ($_ -split '\s+')[-1] })
-taskkill /f /pid $p
+if ($p) { taskkill /f /pid $p }
 
-# 2. Start fresh via launcher (injects all secrets including CLAUDE_EXECUTE_SECRET)
-Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
+# 2. Start fresh via the registered Task Scheduler task (injects secrets the same
+#    way the launcher does, and restores Task Scheduler's own supervision of it)
+Start-ScheduledTask -TaskName "JRB Teams Bot"
+# Direct launch alternative (bypasses Task Scheduler supervision):
+# Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
 ```
 
 ---
