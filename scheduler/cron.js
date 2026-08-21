@@ -257,6 +257,31 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Tuesday 8:30 AM — Field/Client Meetings briefing, ahead of the 9:00-11:30
+    // Field/Client Meetings calendar block. Reads Michael's actual calendar for
+    // the day (see field-briefing-report.js) rather than just querying business
+    // data — three separate cron entries (Tue/Thu/Fri) since each occurrence has
+    // its own block window and lead time.
+    schedule: '30 8 * * 2',
+    name: 'field_briefing_report_tue',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendFieldBriefing } = await import('../tools/impl/field-briefing-report.js');
+        const result = await generateAndSendFieldBriefing();
+        logger.info('field_briefing_report_tue: done', result);
+      } catch (err) {
+        logger.error('field_briefing_report_tue: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Field/Client Meetings Briefing (Tue) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('field_briefing_report_tue: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Monday 9:45 AM — 12-Week Cash Forecast, ahead of the 10:00-11:00 12-Week
     // Cash Forecast calendar block. Reuses the same AR aging data as
     // ar_collections_report (8:45 AM) plus a live QBO bank balance, open
@@ -277,6 +302,29 @@ const SCHEDULED_TASKS = [
           await sendProactiveMessage(`12-Week Cash Forecast Report FAILED to send. Error: ${err.message}`);
         } catch (notifyErr) {
           logger.error('cash_forecast_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Thursday 9:30 AM — same briefing, ahead of the 10:00-11:30 Thursday
+    // occurrence of the Field/Client Meetings block (this one starts an hour
+    // later than Tuesday/Friday, per the President Weekly Block Schedule).
+    schedule: '30 9 * * 4',
+    name: 'field_briefing_report_thu',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendFieldBriefing } = await import('../tools/impl/field-briefing-report.js');
+        const result = await generateAndSendFieldBriefing();
+        logger.info('field_briefing_report_thu: done', result);
+      } catch (err) {
+        logger.error('field_briefing_report_thu: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Field/Client Meetings Briefing (Thu) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('field_briefing_report_thu: Teams alert also failed', { err: notifyErr.message });
         }
       }
     },
@@ -303,6 +351,28 @@ const SCHEDULED_TASKS = [
           await sendProactiveMessage(`Sales Pipeline / BD Report (Monday Business Development) FAILED to send. Error: ${err.message}`);
         } catch (notifyErr) {
           logger.error('sales_pipeline_report_bd: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Friday 8:30 AM — same briefing, ahead of the 9:00-11:30 Friday occurrence
+    // of the Field/Client Meetings block.
+    schedule: '30 8 * * 5',
+    name: 'field_briefing_report_fri',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendFieldBriefing } = await import('../tools/impl/field-briefing-report.js');
+        const result = await generateAndSendFieldBriefing();
+        logger.info('field_briefing_report_fri: done', result);
+      } catch (err) {
+        logger.error('field_briefing_report_fri: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Field/Client Meetings Briefing (Fri) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('field_briefing_report_fri: Teams alert also failed', { err: notifyErr.message });
         }
       }
     },
