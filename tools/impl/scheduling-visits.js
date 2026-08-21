@@ -261,15 +261,60 @@ export async function injectEstimateTodo({ mailbox, date, clientName, visitStart
  *   { status: 'created', visit, displacement, todo, driveTime }
  */
 export async function scheduleEstimateVisit({ clientName, date, startTime, durationMinutes = 30, mailbox = 'michael@jrboehlke.com' } = {}) {
-  if (!clientName || !clientName.trim()) throw new Error('scheduleEstimateVisit: clientName is required');
-  if (!DATE_RE.test(date || '')) throw new Error(`scheduleEstimateVisit: date must be YYYY-MM-DD, got "${date}"`);
-  if (!TIME_RE.test(startTime || '')) throw new Error(`scheduleEstimateVisit: startTime must be HH:MM (24h), got "${startTime}"`);
+  // Destructured defaults only cover `undefined`, not an explicit `null` --
+  // an LLM-formed call passing `mailbox: null` should still fall back to the
+  // default rather than fail validation below.
+  if (mailbox === null) mailbox = 'michael@jrboehlke.com';
+
+  // Every one of these is validated by TYPE first, not just truthiness --
+  // dispatcher.js calls tool handlers with whatever JSON the LLM produced,
+  // with no schema validation of its own before dispatch. A malformed call
+  // (wrong type, not just a missing field) reaches this function directly,
+  // so `typeof x !== 'string'` has to be checked before any string method
+  // (.trim(), .split(), regex .test() with implicit ToString coercion) is
+  // called on it, or a bad LLM-supplied value throws an unguarded TypeError
+  // from deep inside this file instead of one clean, actionable error here.
+  if (typeof clientName !== 'string' || !clientName.trim()) {
+    throw new Error(`scheduleEstimateVisit: clientName is required and must be a non-empty string, got ${JSON.stringify(clientName)}`);
+  }
+  if (typeof date !== 'string' || !DATE_RE.test(date)) {
+    throw new Error(`scheduleEstimateVisit: date must be a YYYY-MM-DD string, got ${JSON.stringify(date)}`);
+  }
+  // The regex alone accepts calendar nonsense like "2026-13-45" -- round-trip
+  // through Date's own field getters to catch that before it reaches Graph
+  // (which would otherwise 400 deep inside createCalendarEvent with a much
+  // less useful error message pointing at the wrong layer).
+  {
+    const [y, mo, da] = date.split('-').map(Number);
+    const check = new Date(y, mo - 1, da);
+    if (check.getFullYear() !== y || check.getMonth() !== mo - 1 || check.getDate() !== da) {
+      throw new Error(`scheduleEstimateVisit: "${date}" is not a valid calendar date`);
+    }
+  }
+  if (typeof startTime !== 'string' || !TIME_RE.test(startTime)) {
+    throw new Error(`scheduleEstimateVisit: startTime must be an "HH:MM" (24h) string, got ${JSON.stringify(startTime)}`);
+  }
+  if (typeof mailbox !== 'string' || !mailbox.trim()) {
+    throw new Error(`scheduleEstimateVisit: mailbox must be a non-empty string, got ${JSON.stringify(mailbox)}`);
+  }
   const duration = Number.isFinite(durationMinutes) && durationMinutes > 0
     ? Math.min(Math.floor(durationMinutes), 480)
     : 30;
 
   // Step 1: SA client lookup. Don't guess on zero or multiple matches --
   // hand it back for Michael to disambiguate.
+  //
+  // KNOWN LIMITATION (confirmed live 2026-08-20): SA's V2AccountList_Query
+  // name filter (FieldColumn '1'/ContainOperator '1') appears to be a no-op
+  // server-side -- it returns the same ~30-row default page regardless of
+  // the search term, and searchClients only does a client-side substring
+  // check over that page (see its own comment in serviceautopilot.js). For
+  // a client base in the thousands, a specific client not already in that
+  // arbitrary default page will come back as a false "not found" here even
+  // though the account genuinely exists in SA. Not fixed in this build --
+  // reverse-engineering SA's real full-text search endpoint is a separate,
+  // substantial effort outside Phase 2's scope. Worth Michael knowing this
+  // tool's "client not found" result isn't fully reliable yet.
   const matches = await searchClients({ name: clientName });
   if (matches.length !== 1) {
     return {

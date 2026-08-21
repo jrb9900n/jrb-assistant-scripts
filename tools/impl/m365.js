@@ -253,8 +253,10 @@ export async function createCalendarEvent({ subject, start, end, body = '', time
   // for the same field, so the two functions apply consistent semantics to
   // an identical parameter rather than silently diverging on `categories: []`.
   if (categories !== undefined) event.categories = categories;
-  // Same optional-field convention as categories -- only included in the
-  // Graph payload when the caller actually passes something.
+  // Deliberately a truthy check, not `!== undefined` like categories above --
+  // unlike `categories: []` (a meaningful "explicitly no categories" value),
+  // an empty-string location has no distinct meaning from "not provided," so
+  // there's no equivalent case to preserve.
   if (location) event.location = { displayName: location };
   if (recurrenceDaysOfWeek?.length) {
     event.recurrence = {
@@ -461,26 +463,49 @@ export async function getCalendarEvent({ event_id, userEmail, timezone = 'Americ
  * the next "Estimating / Proposal Production" occurrence for the to-do
  * injection step.
  *
- * Passes Prefer: outlook.timezone so both the startDateTime/endDateTime query
- * params AND the returned start/end values are interpreted in the same local
- * time zone as createCalendarEvent's default -- otherwise Graph treats the
- * query window as UTC while the visit's own start/end were built as
- * America/Chicago wall-clock strings, silently shifting the overlap window
- * by several hours.
+ * Passes Prefer: outlook.timezone so the *returned* start/end values come
+ * back in the same local time zone as createCalendarEvent's default, instead
+ * of UTC. CONFIRMED LIVE 2026-08-20: this header reliably fixes the returned
+ * values, but does NOT reliably extend to how Graph interprets the
+ * startDateTime/endDateTime query params themselves -- an evening
+ * America/Chicago event whose UTC instant rolls into the next UTC calendar
+ * day was silently excluded by a same-local-day query window. Callers that
+ * need a specific local day/window fully covered should pad the requested
+ * startDateTime/endDateTime by a day on each side and rely on this
+ * function's correctly-zoned returned values for the real filtering, the
+ * way tools/impl/scheduling-visits.js does -- don't trust the raw query
+ * boundary to mean what it says in local-zone terms.
  *
  * Graph's calendarView already expands recurring series into individual
  * occurrences, each with its own event id distinct from the series master's
  * -- exactly the id a caller needs to PATCH/DELETE just one occurrence.
+ *
+ * Follows @odata.nextLink to completion (same pattern as calendar-watch.js's
+ * delta pagination) -- `limit` is a per-page $top, not a result cap. Without
+ * this, a busy multi-day window (the displacement check pads to 3 days; the
+ * to-do search pads to ~16) could silently truncate before the categories
+ * filter even runs, since $top caps the *raw* calendarView page (every event
+ * of any kind in the window), not just JRB Block Schedule-tagged ones --
+ * exactly the kind of silent, no-error data loss this project has been
+ * bitten by before. maxPages is a sanity ceiling against a pathological
+ * Graph response looping forever, not an expected real limit.
  */
-export async function getCalendarViewWithCategories({ userEmail, startDateTime, endDateTime, timezone = 'America/Chicago', limit = 100 } = {}) {
+export async function getCalendarViewWithCategories({ userEmail, startDateTime, endDateTime, timezone = 'America/Chicago', limit = 100, maxPages = 20 } = {}) {
   const user = userEmail ?? USER();
-  const data = await graph(
-    'GET',
-    `/users/${user}/calendarView?startDateTime=${startDateTime}&endDateTime=${endDateTime}&$top=${limit}&$select=id,subject,start,end,categories,seriesMasterId,type&$orderby=start/dateTime`,
-    undefined,
-    { Prefer: `outlook.timezone="${timezone}"` }
-  );
-  return (data.value ?? []).map(e => ({
+  const headers = { Prefer: `outlook.timezone="${timezone}"` };
+  let url = `/users/${user}/calendarView?startDateTime=${startDateTime}&endDateTime=${endDateTime}&$top=${limit}&$select=id,subject,start,end,categories,seriesMasterId,type&$orderby=start/dateTime`;
+  const raw = [];
+  let pages = 0;
+  while (url && pages < maxPages) {
+    const data = await graph('GET', url, undefined, headers);
+    raw.push(...(data.value ?? []));
+    url = data['@odata.nextLink'] || null;
+    pages++;
+  }
+  if (url) {
+    logger.warn('getCalendarViewWithCategories: hit maxPages cap with more pages remaining', { user, startDateTime, endDateTime, maxPages });
+  }
+  return raw.map(e => ({
     id:             e.id,
     subject:        e.subject,
     start:          e.start?.dateTime,
