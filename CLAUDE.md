@@ -423,7 +423,7 @@ Distinct from `memory/memory.js`'s existing Haiku-summarized long-term memory �
 
 ## Autonomous Schedule Manager (Phase 1 built 2026-08-20)
 
-Michael's long-term goal, agreed as a 5-phase roadmap 2026-08-20: an assistant that learns his habits, manages his calendar proactively, and scans email to keep each block's to-do list current. Phase 1 (foundation) is built; phases 2-5 (estimate-visit scheduling via SA + Azure Maps drive time, general auto-displacement, email-driven to-dos, habit learning) are not yet started. Full detail in Claude Code memory `project-jrb-calendar-block-system-2026-08-20`.
+Michael's long-term goal, agreed as a 5-phase roadmap 2026-08-20: an assistant that learns his habits, manages his calendar proactively, and scans email to keep each block's to-do list current. Phase 1 (foundation) is built; Phase 2 (estimate-visit scheduling via SA + Google Maps drive time) is in progress; phases 3-5 (general auto-displacement, email-driven to-dos, habit learning) are not yet started. Full detail in Claude Code memory `project-jrb-calendar-block-system-2026-08-20`.
 
 ### What Phase 1 built
 - **The President Weekly Block Schedule is live on `michael@jrboehlke.com`'s calendar** as 25 true Outlook recurring series (no end date), built via `createCalendarEvent`'s new `recurrenceDaysOfWeek`/`recurrenceStartDate` params (see the `calendar-userEmail-fix` PR below).
@@ -433,7 +433,7 @@ Michael's long-term goal, agreed as a 5-phase roadmap 2026-08-20: an assistant t
 - **`calendar_change_watch` cron task** (every 10 min) — Phase 1 stops at detection + a Teams notification; no auto-displacement yet (that's Phase 3). Matches the alert-once-on-failure/recovery pattern used by `sa_connectivity_check`/`ads_health_check`. A dedupe Set guards against Graph's own delta-redelivery behavior (confirmed live) without over-trusting it — notifications are only marked handled after a successful send, not before, so a failed Teams send retries on the next poll instead of being silently dropped forever.
 
 ### Decisions locked with Michael for Phase 2+
-- Drive-time calculation: **Azure Maps** (stays in the existing Microsoft/Azure tenant, no new vendor credential).
+- Drive-time calculation: **Google Maps (Routes API)** — decision revisited 2026-08-20 after Michael saw the actual pricing; the raw per-call cost is nominally lower than Azure Maps and Michael chose to set up a separate Google Cloud account/billing relationship rather than default to staying in the Microsoft tenant. Credential: `GOOGLE_MAPS_API_KEY`, provisioned via `launcher/save-googlemaps-secrets.ps1`.
 - Estimate-visit calendar blocks: **no invite sent to the client** — blocked time only, contact info in the body.
 - Auto-displacement autonomy: **follow the President Weekly Block Schedule's own displacement priority order automatically for Standard blocks; never silently touch PROTECTED/DEEP WORK blocks.**
 
@@ -489,7 +489,7 @@ Confirmed directly by Michael 2026-08-17: "Anytime 'SA' is mentioned you may ass
 ## Credentials
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
-Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`, `FLEETSHARP_URL`, `FLEETSHARP_EMAIL`, `FLEETSHARP_PASSWORD`
+Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`, `FLEETSHARP_URL`, `FLEETSHARP_EMAIL`, `FLEETSHARP_PASSWORD`, `GOOGLE_MAPS_API_KEY` (Routes API, drive-time calc for the estimate-visit scheduling feature — see Autonomous Schedule Manager section; set via `launcher/save-googlemaps-secrets.ps1`)
 
 Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 
