@@ -4,4 +4,4 @@ foreach ($procId in $pids) {
     if ($procId -match '^\d+$') { taskkill /f /pid $procId 2>$null }
 }
 Start-Sleep 2
-Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\agent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
+Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -File `"C:\Users\Assistant\JRBAgent\launcher\start-agent.ps1`" teams" -WindowStyle Hidden
