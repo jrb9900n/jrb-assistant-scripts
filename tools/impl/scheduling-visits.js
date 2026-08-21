@@ -12,10 +12,10 @@
 //      occurrence only, never the series, never PROTECTED/DEEP_WORK blocks).
 //   4. Append a to-do note to the next "Estimating / Proposal Production"
 //      deep-work occurrence on or after the visit date.
-//
-// Drive-time before/after blocks are explicitly OUT of scope here -- see the
-// TODO(drive-time) comment below. Michael is setting up an Azure Maps
-// credential separately.
+//   5. Block real drive time before/after the visit (Google Maps Routes
+//      API, anchored to the JRB office address), each leg going through the
+//      same displacement check as the visit itself so a travel block can't
+//      silently overlap a PROTECTED/DEEP_WORK block.
 
 import { searchClients, getClientDetails } from './serviceautopilot.js';
 import {
@@ -26,9 +26,19 @@ import {
   getCalendarViewWithCategories,
 } from './m365.js';
 import { BLOCK_CATEGORY } from './calendar-watch.js';
+import { getDriveTimeMinutes } from './google-maps.js';
 import { logger } from '../../core/logger.js';
 
 const ESTIMATING_BLOCK_SUBJECT = 'Estimating / Proposal Production [PROTECTED DEEP WORK]';
+
+// Confirmed company address (project-jrb-company-info memory) -- the
+// before/after drive-time legs are anchored here, not to wherever Michael's
+// prior/next appointment happened to be. A reasonable v1 simplification for
+// a single-location business; not accurate for a day with multiple
+// consecutive site visits, but that's a genuinely harder problem (would need
+// to know the actual prior/next real commitment's location, not just the
+// nearest block-schedule entry) left for a later iteration if it matters.
+const JRB_OFFICE_ADDRESS = '9900 N Granville Rd, Mequon, WI 53097';
 
 // How far ahead to search for the next Estimating block. The block recurs
 // weekly on (at least) Tuesday and Thursday, so 14 days always covers at
@@ -196,6 +206,64 @@ export async function checkAndResolveDisplacement({ mailbox, date, visitStart, v
   return { status, resolvedActions, conflicts };
 }
 
+// ── Drive-time blocks (before/after the visit) ─────────────────────────────
+
+/**
+ * Blocks real travel time before and after the visit, anchored to the JRB
+ * office address on both legs. Runs each leg through the same displacement
+ * check as the visit itself, so a drive-time block can't silently overlap a
+ * PROTECTED/DEEP_WORK block -- that leg is skipped and reported instead of
+ * created. Best-effort throughout: a missing/failed drive-time lookup for
+ * one or both legs degrades to `status: 'unavailable'` rather than failing
+ * the caller, since the visit itself already exists regardless.
+ *
+ * KNOWN LIMITATION: if the main visit's own displacement check already
+ * flagged a STANDARD block as a middle-overlap conflict (left unmodified,
+ * per the accepted v1 scope limit above), and a drive-time leg also
+ * overlaps that same still-unmodified block, this reports it as a second,
+ * separate conflict rather than recognizing it's the same underlying issue.
+ * Redundant reporting, not a wrong action -- acceptable for v1.
+ */
+export async function addDriveTimeBlocks({ mailbox, date, clientAddress, clientName, visitStart, visitEnd }) {
+  if (!clientAddress) return { status: 'unavailable', reason: 'no client address available' };
+
+  const [toMinutes, fromMinutes] = await Promise.all([
+    getDriveTimeMinutes({ originAddress: JRB_OFFICE_ADDRESS, destinationAddress: clientAddress }),
+    getDriveTimeMinutes({ originAddress: clientAddress, destinationAddress: JRB_OFFICE_ADDRESS }),
+  ]);
+
+  if (toMinutes === null && fromMinutes === null) {
+    return { status: 'unavailable', reason: 'Google Maps drive-time lookup failed or GOOGLE_MAPS_API_KEY not configured' };
+  }
+
+  const legs = [];
+
+  // `direction` picks which side of the visit this leg's window falls on --
+  // 'before' anchors the leg to end exactly at visitStart, 'after' anchors
+  // it to start exactly at visitEnd. Computing legStart/legEnd in here
+  // (rather than requiring the caller to precompute them) means the
+  // minutes===null short-circuit never has to deal with a start/end that
+  // was never validly computed in the first place.
+  async function addLeg(name, minutes, direction, note) {
+    if (minutes === null) { legs.push({ leg: name, skipped: true, reason: 'drive-time lookup failed' }); return; }
+    const [legStart, legEnd] = direction === 'before'
+      ? [addMinutesLocal(visitStart, -minutes), visitStart]
+      : [visitEnd, addMinutesLocal(visitEnd, minutes)];
+    const disp = await checkAndResolveDisplacement({ mailbox, date, visitStart: legStart, visitEnd: legEnd });
+    if (disp.status === 'manual_review_needed') {
+      legs.push({ leg: name, skipped: true, reason: 'conflicts with a protected block, needs manual review', conflicts: disp.conflicts, minutes });
+      return;
+    }
+    const created = await createCalendarEvent({ subject: note, start: legStart, end: legEnd, userEmail: mailbox });
+    legs.push({ leg: name, eventId: created.event_id, minutes, displacement: disp });
+  }
+
+  await addLeg('to_visit', toMinutes, 'before', `Drive to ${clientName} (${toMinutes} min)`);
+  await addLeg('from_visit', fromMinutes, 'after', `Drive back from ${clientName} (${fromMinutes} min)`);
+
+  return { status: 'processed', legs };
+}
+
 // ── Step 4: to-do injection into the next Estimating block ─────────────────
 
 export async function injectEstimateTodo({ mailbox, date, clientName, visitStart }) {
@@ -338,11 +406,6 @@ export async function scheduleEstimateVisit({ clientName, date, startTime, durat
   if (details.phone) bodyLines.push(`Phone: ${details.phone}`);
   if (details.address) bodyLines.push(`Address: ${details.address}`);
   bodyLines.push('Estimate visit scheduled via JRB Agent -- blocked time only, no invite sent to the client.');
-  // TODO(drive-time): once the Azure Maps credential is set up, insert real
-  // blocked before/after travel-time calendar events here, sized from the
-  // drive time between Michael's prior stop and this address (confirmed
-  // design: actual blocked calendar time, not just a text note). Deferred --
-  // no Maps integration in this build.
   const body = bodyLines.join('\n');
 
   const created = await createCalendarEvent({
@@ -387,9 +450,17 @@ export async function scheduleEstimateVisit({ clientName, date, startTime, durat
     todo = { status: 'error', error: err.message };
   }
 
+  let driveTime;
+  try {
+    driveTime = await addDriveTimeBlocks({ mailbox, date, clientAddress: details.address, clientName: clientMatch.name, visitStart, visitEnd });
+  } catch (err) {
+    logger.error('scheduleEstimateVisit: drive-time blocks failed', { error: err.message, eventId: created.event_id });
+    driveTime = { status: 'error', error: err.message };
+  }
+
   logger.info('scheduleEstimateVisit: complete', {
     eventId: created.event_id, clientName: clientMatch.name, date, startTime,
-    displacementStatus: displacement.status, todoStatus: todo.status,
+    displacementStatus: displacement.status, todoStatus: todo.status, driveTimeStatus: driveTime.status,
   });
 
   return {
@@ -397,6 +468,6 @@ export async function scheduleEstimateVisit({ clientName, date, startTime, durat
     visit,
     displacement,
     todo,
-    driveTime: 'deferred -- Azure Maps drive-time blocks not yet built (see TODO(drive-time) in tools/impl/scheduling-visits.js)',
+    driveTime,
   };
 }

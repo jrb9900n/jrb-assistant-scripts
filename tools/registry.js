@@ -887,7 +887,7 @@ const SA_TOOLS = [
   },
   {
     name: 'schedule_estimate_visit',
-    description: 'Schedule an in-person estimate visit with a client: looks up the client in Service Autopilot for address/phone, blocks the time on Michael\'s calendar (no invite sent to the client -- blocked time only), auto-resolves simple conflicts with the recurring block schedule (never touching PROTECTED/DEEP WORK blocks), and adds a to-do note to the next Estimating/Proposal Production block. If the client name is ambiguous or not found in SA, returns candidates to ask Michael about instead of guessing.',
+    description: 'Schedule an in-person estimate visit with a client: looks up the client in Service Autopilot for address/phone, blocks the time on Michael\'s calendar (no invite sent to the client -- blocked time only), auto-resolves simple conflicts with the recurring block schedule (never touching PROTECTED/DEEP WORK blocks), blocks real drive time before/after the visit via Google Maps (skipped gracefully if unavailable), and adds a to-do note to the next Estimating/Proposal Production block. If the client name is ambiguous or not found in SA, returns candidates to ask Michael about instead of guessing.',
     input_schema: {
       type: 'object',
       properties: {
