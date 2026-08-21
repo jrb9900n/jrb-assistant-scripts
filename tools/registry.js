@@ -195,16 +195,22 @@ const EMAIL_TOOLS = [
   },
   {
     name: 'create_calendar_event',
-    description: 'Create a calendar event. Defaults to assistant calendar. Pass userEmail to create on Michael\'s calendar.',
+    description: 'Create a calendar event, one-off or recurring. Defaults to assistant calendar. Pass userEmail to create on Michael\'s calendar.',
     input_schema: {
       type: 'object',
       properties: {
         subject:   { type: 'string', description: 'Event title' },
-        start:     { type: 'string', description: 'Start datetime ISO 8601, e.g. 2026-07-01T09:00:00' },
+        start:     { type: 'string', description: 'Start datetime ISO 8601, e.g. 2026-07-01T09:00:00. For a recurring event, this is the first occurrence.' },
         end:       { type: 'string', description: 'End datetime ISO 8601, e.g. 2026-07-01T09:30:00' },
         body:      { type: 'string', description: 'Event description/notes' },
         timezone:  { type: 'string', description: 'Timezone, default America/Chicago' },
         userEmail: { type: 'string', description: 'Calendar owner. Omit for assistant, use michael@jrboehlke.com for Michael.' },
+        recurrenceDaysOfWeek: {
+          type: 'array', items: { type: 'string', enum: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] },
+          description: 'Omit for a one-off event. If set, creates a weekly recurring series on these days of the week with no end date.',
+        },
+        recurrenceStartDate: { type: 'string', description: 'YYYY-MM-DD. Only used with recurrenceDaysOfWeek; defaults to the date portion of start.' },
+        categories: { type: 'array', items: { type: 'string' }, description: 'Outlook category tags. Use ["JRB Block Schedule"] ONLY for a recurring President-schedule policy block -- never for a real meeting/appointment, since that exact tag makes calendar_change_watch silently treat it as scaffolding rather than a real calendar item.' },
       },
       required: ['subject', 'start', 'end'],
     },
@@ -237,6 +243,7 @@ const EMAIL_TOOLS = [
         end:       { type: 'string', description: 'ISO 8601 datetime' },
         body:      { type: 'string' },
         timezone:  { type: 'string', default: 'America/Chicago' },
+        categories: { type: 'array', items: { type: 'string' }, description: 'Replaces the event\'s Outlook category tags.' },
       },
       required: ['event_id'],
     },

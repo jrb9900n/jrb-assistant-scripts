@@ -37,7 +37,7 @@ async function getToken() {
 }
 
 
-async function graph(method, path, data) {
+export async function graph(method, path, data) {
   const token = await getToken();
   const url = path.startsWith('http') ? path : `${GRAPH}${path}`;
   try {
@@ -239,7 +239,8 @@ export async function getEmailAttachmentBytes({ email_id, attachment_id, userEma
   return Buffer.from(data.contentBytes, 'base64');
 }
 
-export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago' }) {
+export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate, categories } = {}) {
+  const user = userEmail ?? USER();
   const event = {
     subject,
     body: { contentType: 'text', content: body },
@@ -248,8 +249,18 @@ export async function createCalendarEvent({ subject, start, end, body = '', time
     isReminderOn: true,
     reminderMinutesBeforeStart: 1440,
   };
-  const data = await graph('POST', `/users/${USER()}/events`, event);
-  return { created: true, event_id: data.id, subject, start };
+  // `!== undefined`, not `?.length` -- matches updateCalendarEvent's guard
+  // for the same field, so the two functions apply consistent semantics to
+  // an identical parameter rather than silently diverging on `categories: []`.
+  if (categories !== undefined) event.categories = categories;
+  if (recurrenceDaysOfWeek?.length) {
+    event.recurrence = {
+      pattern: { type: 'weekly', interval: 1, daysOfWeek: recurrenceDaysOfWeek },
+      range: { type: 'noEnd', startDate: recurrenceStartDate ?? start.slice(0, 10) },
+    };
+  }
+  const data = await graph('POST', `/users/${user}/events`, event);
+  return { created: true, event_id: data.id, subject, start, calendar: user, recurring: !!event.recurrence };
 }
 
 // ── Inbox folder management ───────────────────────────────────
@@ -384,13 +395,17 @@ export async function listCalendarEvents({ userEmail, startDateTime, endDateTime
   }));
 }
 
-export async function updateCalendarEvent({ userEmail, event_id, subject, start, end, body, timezone = 'America/Chicago' } = {}) {
+export async function updateCalendarEvent({ userEmail, event_id, subject, start, end, body, timezone = 'America/Chicago', categories } = {}) {
   const user = userEmail ?? USER();
   const patch = {};
-  if (subject) patch.subject = subject;
-  if (body)    patch.body = { contentType: 'text', content: body };
-  if (start)   patch.start = { dateTime: start, timeZone: timezone };
-  if (end)     patch.end   = { dateTime: end,   timeZone: timezone };
+  if (subject)         patch.subject = subject;
+  if (body)            patch.body = { contentType: 'text', content: body };
+  if (start)           patch.start = { dateTime: start, timeZone: timezone };
+  if (end)             patch.end   = { dateTime: end,   timeZone: timezone };
+  // `!== undefined`, not `?.length` -- an explicit [] must still patch through
+  // to actually clear existing categories (e.g. un-tagging a former block-
+  // schedule event), matching the tool's documented "replaces" semantics.
+  if (categories !== undefined) patch.categories = categories;
   await graph('PATCH', `/users/${user}/events/${event_id}`, patch);
   return { updated: true, event_id };
 }
