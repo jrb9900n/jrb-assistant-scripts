@@ -19,7 +19,11 @@ if (!isExplicitRun) {
   process.exit(1);
 }
 
-import { generateAndSendWeeklyScorecardReport } from './tools/impl/weekly-scorecard-report.js';
+// Dynamic import so the module (and any of its module-level side effects) is
+// only loaded after the --run guard above has passed. A static import would be
+// hoisted by the ES module loader and evaluated unconditionally before any
+// code in this file runs, making the guard above completely ineffective.
+const { generateAndSendWeeklyScorecardReport } = await import('./tools/impl/weekly-scorecard-report.js');
 
 console.log('[TEST] Generating Weekly Business Scorecard report...');
 const result = await generateAndSendWeeklyScorecardReport();
