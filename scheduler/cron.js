@@ -257,6 +257,30 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Wednesday 9:30 AM — Accounts Payable report, ahead of the 9:45-10:45 AP
+    // calendar block. Live QBO Bill query each run (see getAPAgingReport in
+    // quickbooks.js) rather than a Supabase-cached source, so no AME/SA lock
+    // to wait on here.
+    schedule: '30 9 * * 3',
+    name: 'ap_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendAPReport } = await import('../tools/impl/ap-report.js');
+        const result = await generateAndSendAPReport();
+        logger.info('ap_report: done', result);
+      } catch (err) {
+        logger.error('ap_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Accounts Payable Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('ap_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Monday 12:45 PM — Marketing Performance report, ahead of the 1:00-2:00 PM
     // Marketing Performance calendar block. Google Ads figures are fetched by
     // shelling out to a small Python script that reuses the already-authenticated
