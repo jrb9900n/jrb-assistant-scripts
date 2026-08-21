@@ -257,6 +257,33 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // 8 AM on the 12th of every month — Monthly Bank AR/AP Report, 3 days
+    // ahead of Michael's typical 15th-of-month bank submission deadline.
+    // Reports AR (J.R. Boehlke only) + consolidated AP (both entities) AS OF
+    // last month's end date, via QBO's own historical Reports API (see
+    // getAgedReportAsOf in quickbooks.js) rather than a live "as of today"
+    // snapshot — a bank wants the balance that was actually outstanding on
+    // the stated closing date, not whatever's true on the 12th.
+    schedule: '0 8 12 * *',
+    name: 'bank_monthly_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendBankMonthlyReport } = await import('../tools/impl/bank-monthly-report.js');
+        const result = await generateAndSendBankMonthlyReport();
+        logger.info('bank_monthly_report: done', result);
+      } catch (err) {
+        logger.error('bank_monthly_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Monthly Bank Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('bank_monthly_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Tuesday 8:30 AM — Field/Client Meetings briefing, ahead of the 9:00-11:30
     // Field/Client Meetings calendar block. Reads Michael's actual calendar for
     // the day (see field-briefing-report.js) rather than just querying business
