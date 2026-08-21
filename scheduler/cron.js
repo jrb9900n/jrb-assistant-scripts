@@ -257,6 +257,31 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Weekdays 11:15 AM — Approvals Queue report, ahead of the 11:30 AM-12:00 PM
+    // Direct Report / Approval Window calendar block. v1 covers expense-report
+    // approvals only (see approvals-queue-report.js header comment for why QBO
+    // payroll time-off isn't included yet). Skips sending on a genuinely empty
+    // queue rather than mailing an "all clear" five days a week.
+    schedule: '15 11 * * 1-5',
+    name: 'approvals_queue_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendApprovalsQueueReport } = await import('../tools/impl/approvals-queue-report.js');
+        const result = await generateAndSendApprovalsQueueReport();
+        logger.info('approvals_queue_report: done', result);
+      } catch (err) {
+        logger.error('approvals_queue_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Approvals Queue Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('approvals_queue_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Tuesday 1:15 PM — Estimating Pipeline report, ahead of the Tue 1:30-4:30 PM
     // "Estimating / Proposal Production" calendar block. Refreshed before EACH of
     // the block's 3 weekly occurrences (Tue/Thu/Fri) rather than once a week —
