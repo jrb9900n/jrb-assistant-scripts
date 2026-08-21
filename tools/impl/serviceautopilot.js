@@ -1543,7 +1543,18 @@ export async function deleteClients({ clientIds }) {
 
 /**
  * Fetch SA client details needed to post tickets.
- * Returns { clientId, customerJobId, currentUserId, currentUserType, name, address }
+ * Returns { clientId, customerJobId, currentUserId, currentUserType, name, address, phone }
+ *
+ * `phone` confirmed live 2026-08-20 against the APIProbe test account: the
+ * GetCustomerDataAsync Client object DOES carry phone fields directly
+ * (ContactPhone/ContactCellPhone/ContactHomePhone/ContactOtherPhone) — all
+ * empty on that particular test account, but the fields themselves are real,
+ * so this doesn't need the separate GetClientInfo round-trip that
+ * getSAClientPhone/getSAClientDetails use for the *bulk* account list (which
+ * genuinely has no phone columns at all). Priority: ContactPhone (SA's own
+ * computed "preferred" phone) first, then Cell (most reachable ahead of a
+ * site visit), then Home, then Other. Empty string, never fabricated, when
+ * none are set.
  */
 export async function getClientDetails({ clientId }) {
   const res = await post('/WebServices/ClientViewWs.asmx/GetCustomerDataAsync', {
@@ -1559,7 +1570,8 @@ export async function getClientDetails({ clientId }) {
     currentUserId:    client.CurrentUserID,
     currentUserType:  client.CurrentUserResourceType,
     name:    `${client.ContactFirstName || ''} ${client.ContactLastName || ''}`.trim(),
-    address: client.Address1 || '',
+    address: [client.Address1, client.CityStateZip].filter(Boolean).join(', '),
+    phone:   client.ContactPhone || client.ContactCellPhone || client.ContactHomePhone || client.ContactOtherPhone || '',
   };
 }
 

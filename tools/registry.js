@@ -886,6 +886,21 @@ const SA_TOOLS = [
     },
   },
   {
+    name: 'schedule_estimate_visit',
+    description: 'Schedule an in-person estimate visit with a client: looks up the client in Service Autopilot for address/phone, blocks the time on Michael\'s calendar (no invite sent to the client -- blocked time only), auto-resolves simple conflicts with the recurring block schedule (never touching PROTECTED/DEEP WORK blocks), blocks real drive time before/after the visit via Google Maps (skipped gracefully if unavailable), and adds a to-do note to the next Estimating/Proposal Production block. If the client name is ambiguous or not found in SA, returns candidates to ask Michael about instead of guessing.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        clientName:      { type: 'string', description: 'Client name to search for in Service Autopilot, e.g. "John Smith"' },
+        date:            { type: 'string', description: 'Visit date, YYYY-MM-DD' },
+        startTime:       { type: 'string', description: 'Visit start time, 24h HH:MM, e.g. "10:00"' },
+        durationMinutes: { type: 'number', description: 'Visit length in minutes', default: 30 },
+        mailbox:         { type: 'string', description: 'Calendar to block time on', default: 'michael@jrboehlke.com' },
+      },
+      required: ['clientName', 'date', 'startTime'],
+    },
+  },
+  {
     name: 'sa_get_invoice_status',
     description: 'Batch-fetch delivery/payment status for a known list of Service Autopilot invoice IDs. Returns, per invoice: `status` (payment state: Open/Paid/Past Due) and `action` — "Email"/"Print"/"Print & Email" reliably mean still queued/pending, not yet sent. CONFIRMED UNRELIABLE: `action: "Sent"` does NOT reliably mean "was emailed" — it just means nothing is currently pending, which SA\'s "Clear Flags" action produces just as easily as a genuine send. Live-confirmed 2026-08-19: invoice #33968 read `action: "Sent"` despite its audit trail showing only a print + a later flag-clear, zero email events ever. Do not report an invoice as "sent to the client" based on this field alone. For the full historical detail (exact timestamps, delivery/open receipts) and to confirm a genuine send vs. a flag-clear, use sa_get_audit_trail instead — it is the only reliable source for that distinction, per invoice (no known bulk-scale equivalent). Requires invoice IDs already known (e.g. from the sa_invoices Supabase table) — this does not browse/list invoices by date range.',
     input_schema: {

@@ -22,7 +22,10 @@ import { createClient } from '@supabase/supabase-js';
 import { graph } from './m365.js';
 import { logger } from '../../core/logger.js';
 
-const BLOCK_CATEGORY = 'JRB Block Schedule';
+// Exported so other Phase 2+ modules (e.g. scheduling-visits.js's displacement
+// check) reference this exact literal instead of re-declaring their own copy
+// that could silently drift out of sync with this one.
+export const BLOCK_CATEGORY = 'JRB Block Schedule';
 
 function supabase() {
   return createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
