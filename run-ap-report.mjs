@@ -19,7 +19,11 @@ if (!isExplicitRun) {
   process.exit(1);
 }
 
-import { generateAndSendAPReport } from './tools/impl/ap-report.js';
+// Dynamic import so the module (and its transitive dependencies — QBO auth,
+// email credentials, etc.) is only loaded when --run is explicitly passed.
+// A static top-level import is hoisted and evaluated before any code runs,
+// which means it would fire unconditionally regardless of the guard above.
+const { generateAndSendAPReport } = await import('./tools/impl/ap-report.js');
 
 console.log('[TEST] Generating Accounts Payable report...');
 const result = await generateAndSendAPReport();
