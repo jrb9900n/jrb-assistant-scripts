@@ -6,6 +6,14 @@
 //
 // All QB code (quickbooks.js, carddav.js, etc.) should import getQBAccessToken()
 // from here instead of implementing their own token refresh.
+//
+// Multi-company (added 2026-08-21): one Intuit developer app (QB_CLIENT_ID/
+// QB_CLIENT_SECRET) can be authorized against more than one QBO company file —
+// each authorization gets its own realm ID + refresh token, but shares the
+// same client credentials. Every function here takes an optional `company`
+// key (defaults to 'jrb' for backward compatibility with the original
+// single-company env vars/Credential Manager target) so callers can address
+// a second company (e.g. JRB Transport LLC) without duplicating this module.
 
 import axios from 'axios';
 import { execFileSync } from 'child_process';
@@ -16,63 +24,119 @@ import { tmpdir } from 'os';
 import { logger } from '../../core/logger.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const QB_TOKEN_META_FILE = join(__dirname, '../../data/qb-token-meta.json');
+const DATA_DIR = join(__dirname, '../../data');
 
 // QB refresh tokens expire 101 days after last rotation (Intuit policy).
 // We record the rotation timestamp so the reminder cron can warn 14 days before expiry.
 export const QB_TOKEN_TTL_DAYS = 101;
 
-function saveTokenTimestamp() {
+const QB_REDIRECT_URI = 'https://agent.jrboehlke.com/qb-callback';
+
+// Per-company static config. 'jrb' keeps the original env var names / Credential
+// Manager target so nothing changes for existing callers that don't pass a company.
+const QB_COMPANIES = {
+  jrb: {
+    label: 'J.R. Boehlke, LLC',
+    credTarget: 'JRBAgent:QB_REFRESH_TOKEN',
+    refreshEnvVar: 'QB_REFRESH_TOKEN',
+    realmEnvVar: 'QB_REALM_ID',
+    metaFile: join(DATA_DIR, 'qb-token-meta.json'),
+  },
+  transport: {
+    label: 'JRB Transport LLC',
+    credTarget: 'JRBAgent:QB_REFRESH_TOKEN_TRANSPORT',
+    refreshEnvVar: 'QB_REFRESH_TOKEN_TRANSPORT',
+    realmEnvVar: 'QB_REALM_ID_TRANSPORT',
+    metaFile: join(DATA_DIR, 'qb-token-meta-transport.json'),
+  },
+};
+
+export function listQBCompanies() {
+  return Object.keys(QB_COMPANIES);
+}
+
+function companyConfig(company) {
+  const cfg = QB_COMPANIES[company];
+  if (!cfg) throw new Error(`Unknown QB company "${company}" — expected one of: ${listQBCompanies().join(', ')}`);
+  return cfg;
+}
+
+// Per-company mutable state (access token cache, in-flight refresh promise,
+// in-memory refresh token/realm ID overrides). Kept in a Map rather than
+// module-level scalars so a refresh/rotation for one company can never race
+// or clobber the other's state.
+const _state = new Map();
+function stateFor(company) {
+  if (!_state.has(company)) {
+    _state.set(company, { accessToken: null, accessTokenExpiry: 0, refreshToken: null, refreshPromise: null, realmId: null });
+  }
+  return _state.get(company);
+}
+
+function currentRefreshToken(company) {
+  const s = stateFor(company);
+  if (!s.refreshToken) s.refreshToken = process.env[companyConfig(company).refreshEnvVar];
+  return s.refreshToken;
+}
+
+// ── Realm ID (mostly static, but settable at re-auth time) ────
+
+/**
+ * Realm ID for a company. Prefers the env var (set by the launcher from
+ * Credential Manager at boot) but falls back to the value captured live
+ * during the most recent exchangeQBAuthCode() in this process — so a fresh
+ * re-auth works immediately without requiring an agent restart first.
+ */
+export function getQBRealmId(company = 'jrb') {
+  const cfg = companyConfig(company);
+  return process.env[cfg.realmEnvVar] || stateFor(company).realmId || getPersistedRealmId(company);
+}
+
+function getPersistedRealmId(company) {
+  return getQBTokenMeta(company)?.realmId ?? null;
+}
+
+// ── Token rotation metadata (per company) ──────────────────────
+
+function saveTokenMeta(company, extra = {}) {
+  const cfg = companyConfig(company);
   try {
-    mkdirSync(join(__dirname, '../../data'), { recursive: true });
-    writeFileSync(QB_TOKEN_META_FILE, JSON.stringify({ lastRotatedAt: new Date().toISOString() }), 'utf8');
+    mkdirSync(DATA_DIR, { recursive: true });
+    const prior = getQBTokenMeta(company) || {};
+    writeFileSync(cfg.metaFile, JSON.stringify({ ...prior, lastRotatedAt: new Date().toISOString(), ...extra }), 'utf8');
   } catch (err) {
-    logger.warn('QB: failed to save token timestamp', { err: err.message });
+    logger.warn('QB: failed to save token meta', { company, err: err.message });
   }
 }
 
-export function getQBTokenMeta() {
+export function getQBTokenMeta(company = 'jrb') {
   try {
-    return JSON.parse(readFileSync(QB_TOKEN_META_FILE, 'utf8').replace(/^﻿/, ''));
+    return JSON.parse(readFileSync(companyConfig(company).metaFile, 'utf8').replace(/^﻿/, ''));
   } catch {
     return null;
   }
 }
 
-const QB_REDIRECT_URI = 'https://agent.jrboehlke.com/qb-callback';
-
-// In-process cache
-let _accessToken = null;
-let _accessTokenExpiry = 0;
-let _refreshToken = null; // populated lazily from process.env
-
-// Mutex: prevents concurrent callers from each firing a refresh with the same
-// stale refresh token. Intuit invalidates the old token the moment the first
-// rotation succeeds, so the second concurrent caller would receive HTTP 400.
-let _refreshPromise = null;
-
-function currentRefreshToken() {
-  if (!_refreshToken) _refreshToken = process.env.QB_REFRESH_TOKEN;
-  return _refreshToken;
-}
-
 // ── Access token (auto-refresh + rotation) ───────────────────
 
-export async function getQBAccessToken() {
-  if (_accessToken && Date.now() < _accessTokenExpiry - 60_000) return _accessToken;
+export async function getQBAccessToken(company = 'jrb') {
+  const s = stateFor(company);
+  if (s.accessToken && Date.now() < s.accessTokenExpiry - 60_000) return s.accessToken;
 
   // Serialize concurrent refresh attempts behind a single promise.
   // Any caller that arrives while a refresh is already in flight waits for it
   // instead of launching a second one with the same (now-invalid) refresh token.
-  if (_refreshPromise) return _refreshPromise;
+  if (s.refreshPromise) return s.refreshPromise;
 
-  _refreshPromise = _doRefresh().finally(() => { _refreshPromise = null; });
-  return _refreshPromise;
+  s.refreshPromise = _doRefresh(company).finally(() => { s.refreshPromise = null; });
+  return s.refreshPromise;
 }
 
-async function _doRefresh() {
-  let rt = currentRefreshToken();
-  if (!rt) throw new Error('QB_REFRESH_TOKEN not set — run QB re-auth at /qb-reauth');
+async function _doRefresh(company) {
+  const cfg = companyConfig(company);
+  const s = stateFor(company);
+  let rt = currentRefreshToken(company);
+  if (!rt) throw new Error(`${cfg.refreshEnvVar} not set — run QB re-auth at /qb-reauth?company=${company}`);
 
   const creds = Buffer.from(`${process.env.QB_CLIENT_ID}:${process.env.QB_CLIENT_SECRET}`).toString('base64');
 
@@ -91,45 +155,47 @@ async function _doRefresh() {
     // 400 (invalid_grant) means another process already rotated this token.
     // Re-read the current token from Credential Manager and retry once.
     if (err.response?.status === 400) {
-      const latestRt = await readRefreshTokenFromCredMgr();
+      const latestRt = await readCredential(cfg.credTarget);
       if (!latestRt) {
-        logger.warn('QB: CredMgr re-read returned null — cannot recover from 400', { err: err.message });
+        logger.warn('QB: CredMgr re-read returned null — cannot recover from 400', { company, err: err.message });
         throw err;
       }
       if (latestRt === rt) {
-        logger.warn('QB: CredMgr token matches in-memory token — not a cross-process race; re-auth required', { err: err.message });
+        logger.warn('QB: CredMgr token matches in-memory token — not a cross-process race; re-auth required', { company, err: err.message });
         throw err;
       }
-      logger.info('QB: stale token detected — retrying with current Credential Manager token');
-      _refreshToken = latestRt;
-      process.env.QB_REFRESH_TOKEN = latestRt;
+      logger.info('QB: stale token detected — retrying with current Credential Manager token', { company });
+      s.refreshToken = latestRt;
+      process.env[cfg.refreshEnvVar] = latestRt;
       res = await callIntuit(latestRt); // throws if still invalid
     } else {
       throw err;
     }
   }
 
-  _accessToken = res.data.access_token;
-  _accessTokenExpiry = Date.now() + res.data.expires_in * 1000;
+  s.accessToken = res.data.access_token;
+  s.accessTokenExpiry = Date.now() + res.data.expires_in * 1000;
 
   // Intuit rotates the refresh token on every call — persist it immediately
-  if (res.data.refresh_token && res.data.refresh_token !== _refreshToken) {
+  if (res.data.refresh_token && res.data.refresh_token !== s.refreshToken) {
     const newRt = res.data.refresh_token;
-    _refreshToken = newRt;
-    process.env.QB_REFRESH_TOKEN = newRt;
-    saveRefreshToken(newRt).then(
-      () => logger.info('QB: refresh token rotated and saved to Credential Manager'),
-      err => logger.warn('QB: refresh token rotation — Credential Manager save failed (token updated in memory only)', { err: err.message })
+    s.refreshToken = newRt;
+    process.env[cfg.refreshEnvVar] = newRt;
+    saveCredential(cfg.credTarget, newRt).then(
+      () => logger.info('QB: refresh token rotated and saved to Credential Manager', { company }),
+      err => logger.warn('QB: refresh token rotation — Credential Manager save failed (token updated in memory only)', { company, err: err.message })
     );
   }
-  saveTokenTimestamp();
+  saveTokenMeta(company);
 
-  return _accessToken;
+  return s.accessToken;
 }
 
 // ── OAuth code exchange (initial auth + re-auth) ──────────────
 
-export async function exchangeQBAuthCode(code) {
+export async function exchangeQBAuthCode(code, company = 'jrb', realmId = null) {
+  const cfg = companyConfig(company);
+  const s = stateFor(company);
   const creds = Buffer.from(`${process.env.QB_CLIENT_ID}:${process.env.QB_CLIENT_SECRET}`).toString('base64');
   const res = await axios.post(
     'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
@@ -141,33 +207,57 @@ export async function exchangeQBAuthCode(code) {
     throw new Error(`QB code exchange failed: ${JSON.stringify(res.data)}`);
   }
 
-  _accessToken = res.data.access_token;
-  _accessTokenExpiry = Date.now() + res.data.expires_in * 1000;
-  _refreshToken = res.data.refresh_token;
-  process.env.QB_REFRESH_TOKEN = _refreshToken;
+  s.accessToken = res.data.access_token;
+  s.accessTokenExpiry = Date.now() + res.data.expires_in * 1000;
+  s.refreshToken = res.data.refresh_token;
+  process.env[cfg.refreshEnvVar] = s.refreshToken;
 
-  await saveRefreshToken(_refreshToken);
-  saveTokenTimestamp();
-  logger.info('QB: OAuth code exchanged, tokens saved');
-  return { accessToken: _accessToken, refreshToken: _refreshToken };
+  await saveCredential(cfg.credTarget, s.refreshToken);
+
+  // Realm ID doesn't rotate, but capture it at auth time so the connection
+  // works this process without waiting for a launcher restart to pick up a
+  // newly-saved QB_REALM_ID_* env var. Not secret, so it lives in the plain
+  // JSON meta file rather than Credential Manager.
+  if (realmId) {
+    s.realmId = realmId;
+    saveTokenMeta(company, { realmId });
+  } else {
+    saveTokenMeta(company);
+  }
+
+  logger.info('QB: OAuth code exchanged, tokens saved', { company, realmId: realmId || undefined });
+  return { accessToken: s.accessToken, refreshToken: s.refreshToken, realmId: realmId || getQBRealmId(company) };
 }
 
 // ── Build Intuit authorization URL ────────────────────────────
 
-export function buildQBAuthUrl(state) {
+/**
+ * @param {string} company - 'jrb' (default) or 'transport'
+ * @param {string} [state] - opaque suffix; the company is always encoded as
+ *   the state's prefix ("company:suffix") so /qb-callback knows which
+ *   company's tokens to save without any other side channel.
+ */
+export function buildQBAuthUrl(company = 'jrb', state) {
+  companyConfig(company); // validates company, throws on unknown key
   const params = new URLSearchParams({
     client_id: process.env.QB_CLIENT_ID,
     redirect_uri: QB_REDIRECT_URI,
     response_type: 'code',
     scope: 'com.intuit.quickbooks.accounting',
-    state: state || 'qb-reauth',
+    state: `${company}:${state || 'qb-reauth-' + Date.now()}`,
   });
   return `https://appcenter.intuit.com/connect/oauth2?${params}`;
 }
 
+/** Recovers the company key encoded by buildQBAuthUrl from the callback's `state` param. Defaults to 'jrb' for old links without a prefix. */
+export function parseQBAuthState(state) {
+  const prefix = String(state || '').split(':')[0];
+  return QB_COMPANIES[prefix] ? prefix : 'jrb';
+}
+
 // ── Read current refresh token from Credential Manager ────────
 
-async function readRefreshTokenFromCredMgr() {
+async function readCredential(target) {
   const tmpFile = join(tmpdir(), `qb-cred-read-${Date.now()}.ps1`);
   const ps = `Add-Type -TypeDefinition @"
 using System;
@@ -194,7 +284,7 @@ public class CredReader {
     }
 }
 "@
-Write-Output ([CredReader]::Read('JRBAgent:QB_REFRESH_TOKEN'))
+Write-Output ([CredReader]::Read('${target}'))
 `;
   try {
     writeFileSync(tmpFile, ps, 'utf8');
@@ -212,7 +302,7 @@ Write-Output ([CredReader]::Read('JRBAgent:QB_REFRESH_TOKEN'))
 
 // ── Persist rotated refresh token to Credential Manager ───────
 
-async function saveRefreshToken(token) {
+async function saveCredential(target, value) {
   // Write a temp PS1 script that uses Win32 CredWrite (handles long tokens
   // that cmdkey silently truncates).
   // IMPORTANT: check CredWrite return value and exit 1 on failure so
@@ -243,7 +333,7 @@ public class CredSaver {
     }
 }
 "@
-$ok = [CredSaver]::Write('JRBAgent:QB_REFRESH_TOKEN', 'JRBAgent', $Token)
+$ok = [CredSaver]::Write('${target}', 'JRBAgent', $Token)
 if (-not $ok) {
     $errCode = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
     Write-Error "CredWrite failed with Win32 error $errCode"
@@ -259,14 +349,14 @@ if (-not $ok) {
     let lastErr;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
       try {
-        execFileSync('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-File', tmpFile, '-Token', token], {
+        execFileSync('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-File', tmpFile, '-Token', value], {
           timeout: 15_000,
         });
         return; // success
       } catch (err) {
         lastErr = err;
         if (attempt < MAX_ATTEMPTS) {
-          logger.warn(`QB: saveRefreshToken attempt ${attempt} failed, retrying`, { err: err.message });
+          logger.warn(`QB: saveCredential attempt ${attempt} failed, retrying`, { target, err: err.message });
           await new Promise(r => setTimeout(r, 2000 * attempt));
         }
       }

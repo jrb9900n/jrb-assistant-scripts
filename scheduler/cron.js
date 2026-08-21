@@ -89,7 +89,7 @@ async function waitForLockToAppear(lockFile, graceMs = 10_000, pollMs = 2000) {
 }
 
 let saWasDown = false;
-let qbWasDown = false;
+const qbWasDown = new Map(); // company -> bool, so a JRB Transport outage/recovery never stomps JRB's own alert state
 let adsHealthWasDown = false;
 let calendarWatchWasDown = false;
 // Best-effort dedupe for calendar_change_watch -- Graph delta queries can
@@ -829,33 +829,43 @@ const SCHEDULED_TASKS = [
     // safe to catch up on, so opt in to node-cron's missed-execution recovery.
     recoverMissedExecutions: true,
     run: async () => {
-      try {
-        const { getQBAccessToken } = await import('../tools/impl/qb-token.js');
-        const axios = (await import('axios')).default;
-        const token = await getQBAccessToken();
-        await axios.get(
-          `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}/companyinfo/${process.env.QB_REALM_ID}`,
-          { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
-        );
-        if (qbWasDown) {
-          qbWasDown = false;
-          await sendProactiveMessage('✅ QuickBooks connectivity restored.').catch(() => {});
-        }
-      } catch (err) {
-        logger.warn('qb_health_check: QB unreachable', { err: err.message, status: err.response?.status });
-        if (!qbWasDown) {
-          qbWasDown = true;
-          const { sendEmail } = await import('../tools/impl/m365.js');
-          const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-          const msg = `QuickBooks connection is failing (status ${err.response?.status ?? 'n/a'}). All QB-dependent features (BTA reports, CardDAV, finance report, audit engine) will be affected until reauthorized.\n\nDetail: ${detail}\n\nTo fix: developer.intuit.com/app/developer/playground -> get authorization code (scope com.intuit.quickbooks.accounting) -> authorize as J.R. Boehlke -> get tokens -> save refresh_token via Set-JRBSecret. Confirm the realm ID matches ${process.env.QB_REALM_ID} before saving.`;
-          await Promise.allSettled([
-            sendProactiveMessage(`⚠️ ${msg}`),
-            sendEmail({
-              to: ['michael@jrboehlke.com'],
-              subject: '⚠️ QuickBooks Connection Failing',
-              body: `<p style="font-family:Arial,sans-serif;color:#c00;font-weight:bold;">QuickBooks connection is failing (status ${err.response?.status ?? 'n/a'}).</p><p style="font-family:Arial,sans-serif;">${msg.split('\n\n').join('</p><p style="font-family:Arial,sans-serif;">')}</p>`,
-            }),
-          ]);
+      const { getQBAccessToken, getQBRealmId, listQBCompanies } = await import('../tools/impl/qb-token.js');
+      const axios = (await import('axios')).default;
+
+      for (const company of listQBCompanies()) {
+        const realmId = getQBRealmId(company);
+        // 'transport' has no realm ID until Michael actually completes its
+        // /qb-reauth?company=transport authorization — skip silently rather
+        // than alerting about a company that was never connected in the
+        // first place.
+        if (!realmId) continue;
+
+        try {
+          const token = await getQBAccessToken(company);
+          await axios.get(
+            `https://quickbooks.api.intuit.com/v3/company/${realmId}/companyinfo/${realmId}`,
+            { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' } }
+          );
+          if (qbWasDown.get(company)) {
+            qbWasDown.set(company, false);
+            await sendProactiveMessage(`✅ QuickBooks connectivity restored (${company}).`).catch(() => {});
+          }
+        } catch (err) {
+          logger.warn('qb_health_check: QB unreachable', { company, err: err.message, status: err.response?.status });
+          if (!qbWasDown.get(company)) {
+            qbWasDown.set(company, true);
+            const { sendEmail } = await import('../tools/impl/m365.js');
+            const detail = err.response?.data ? JSON.stringify(err.response.data) : err.message;
+            const msg = `QuickBooks connection is failing for ${company} (status ${err.response?.status ?? 'n/a'}). All QB-dependent features for this company will be affected until reauthorized.\n\nDetail: ${detail}\n\nTo fix: visit https://agent.jrboehlke.com/qb-reauth?secret=<CLAUDE_EXECUTE_SECRET>&company=${company} to reconnect via Intuit. Confirm the realm ID matches ${realmId} before saving.`;
+            await Promise.allSettled([
+              sendProactiveMessage(`⚠️ ${msg}`),
+              sendEmail({
+                to: ['michael@jrboehlke.com'],
+                subject: `⚠️ QuickBooks Connection Failing (${company})`,
+                body: `<p style="font-family:Arial,sans-serif;color:#c00;font-weight:bold;">QuickBooks connection is failing for ${company} (status ${err.response?.status ?? 'n/a'}).</p><p style="font-family:Arial,sans-serif;">${msg.split('\n\n').join('</p><p style="font-family:Arial,sans-serif;">')}</p>`,
+              }),
+            ]);
+          }
         }
       }
     },
@@ -1063,24 +1073,27 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // 8 AM daily — warn if QB refresh token is within 14 days of its 101-day expiry
+    // 8 AM daily — warn if either QB company's refresh token is within 14 days of its 101-day expiry
     schedule: '0 8 * * *',
     name: 'qb_reauth_reminder',
     run: async () => {
-      const { getQBTokenMeta, QB_TOKEN_TTL_DAYS } = await import('../tools/impl/qb-token.js');
-      const meta = getQBTokenMeta();
-      if (!meta?.lastRotatedAt) return; // no timestamp yet — nothing to warn about
-      const msPerDay = 86_400_000;
-      const daysSince = (Date.now() - new Date(meta.lastRotatedAt).getTime()) / msPerDay;
-      const daysRemaining = Math.floor(QB_TOKEN_TTL_DAYS - daysSince);
-      if (daysRemaining > 14) return;
+      const { getQBTokenMeta, getQBRealmId, listQBCompanies, QB_TOKEN_TTL_DAYS } = await import('../tools/impl/qb-token.js');
       const secret = process.env.CLAUDE_EXECUTE_SECRET || '';
-      const url = `https://agent.jrboehlke.com/qb-reauth?secret=${secret}`;
-      const msg = daysRemaining > 0
-        ? `QuickBooks token expires in **${daysRemaining} day${daysRemaining === 1 ? '' : 's'}**. Tap to reconnect: ${url}`
-        : `QuickBooks token has **expired** (${Math.abs(daysRemaining)} days ago). Tap to reconnect: ${url}`;
-      await sendProactiveMessage(msg);
-      logger.info('qb_reauth_reminder: sent', { daysRemaining });
+      for (const company of listQBCompanies()) {
+        if (!getQBRealmId(company)) continue; // not connected yet — nothing to warn about
+        const meta = getQBTokenMeta(company);
+        if (!meta?.lastRotatedAt) continue; // no timestamp yet — nothing to warn about
+        const msPerDay = 86_400_000;
+        const daysSince = (Date.now() - new Date(meta.lastRotatedAt).getTime()) / msPerDay;
+        const daysRemaining = Math.floor(QB_TOKEN_TTL_DAYS - daysSince);
+        if (daysRemaining > 14) continue;
+        const url = `https://agent.jrboehlke.com/qb-reauth?secret=${secret}&company=${company}`;
+        const msg = daysRemaining > 0
+          ? `QuickBooks token for ${company} expires in **${daysRemaining} day${daysRemaining === 1 ? '' : 's'}**. Tap to reconnect: ${url}`
+          : `QuickBooks token for ${company} has **expired** (${Math.abs(daysRemaining)} days ago). Tap to reconnect: ${url}`;
+        await sendProactiveMessage(msg);
+        logger.info('qb_reauth_reminder: sent', { company, daysRemaining });
+      }
     },
   },
   {

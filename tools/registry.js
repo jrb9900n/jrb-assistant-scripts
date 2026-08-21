@@ -279,11 +279,12 @@ const TEAMS_TOOLS = [
 const QB_TOOLS = [
   {
     name: 'qb_query',
-    description: 'Query QuickBooks for invoices, payments, customers, or P&L data.',
+    description: 'Query QuickBooks for invoices, payments, customers, or P&L data. Defaults to J.R. Boehlke, LLC — pass company="transport" for JRB Transport LLC.',
     input_schema: {
       type: 'object',
       properties: {
         query: { type: 'string', description: 'QBO SQL-like query string e.g. "SELECT * FROM Invoice WHERE Balance > 0"' },
+        company: { type: 'string', enum: ['jrb', 'transport'], description: 'Which QBO company to query. "jrb" = J.R. Boehlke, LLC (default). "transport" = JRB Transport LLC.' },
       },
       required: ['query'],
     },
