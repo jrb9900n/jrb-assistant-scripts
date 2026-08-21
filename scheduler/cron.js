@@ -257,6 +257,33 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 12:45 PM — Marketing Performance report, ahead of the 1:00-2:00 PM
+    // Marketing Performance calendar block. Google Ads figures are fetched by
+    // shelling out to a small Python script that reuses the already-authenticated
+    // google-ads-agent daemon's client (see marketing-performance-ads-fetch.py) —
+    // that call degrades to an "unavailable" section on its own rather than
+    // throwing, so a daemon/venv hiccup doesn't block the SA-sourced won-job
+    // figures from still landing on time.
+    schedule: '45 12 * * 1',
+    name: 'marketing_performance_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendMarketingPerformanceReport } = await import('../tools/impl/marketing-performance-report.js');
+        const result = await generateAndSendMarketingPerformanceReport();
+        logger.info('marketing_performance_report: done', result);
+      } catch (err) {
+        logger.error('marketing_performance_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Marketing Performance Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('marketing_performance_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Weekdays 11:15 AM — Approvals Queue report, ahead of the 11:30 AM-12:00 PM
     // Direct Report / Approval Window calendar block. v1 covers expense-report
     // approvals only (see approvals-queue-report.js header comment for why QBO
