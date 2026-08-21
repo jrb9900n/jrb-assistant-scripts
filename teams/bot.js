@@ -12,7 +12,7 @@ import { listSkills } from '../skills/library.js';
 import { logger } from '../core/logger.js';
 import { buildContextBlock } from '../tools/impl/feedback.js';
 import { loadRecentTurns, saveTurn } from '../memory/conversation.js';
-import { saveConversationRef, sendProactiveMessage } from './notify.js';
+import { saveConversationRef, sendProactiveMessage, sanitizeForPrompt, buildAutoFixPrompt } from './notify.js';
 import { handleCardDAV } from '../tools/impl/carddav.js';
 import {
   handleOAuthAuthorize,
@@ -349,6 +349,30 @@ Message: "${userText}"
       retryTask = crmTask; retryTaskType = 'crm';
       ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false }));
 
+    } else if (intent === 'ops_alert') {
+      // A system/watchdog alert was posted or pasted into live chat (see
+      // teams/router.js's isOpsAlertLike). Run the same investigate-and-fix
+      // workflow as scheduler/cron.js's unattended self_heal_watcher, but
+      // attended — Michael is in this conversation, so unlike auto_fix's
+      // cron-triggered runs there's no need for a hardcoded suppressSelfHeal
+      // Teams send here; the normal remember(result) below reports back.
+      // Sanitized + tag-wrapped the same way notify.js's enqueueSelfHeal does
+      // before it reaches cron.js's prompt, even though this text usually
+      // comes from Michael directly (not aggregated third-party data) —
+      // pasted/forwarded alert text can still carry an embedded API error
+      // body or similar external content worth treating as data, not
+      // instructions. extraMessages (raw prior turns) is deliberately NOT
+      // passed here, unlike the crm/dev branches — those turns were never
+      // run through sanitizeForPrompt, so mixing them into a taskType with
+      // file-edit/branch/PR tools would hand auto_fix unprotected content
+      // with equal standing to the hardened current-turn text above. Same
+      // reasoning the scheduling branch already uses to skip extraMessages,
+      // just for a trust-boundary reason here instead of a noise reason.
+      const safeAlertText = sanitizeForPrompt(userText);
+      const opsAlertTask = buildAutoFixPrompt(safeAlertText, 'live-chat');
+      retryTask = opsAlertTask; retryTaskType = 'auto_fix';
+      ({ result } = await runAgent({ task: opsAlertTask, taskType: 'auto_fix', saveContext: false }));
+
     } else if (intent === 'dev') {
       const devTask = `Michael sent this Teams message:\n\n"${userText}"\n\nFollow the github-dev skill workflow. Reply with a scope proposal:\n- Restate the goal in 2-3 sentences\n- List the files that will be created or changed\n- Identify which repo this belongs in\n- State any assumptions\n- Ask Michael to confirm before you proceed\n\nDo not write any code yet. Return only the reply text.`;
       retryTask = devTask; retryTaskType = 'code';
@@ -367,8 +391,15 @@ Message: "${userText}"
 
     // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
     // Check the backoff timer directly to detect if SA was blocked mid-run.
+    // auto_fix's tool set (registry.js TOOL_MAP) never includes SA tools, so
+    // it structurally cannot have been the thing blocked — treat it as never
+    // backed off. Without this, a stale/unrelated SA backoff (possibly from
+    // the very outage this ops_alert investigation was reporting on) would
+    // discard an already-completed result — which may include an opened PR —
+    // and tell Michael it's "queued for retry," a false status that hides
+    // finished work and would trigger a fully redundant second run later.
     const { getSABackoffUntil } = await import('../tools/impl/serviceautopilot.js');
-    const backoffUntil = getSABackoffUntil();
+    const backoffUntil = retryTaskType === 'auto_fix' ? 0 : getSABackoffUntil();
     if (backoffUntil > Date.now()) {
       const runAfter = new Date(backoffUntil).toISOString();
       const remainingMin = Math.ceil((backoffUntil - Date.now()) / 60000);
