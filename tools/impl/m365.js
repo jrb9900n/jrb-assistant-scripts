@@ -37,11 +37,11 @@ async function getToken() {
 }
 
 
-export async function graph(method, path, data) {
+export async function graph(method, path, data, extraHeaders) {
   const token = await getToken();
   const url = path.startsWith('http') ? path : `${GRAPH}${path}`;
   try {
-    const res = await axios({ method, url, data, headers: { Authorization: `Bearer ${token}` } });
+    const res = await axios({ method, url, data, headers: { Authorization: `Bearer ${token}`, ...extraHeaders } });
     return res.data;
   } catch (err) {
     const body = err.response?.data;
@@ -239,7 +239,7 @@ export async function getEmailAttachmentBytes({ email_id, attachment_id, userEma
   return Buffer.from(data.contentBytes, 'base64');
 }
 
-export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate, categories } = {}) {
+export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate, categories, location } = {}) {
   const user = userEmail ?? USER();
   const event = {
     subject,
@@ -253,6 +253,9 @@ export async function createCalendarEvent({ subject, start, end, body = '', time
   // for the same field, so the two functions apply consistent semantics to
   // an identical parameter rather than silently diverging on `categories: []`.
   if (categories !== undefined) event.categories = categories;
+  // Same optional-field convention as categories -- only included in the
+  // Graph payload when the caller actually passes something.
+  if (location) event.location = { displayName: location };
   if (recurrenceDaysOfWeek?.length) {
     event.recurrence = {
       pattern: { type: 'weekly', interval: 1, daysOfWeek: recurrenceDaysOfWeek },
@@ -395,11 +398,16 @@ export async function listCalendarEvents({ userEmail, startDateTime, endDateTime
   }));
 }
 
-export async function updateCalendarEvent({ userEmail, event_id, subject, start, end, body, timezone = 'America/Chicago', categories } = {}) {
+export async function updateCalendarEvent({ userEmail, event_id, subject, start, end, body, bodyContentType = 'text', timezone = 'America/Chicago', categories } = {}) {
   const user = userEmail ?? USER();
   const patch = {};
   if (subject)         patch.subject = subject;
-  if (body)            patch.body = { contentType: 'text', content: body };
+  // bodyContentType defaults to 'text' (unchanged default behavior) but callers
+  // appending to an existing body must pass whatever contentType that body
+  // already has (from getCalendarEvent) -- hardcoding 'text' here would silently
+  // downgrade an 'html' body, causing Outlook to render its markup as literal
+  // escaped text on the next PATCH.
+  if (body)            patch.body = { contentType: bodyContentType, content: body };
   if (start)           patch.start = { dateTime: start, timeZone: timezone };
   if (end)             patch.end   = { dateTime: end,   timeZone: timezone };
   // `!== undefined`, not `?.length` -- an explicit [] must still patch through
@@ -414,6 +422,74 @@ export async function deleteCalendarEvent({ userEmail, event_id } = {}) {
   const user = userEmail ?? USER();
   await graph('DELETE', `/users/${user}/events/${event_id}`);
   return { deleted: true, event_id };
+}
+
+/**
+ * Fetch a single event's full body content (listCalendarEvents/calendarView only
+ * return a 300-char-truncated bodyPreview, never the real body). Used by the
+ * estimate-visit to-do injection to read + append to a protected block's notes
+ * without clobbering whatever's already there.
+ */
+export async function getCalendarEvent({ event_id, userEmail, timezone = 'America/Chicago' } = {}) {
+  const user = userEmail ?? USER();
+  // Same Prefer header as getCalendarViewWithCategories, for the same reason:
+  // without it, start/end come back in UTC while every other calendar
+  // function in this codebase works in America/Chicago wall-clock terms --
+  // a caller comparing this event's start/end against one of those would
+  // silently be comparing across a several-hour offset.
+  const data = await graph(
+    'GET',
+    `/users/${user}/events/${event_id}?$select=id,subject,body,start,end,categories`,
+    undefined,
+    { Prefer: `outlook.timezone="${timezone}"` }
+  );
+  return {
+    id:          data.id,
+    subject:     data.subject,
+    start:       data.start?.dateTime,
+    end:         data.end?.dateTime,
+    categories:  data.categories ?? [],
+    content:     data.body?.content ?? '',
+    contentType: data.body?.contentType ?? 'text',
+  };
+}
+
+/**
+ * calendarView read with categories + occurrence identity included (the plain
+ * listCalendarEvents $select omits both). Used by the estimate-visit
+ * displacement check to classify JRB Block Schedule overlaps, and to locate
+ * the next "Estimating / Proposal Production" occurrence for the to-do
+ * injection step.
+ *
+ * Passes Prefer: outlook.timezone so both the startDateTime/endDateTime query
+ * params AND the returned start/end values are interpreted in the same local
+ * time zone as createCalendarEvent's default -- otherwise Graph treats the
+ * query window as UTC while the visit's own start/end were built as
+ * America/Chicago wall-clock strings, silently shifting the overlap window
+ * by several hours.
+ *
+ * Graph's calendarView already expands recurring series into individual
+ * occurrences, each with its own event id distinct from the series master's
+ * -- exactly the id a caller needs to PATCH/DELETE just one occurrence.
+ */
+export async function getCalendarViewWithCategories({ userEmail, startDateTime, endDateTime, timezone = 'America/Chicago', limit = 100 } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph(
+    'GET',
+    `/users/${user}/calendarView?startDateTime=${startDateTime}&endDateTime=${endDateTime}&$top=${limit}&$select=id,subject,start,end,categories,seriesMasterId,type&$orderby=start/dateTime`,
+    undefined,
+    { Prefer: `outlook.timezone="${timezone}"` }
+  );
+  return (data.value ?? []).map(e => ({
+    id:             e.id,
+    subject:        e.subject,
+    start:          e.start?.dateTime,
+    end:            e.end?.dateTime,
+    timezone:       e.start?.timeZone,
+    categories:     e.categories ?? [],
+    seriesMasterId: e.seriesMasterId ?? null,
+    type:           e.type ?? null, // 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster'
+  }));
 }
 
 // ── SharePoint (via Microsoft Graph API — Sites.Read.All) ─────

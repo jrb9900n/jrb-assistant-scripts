@@ -344,6 +344,7 @@ Message: "${userText}"
 - If Michael asks to provision CardDAV for an employee: use carddav_provision with their email and name. Return the server URL, username, and token with iOS/Android setup instructions.
 - If Michael asks to revoke CardDAV for an employee: use carddav_revoke with their email.
 - If Michael asks to list CardDAV credentials: use carddav_list.
+- If Michael asks to schedule/book an estimate visit with a client: use schedule_estimate_visit. If it comes back needs_clarification, ask him which client he means instead of guessing.
 - Always confirm what you did: client name, SA IDs, actions taken.`;
       retryTask = crmTask; retryTaskType = 'crm';
       ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false }));
