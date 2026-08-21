@@ -257,6 +257,32 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 1:45 PM — Sales Pipeline / BD report, ahead of the 2:00-3:00 PM
+    // "Outbound Sales / Business Development" calendar block. 'bd' mode leads
+    // with pipeline-by-stage + win rate/deal size (sales health, prospecting
+    // framing); the follow-up call queue is shown condensed. See
+    // tools/impl/sales-pipeline-report.js and the PR description for the full
+    // timing rationale (one shared generator, two cron entries).
+    schedule: '45 13 * * 1',
+    name: 'sales_pipeline_report_bd',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendSalesPipelineReport } = await import('../tools/impl/sales-pipeline-report.js');
+        const result = await generateAndSendSalesPipelineReport({ mode: 'bd' });
+        logger.info('sales_pipeline_report_bd: done', result);
+      } catch (err) {
+        logger.error('sales_pipeline_report_bd: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Sales Pipeline / BD Report (Monday Business Development) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('sales_pipeline_report_bd: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Wednesday 9:30 AM — Accounts Payable report, ahead of the 9:45-10:45 AP
     // calendar block. Live QBO Bill query each run (see getAPAgingReport in
     // quickbooks.js) rather than a Supabase-cached source, so no AME/SA lock
@@ -276,6 +302,30 @@ const SCHEDULED_TASKS = [
           await sendProactiveMessage(`Accounts Payable Report FAILED to send. Error: ${err.message}`);
         } catch (notifyErr) {
           logger.error('ap_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Thursday 8:45 AM — Sales Pipeline / BD report, ahead of the 9:00-10:00 AM
+    // "Outbound Sales / Lead Follow-Up" calendar block. 'followup' mode leads
+    // with the full overdue follow-up call queue (working the existing
+    // pipeline framing) rather than the BD/prospecting-health framing above.
+    schedule: '45 8 * * 4',
+    name: 'sales_pipeline_report_followup',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendSalesPipelineReport } = await import('../tools/impl/sales-pipeline-report.js');
+        const result = await generateAndSendSalesPipelineReport({ mode: 'followup' });
+        logger.info('sales_pipeline_report_followup: done', result);
+      } catch (err) {
+        logger.error('sales_pipeline_report_followup: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Sales Pipeline / BD Report (Thursday Lead Follow-Up) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('sales_pipeline_report_followup: Teams alert also failed', { err: notifyErr.message });
         }
       }
     },
