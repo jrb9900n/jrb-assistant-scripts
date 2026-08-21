@@ -156,27 +156,88 @@ export async function getPaymentsForWeek(startDate, endDate) {
 }
 
 /**
+ * Pages through a QBO query for a given entity + WHERE clause, following the
+ * same STARTPOSITION/PAGE_SIZE/MAX_PAGES defensive-cap pattern that
+ * getVendorBillsForPeriod (below) originally hand-rolled just for Bill —
+ * generalized here so getARAgingReport/getAPAgingReport (Balance > '0') and
+ * getVendorBillsForPeriod (TxnDate range) share one pagination implementation
+ * instead of drifting apart. Confirmed live 2026-08-21 that the *unpaginated*
+ * single-query version getARAgingReport/getAPAgingReport used before this
+ * (a single MAXRESULTS 300 call) was already silently hitting that exact cap
+ * in production for AR (bucket counts summed to precisely 300), meaning the
+ * weekly AR/Collections email had been under-reporting total AR for some
+ * unknown period. Fixed by routing both through this paginated helper.
+ */
+async function paginatedQuery(entity, whereClause) {
+  const PAGE_SIZE = 300;
+  const MAX_PAGES = 100; // real bill/invoice volume for one company never legitimately needs more pages than this
+  let rows = [];
+  let pageCount = 0;
+  for (let start = 1; ; start += PAGE_SIZE) {
+    if (++pageCount > MAX_PAGES) {
+      logger.warn('paginatedQuery: hit MAX_PAGES safety cap, stopping', { entity, whereClause, rowsSoFar: rows.length });
+      break;
+    }
+    const q = `SELECT * FROM ${entity} WHERE ${whereClause} STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
+    const res = await query({ query: q });
+    const page = res?.[entity] ?? [];
+    rows = rows.concat(page);
+    if (page.length < PAGE_SIZE) break;
+  }
+  return rows;
+}
+
+async function fetchAllOpenBalance(entity) {
+  return paginatedQuery(entity, "Balance > '0'");
+}
+
+/**
+ * Shared aging-bucket mechanics for getARAgingReport/getAPAgingReport: given
+ * an array of records that already carry { balance, ageDays }, buckets them
+ * by age, sorts each bucket by balance desc, and derives the $500+/60d+
+ * "flagged" list. Extracted so the AR and AP aging paths can't silently drift
+ * apart on bucket boundaries, sort order, or the flag threshold.
+ */
+function bucketOpenTransactionsByAge(records) {
+  const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [] };
+  let total = 0;
+
+  for (const record of records) {
+    total += record.balance;
+    if (record.ageDays <= 0)        buckets.current.push(record);
+    else if (record.ageDays <= 30)  buckets.d30.push(record);
+    else if (record.ageDays <= 60)  buckets.d60.push(record);
+    else if (record.ageDays <= 90)  buckets.d90.push(record);
+    else                             buckets.d120plus.push(record);
+  }
+
+  for (const b of Object.values(buckets)) b.sort((a, c) => c.balance - a.balance);
+
+  const flagged = [...buckets.d60, ...buckets.d90, ...buckets.d120plus]
+    .filter(r => r.balance >= 500)
+    .sort((a, b) => b.balance - a.balance);
+
+  return { buckets, flagged, total };
+}
+
+/**
  * Fetch all open QB invoices and bucket them by age.
  * Returns { buckets: { current, d30, d60, d90, d120plus }, flagged: [], total }
  * buckets contain arrays of invoice summaries.
  */
 export async function getARAgingReport() {
-  const res = await query({ query: 'SELECT * FROM Invoice WHERE Balance > \'0\' MAXRESULTS 300' });
-  const invoices = res?.Invoice ?? [];
+  const invoices = await fetchAllOpenBalance('Invoice');
   const today = new Date();
 
-  const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [] };
-  let total = 0;
-
+  const records = [];
   for (const inv of invoices) {
     const balance = Number(inv.Balance ?? 0);
     if (balance <= 0) continue;
-    total += balance;
 
     const dueDate = inv.DueDate ? new Date(inv.DueDate) : new Date(inv.TxnDate);
     const ageDays = Math.floor((today - dueDate) / 86400000);
 
-    const record = {
+    records.push({
       id: inv.Id,
       invoiceNum: inv.DocNumber,
       customer: inv.CustomerRef?.name ?? '—',
@@ -185,23 +246,61 @@ export async function getARAgingReport() {
       txnDate: inv.TxnDate,
       ageDays,
       memo: inv.PrivateNote ?? '',
-    };
-
-    if (ageDays <= 0)        buckets.current.push(record);
-    else if (ageDays <= 30)  buckets.d30.push(record);
-    else if (ageDays <= 60)  buckets.d60.push(record);
-    else if (ageDays <= 90)  buckets.d90.push(record);
-    else                     buckets.d120plus.push(record);
+    });
   }
 
-  // Sort each bucket by balance desc
-  for (const b of Object.values(buckets)) b.sort((a, c) => c.balance - a.balance);
+  return bucketOpenTransactionsByAge(records);
+}
 
-  const flagged = [...buckets.d60, ...buckets.d90, ...buckets.d120plus]
-    .filter(r => r.balance >= 500)
-    .sort((a, b) => b.balance - a.balance);
+/**
+ * Fetch all open QB vendor Bills and bucket them by age, mirroring
+ * getARAgingReport()'s exact bucket-and-return-shape convention above (AP's
+ * equivalent of Invoice). Also surfaces each bill's DocNumber, per-line
+ * amount total (lineTotal), and separately-tracked sales tax (taxAmt) so
+ * callers can detect duplicate bills / bills whose line items + tax don't
+ * sum to TotalAmt without a second QB round-trip. (QBO Bills carry sales tax
+ * in TxnTaxDetail.TotalTax, never as part of the Line array itself — a
+ * lineTotal-vs-TotalAmt comparison that ignores this would flag every
+ * legitimately taxed bill as a false "discrepancy".)
+ * Returns { buckets: { current, d30, d60, d90, d120plus }, flagged: [], total }
+ * buckets contain arrays of bill summaries.
+ */
+export async function getAPAgingReport() {
+  const bills = await fetchAllOpenBalance('Bill');
+  // Truncated to UTC midnight (not a raw "now" instant) so ageDays lines up
+  // exactly with callers that compute "today" the same way (e.g. ap-report.js's
+  // "bills due in the coming week" filter) — both then agree on what counts
+  // as "today" regardless of what hour the cron/manual run fires at.
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
-  return { buckets, flagged, total };
+  const records = [];
+  for (const b of bills) {
+    const balance = Number(b.Balance ?? 0);
+    if (balance <= 0) continue;
+
+    const dueDate = b.DueDate ? new Date(b.DueDate) : new Date(b.TxnDate);
+    const ageDays = Math.floor((today - dueDate) / 86400000);
+    const totalAmt = Number(b.TotalAmt ?? 0);
+    const lineTotal = (b.Line ?? []).reduce((s, l) => s + Number(l.Amount ?? 0), 0);
+    const taxAmt = Number(b.TxnTaxDetail?.TotalTax ?? 0);
+
+    records.push({
+      id: b.Id,
+      docNumber: b.DocNumber ?? null,
+      vendor: b.VendorRef?.name ?? '—',
+      balance,
+      totalAmt,
+      lineTotal,
+      taxAmt,
+      dueDate: b.DueDate ?? b.TxnDate,
+      txnDate: b.TxnDate,
+      ageDays,
+      memo: b.PrivateNote ?? '',
+    });
+  }
+
+  return bucketOpenTransactionsByAge(records);
 }
 
 /**
@@ -406,28 +505,14 @@ export async function createQBCCSubAccount(employeeName, lastFour) {
  * for a given job. No caller in this codebase queried Bill before this.
  */
 export async function getVendorBillsForPeriod(startDate, endDate) {
-  const PAGE_SIZE = 300;
-  // Defensive cap — this loop previously ran unbounded (crashed the process
-  // with an OOM) when a cache-key collision made every "page" replay the same
-  // cached first page forever, so page.length < PAGE_SIZE never fired. That
-  // root cause is fixed (see query()'s cache key), but this is real vendor
-  // bill volume for one company; there's no legitimate scenario needing more
-  // than this many pages, so bail loudly rather than risk the same failure
-  // mode again from some other cause.
-  const MAX_PAGES = 100;
-  let bills = [];
-  let pageCount = 0;
-  for (let start = 1; ; start += PAGE_SIZE) {
-    if (++pageCount > MAX_PAGES) {
-      logger.warn('getVendorBillsForPeriod: hit MAX_PAGES safety cap, stopping', { startDate, endDate, billsSoFar: bills.length });
-      break;
-    }
-    const q = `SELECT * FROM Bill WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
-    const res = await query({ query: q });
-    const page = res?.Bill ?? [];
-    bills = bills.concat(page);
-    if (page.length < PAGE_SIZE) break;
-  }
+  // Defensive cap on page count lives in the shared paginatedQuery() helper
+  // now (see its comment above) — this loop previously ran unbounded
+  // (crashed the process with an OOM) when a cache-key collision made every
+  // "page" replay the same cached first page forever, so page.length <
+  // PAGE_SIZE never fired. That root cause is fixed (see query()'s cache
+  // key), but real vendor bill volume for one company never legitimately
+  // needs more pages than the shared cap allows.
+  const bills = await paginatedQuery('Bill', `TxnDate >= '${startDate}' AND TxnDate <= '${endDate}'`);
 
   return bills.map(b => ({
     id: b.Id,
@@ -509,4 +594,126 @@ export function matchBillsToJob(job, bills) {
     }
   }
   return matches;
+}
+
+// ── Cash forecast support (12-Week Cash Forecast report) ───────────────────
+
+/**
+ * Real starting-cash figure for the cash forecast report: sums CurrentBalance
+ * across every QBO Account with AccountType 'Bank' (checking/savings). This is
+ * a real QBO balance, not a fabricated one — but NOT guaranteed to be
+ * second-fresh: it goes through query()'s shared Supabase cache (see query()
+ * above), so if anything else in this codebase issued the exact same query
+ * within the last CACHE_TTL_SECONDS (1hr default), this returns that cached
+ * result rather than re-hitting QBO. That's an intentional rate-limit
+ * tradeoff shared by every other reporting function in this file — acceptable
+ * for a weekly report, just not literally "as of this exact second."
+ * Also deliberately does NOT attempt a full balance-sheet reconciliation
+ * (e.g. outstanding/uncleared transactions, undeposited funds) — that's a
+ * much larger effort than a directional weekly cash forecast needs.
+ */
+export async function getCashBalance() {
+  const res = await query({ query: "SELECT * FROM Account WHERE AccountType = 'Bank'" });
+  const accounts = (res?.Account ?? []).map(a => ({
+    id: a.Id,
+    name: a.Name,
+    balance: Number(a.CurrentBalance ?? 0),
+  }));
+  const total = accounts.reduce((s, a) => s + a.balance, 0);
+  return { total, accounts };
+}
+
+/**
+ * Minimal standalone "bills due" query for the cash forecast report.
+ *
+ * Deliberately NOT the same thing as the fuller getAPAgingReport() being
+ * built on the separate (unmerged, as of this writing) claude/ap-report
+ * branch — this repo must stay independently mergeable, so this queries
+ * open Bills directly rather than depending on that branch's helpers
+ * (fetchAllOpenBalance/bucketOpenTransactionsByAge). Revisit whether this
+ * should be replaced by getAPAgingReport() once that branch merges.
+ *
+ * Single-page query (MAXRESULTS 1000) — real open-bill volume for this
+ * company is currently in the dozens (see getVendorBillsForPeriod's
+ * paginated pattern above if that ever changes and this needs to grow up).
+ */
+export async function getOpenBillsForForecast() {
+  const res = await query({ query: "SELECT * FROM Bill WHERE Balance > '0' MAXRESULTS 1000" });
+  const bills = res?.Bill ?? [];
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+
+  return bills.map(b => {
+    const dueDate = b.DueDate ? new Date(b.DueDate) : new Date(b.TxnDate);
+    const ageDays = Math.floor((today - dueDate) / 86400000);
+    return {
+      id: b.Id,
+      vendor: b.VendorRef?.name ?? b.VendorAddr?.Line1 ?? '—',
+      balance: Number(b.Balance ?? 0),
+      dueDate: b.DueDate ?? b.TxnDate,
+      ageDays, // positive = overdue, negative = not yet due
+    };
+  });
+}
+
+/**
+ * Heuristic weekly payroll cash-outflow estimate for the cash forecast report.
+ *
+ * QuickBooks Payroll has its own separate API/scopes for pay schedules and
+ * run history (payroll.tools.* on the Payroll product) — this integration's
+ * QBO app is only authorized for the regular Accounting API, so there is no
+ * direct read of ADP/QBO Payroll's actual pay calendar available here.
+ *
+ * Instead: every actual payroll run shows up as a real cash-ledger posting to
+ * the "Payroll Payable" account (confirmed live against production data,
+ * e.g. $13,996.66 on 2026-07-10, $20,987.99 on 2026-07-17, ... — the clearing
+ * account for net wages actually paid out). Summing those postings over a
+ * trailing window and dividing by the number of weeks gives a real-data-
+ * derived average weekly payroll cash outflow — smoothed, not a real pay
+ * calendar, and explicitly documented as such in the report email.
+ *
+ * Deliberately excludes employer payroll taxes / ADP fees / benefits lines
+ * (posted to separate accounts like "Payroll Tax Expense") — those aren't
+ * always cash-same-week as the net-pay run, and mixing them in would make
+ * this number harder to sanity-check against a bank statement. If they're
+ * billed via a vendor Bill they're already covered by getOpenBillsForForecast();
+ * if not, they're a known gap (see report email assumptions).
+ */
+export async function getPayrollCashOutflowEstimate({ lookbackDays = 56 } = {}) {
+  const cutoff = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10);
+
+  // Paginated like getVendorBillsForPeriod above — a single MAXRESULTS-300
+  // page silently truncated real data here (confirmed live: JRB's card-heavy
+  // Purchase volume, see the expense capture system, hit exactly 300 rows in
+  // a 120-day window during development), which would have quietly
+  // undercounted "Payroll Payable" postings and understated every week's
+  // payroll line with no warning anywhere in the report.
+  const PAGE_SIZE = 300;
+  const MAX_PAGES = 20; // 6,000 purchases in an 8-week window would be a real anomaly, not legitimate volume
+  let purchases = [];
+  let pageCount = 0;
+  for (let start = 1; ; start += PAGE_SIZE) {
+    if (++pageCount > MAX_PAGES) {
+      logger.warn('getPayrollCashOutflowEstimate: hit MAX_PAGES safety cap, stopping', { lookbackDays, purchasesSoFar: purchases.length });
+      break;
+    }
+    const q = `SELECT * FROM Purchase WHERE TxnDate >= '${cutoff}' STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
+    const res = await query({ query: q });
+    const page = res?.Purchase ?? [];
+    purchases = purchases.concat(page);
+    if (page.length < PAGE_SIZE) break;
+  }
+
+  let sampleTotal = 0;
+  let txnCount = 0;
+  for (const p of purchases) {
+    for (const l of (p.Line ?? [])) {
+      if (l.AccountBasedExpenseLineDetail?.AccountRef?.name === 'Payroll Payable') {
+        sampleTotal += Number(l.Amount ?? 0);
+        txnCount += 1;
+      }
+    }
+  }
+  const lookbackWeeks = lookbackDays / 7;
+  const weeklyAverage = txnCount > 0 ? sampleTotal / lookbackWeeks : 0;
+  return { weeklyAverage, lookbackDays, lookbackWeeks, sampleTotal, txnCount };
 }
