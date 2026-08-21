@@ -311,6 +311,177 @@ export async function getAPAgingReport(company = 'jrb') {
   return bucketOpenTransactionsByAge(records);
 }
 
+// QBO's own aging-bucket labels on the AgedPayableDetail/AgedReceivableDetail
+// reports (Reports API), mapped to this codebase's current/d30/d60/d90/d120plus
+// convention. Lowercased before lookup — QBO's casing has been stable in
+// practice but there's no reason to depend on it holding forever.
+const AGED_REPORT_BUCKET_MAP = {
+  'current': 'current',
+  '1 - 30 days past due': 'd30',
+  '31 - 60 days past due': 'd60',
+  '61 - 90 days past due': 'd90',
+  '91 or more days past due': 'd120plus',
+};
+
+/**
+ * Fetches QBO's own AgedPayableDetail/AgedReceivableDetail report AS OF a
+ * specific historical date — genuinely different from getAPAgingReport()/
+ * getARAgingReport() above, which only ever reflect CURRENT balances. A bill
+ * paid on 9/5 shows $0 balance today even if it was fully open on 8/31; only
+ * QBO's own report engine correctly reconstructs what was actually
+ * outstanding as of a past date (it knows the payment's real application
+ * date). Needed for monthly bank submissions, which report a balance "as of"
+ * a stated date, not "as of whenever we happened to run this."
+ *
+ * QBO's Reports API returns a deeply nested Header/Columns/Rows/Summary
+ * structure (completely different from the flat array the SQL-like `query()`
+ * endpoint returns elsewhere in this file) — one Section per aging bucket,
+ * each with its own Rows.Row[] of line items and a Summary subtotal. Column
+ * order is assumed stable in practice but this parses by ColKey (from the
+ * Columns metadata) rather than positional index, so a reordering wouldn't
+ * silently scramble which field is which.
+ *
+ * Returns { asOfDate, buckets: { current, d30, d60, d90, d120plus, writeOffCandidate }, total }
+ * — same current/d30/d60/d90/d120plus bucket shape as getAPAgingReport()/
+ * getARAgingReport() (so callers can reuse existing bucket-rendering code),
+ * plus one addition: `writeOffCandidate` splits out of QBO's own "91+ days"
+ * bucket anything more than `writeOffThresholdDays` past due (by dueDate,
+ * falling back to txnDate) as of asOfDate. The threshold defaults to 365 but
+ * is a caller-supplied param, not a fact about QBO — it's a business-policy
+ * decision (bank-monthly-report.js passes it explicitly), and this shared
+ * QBO data-access module has no business hardcoding one report's policy.
+ * Confirmed live 2026-08-21 this split matters in practice, for two
+ * different reasons: JRB's real AR contained ~$4.08M across 488 receivables
+ * all dated the exact same day (2023-08-20) — an unmistakable QuickBooks
+ * data-conversion artifact, not real business from one day — plus another
+ * ~$918K of genuinely old (but not conversion-dump) pre-2024 AR; JRB's AP
+ * separately had ~$12.6K of real, legitimate Sealmaster bills simply unpaid
+ * for 1.5+ years. Different root causes, same fix: a bank report presenting
+ * either as normal current-cycle AR/AP would be materially misleading.
+ * `total` still reflects QBO's own full figure (including writeOffCandidate)
+ * — this function stays a faithful mirror of QBO; it's the caller's job to
+ * decide whether to headline the full total or the total minus
+ * writeOffCandidate.
+ *
+ * A record with no usable due/txn date inside the "91+" bucket is treated as
+ * an *unbounded* age (Infinity), not age-zero — QBO already placed it in the
+ * oldest bucket, so an unparseable date is a reason for MORE suspicion, not
+ * less; defaulting it to "0 days old" would silently un-flag exactly the
+ * kind of row this split exists to catch.
+ *
+ * Deliberately does NOT reuse bucketOpenTransactionsByAge() (used by
+ * getAPAgingReport/getARAgingReport above) — that helper buckets a flat,
+ * unbucketed list of live records by computed age; this function's input is
+ * the opposite shape (QBO's Reports API hands back pre-bucketed sections
+ * already labeled by aging range), so there's nothing to bucket, only to
+ * parse and re-sort.
+ *
+ * No pagination handling: unlike query()'s /query endpoint (which silently
+ * truncates at 300 rows per page without paginatedQuery()), QBO's Reports
+ * API returns the complete report in one response — confirmed empirically
+ * 2026-08-21 with a 1,396-row AgedReceivableDetail response containing no
+ * truncation flag and no MAXRESULTS-style cap in Header.Option.
+ *
+ * Each record: { name (vendor or customer), txnDate, txnType, docNumber,
+ * dueDate, balance, totalAmt }.
+ */
+export async function getAgedReportAsOf({ reportName, asOfDate, company = 'jrb', writeOffThresholdDays = 365 }) {
+  const token = await getToken(company);
+  const realmId = getQBRealmId(company);
+  // getQBRealmId() itself stays permissive (returns null) rather than
+  // throwing — scheduler/cron.js's qb_health_check relies on that to skip
+  // alerting about a company that isn't configured yet. Checking here
+  // instead turns "silently build a /company/null/... URL that 400s with an
+  // opaque Intuit error" into a clear, immediately-diagnosable failure.
+  if (!realmId) {
+    throw new Error(`getAgedReportAsOf: no realm ID configured for QB company "${company}" — check QB_REALM_ID${company === 'jrb' ? '' : '_' + company.toUpperCase()} / the company's token meta file`);
+  }
+  const res = await axios.get(`https://quickbooks.api.intuit.com/v3/company/${realmId}/reports/${reportName}`, {
+    params: { report_date: asOfDate, minorversion: 65 },
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
+    timeout: 20_000, // no client-side timeout otherwise — a hung Intuit response would never resolve or reject, and the once-a-month bank report has no other recovery path
+  });
+
+  const columns = res.data?.Columns?.Column ?? [];
+  const colKeys = columns.map(c => c.MetaData?.find(m => m.Name === 'ColKey')?.Value ?? c.ColTitle);
+  const idx = key => colKeys.indexOf(key);
+  const nameIdx = colKeys.includes('vend_name') ? idx('vend_name') : idx('cust_name');
+  const txnDateIdx = idx('tx_date');
+  const txnTypeIdx = idx('txn_type');
+  const docNumIdx = idx('doc_num');
+  const dueDateIdx = idx('due_date');
+  // AP's amount/balance columns are prefixed "subt_neg_" (QBO's ledger sign
+  // convention for payables); AR's are not. Whichever pair the report
+  // actually has, use it — never assume which report we're parsing.
+  const balIdx = colKeys.includes('subt_neg_open_bal') ? idx('subt_neg_open_bal') : idx('subt_open_bal');
+  const amtIdx = colKeys.includes('subt_neg_amount') ? idx('subt_neg_amount') : idx('subt_amount');
+
+  // If QBO ever renames/drops a ColKey this parses against, fail loudly here
+  // rather than silently: every cd[-1] lookup below would return undefined,
+  // every balance would coerce to 0, every row would then be filtered out by
+  // "balance <= 0", and the function would return a clean-looking
+  // { total: 0 } with zero errors or warnings — exactly wrong for a report
+  // headed to a bank.
+  if (nameIdx === -1 || balIdx === -1) {
+    throw new Error(`getAgedReportAsOf: expected ColKey(s) not found in ${reportName} response (nameIdx=${nameIdx}, balIdx=${balIdx}) — QBO Reports API shape may have changed`);
+  }
+
+  const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [], writeOffCandidate: [] };
+  const asOfMs = new Date(asOfDate + 'T00:00:00Z').getTime();
+  const sections = res.data?.Rows?.Row ?? [];
+  for (const section of sections) {
+    const label = (section.Header?.ColData?.[0]?.value ?? '').toLowerCase().trim();
+    const bucketKey = AGED_REPORT_BUCKET_MAP[label];
+    if (!bucketKey) {
+      // QBO always appends its own report-wide grand-total row last (empty
+      // Header label, Summary.ColData[0] === "TOTAL", no line items) — not a
+      // missed bucket, nothing to warn about since there's no data in it to
+      // lose. Only warn for a genuinely unexpected *named* bucket label.
+      if (label) {
+        logger.warn('getAgedReportAsOf: unrecognized aging bucket label, skipping', { reportName, company, label });
+      }
+      continue;
+    }
+    for (const row of (section.Rows?.Row ?? [])) {
+      const cd = row.ColData ?? [];
+      const rawBalance = Number(cd[balIdx]?.value ?? 0);
+      if (!Number.isFinite(rawBalance)) {
+        logger.warn('getAgedReportAsOf: non-numeric balance value, skipping row', { reportName, company, raw: cd[balIdx]?.value });
+        continue;
+      }
+      const balance = Math.abs(rawBalance);
+      if (balance <= 0) continue;
+      const dueDate = cd[dueDateIdx]?.value || null;
+      const txnDate = cd[txnDateIdx]?.value || null;
+      const rawAmt = Number(cd[amtIdx]?.value);
+      const record = {
+        name: cd[nameIdx]?.value ?? '—',
+        txnDate,
+        txnType: cd[txnTypeIdx]?.value ?? null,
+        docNumber: cd[docNumIdx]?.value || null,
+        dueDate,
+        balance,
+        totalAmt: Number.isFinite(rawAmt) ? Math.abs(rawAmt) : balance,
+      };
+      // Only the "91+ days" bucket can possibly be old enough to qualify —
+      // no need to date-check current/d30/d60/d90 rows at all.
+      if (bucketKey === 'd120plus') {
+        const ageAnchor = dueDate || txnDate;
+        const ageDays = ageAnchor ? (asOfMs - new Date(ageAnchor + 'T00:00:00Z').getTime()) / 86400000 : Infinity;
+        if (ageDays > writeOffThresholdDays) {
+          buckets.writeOffCandidate.push(record);
+          continue;
+        }
+      }
+      buckets[bucketKey].push(record);
+    }
+  }
+  for (const b of Object.values(buckets)) b.sort((a, c) => c.balance - a.balance);
+  const total = Object.values(buckets).flat().reduce((s, r) => s + r.balance, 0);
+
+  return { asOfDate, buckets, total };
+}
+
 /**
  * Fetch QB invoices issued in a date range for revenue-by-category reporting.
  * Returns array categorized using simplified QB description rules.

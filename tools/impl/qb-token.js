@@ -55,6 +55,13 @@ export function listQBCompanies() {
   return Object.keys(QB_COMPANIES);
 }
 
+// Display label for a company key (e.g. 'transport' -> 'JRB Transport LLC'),
+// for callers that need to build a company list without hardcoding names
+// (e.g. a report covering "every configured company" generically).
+export function getQBCompanyLabel(company) {
+  return companyConfig(company).label;
+}
+
 function companyConfig(company) {
   const cfg = QB_COMPANIES[company];
   if (!cfg) throw new Error(`Unknown QB company "${company}" — expected one of: ${listQBCompanies().join(', ')}`);
