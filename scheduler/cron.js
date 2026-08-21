@@ -952,8 +952,16 @@ const SCHEDULED_TASKS = [
           const dedupeKey = `${e.id}:${e.lastModifiedDateTime}`;
           if (notifiedCalendarChangeIds.has(dedupeKey)) continue;
           if (e.isCancelled) { notifiedCalendarChangeIds.add(dedupeKey); continue; } // nothing to notify, but don't re-process forever
-          const when = e.start
-            ? new Date(e.start + 'Z').toLocaleString('en-US', { timeZone: 'America/Chicago', dateStyle: 'medium', timeStyle: 'short' })
+          // e.start is assumed to be a bare UTC dateTime string (confirmed
+          // live: Graph returns calendarView/delta times in UTC by default
+          // with no Prefer header sent). Guard the parse anyway -- an
+          // unexpected format would otherwise render as "Invalid Date" in
+          // the Teams message with no indication the time is unreliable,
+          // rather than the honest "unknown time" already used when e.start
+          // is missing entirely.
+          const parsedStart = e.start ? new Date(e.start + 'Z') : null;
+          const when = parsedStart && !isNaN(parsedStart.getTime())
+            ? parsedStart.toLocaleString('en-US', { timeZone: 'America/Chicago', dateStyle: 'medium', timeStyle: 'short' })
             : 'unknown time';
           const acceptedNote = e.responseStatus === 'accepted' && !e.isOrganizer ? ' (just accepted)' : '';
           try {
