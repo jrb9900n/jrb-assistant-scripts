@@ -282,6 +282,200 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 1:45 PM — Sales Pipeline / BD report, ahead of the 2:00-3:00 PM
+    // "Outbound Sales / Business Development" calendar block. 'bd' mode leads
+    // with pipeline-by-stage + win rate/deal size (sales health, prospecting
+    // framing); the follow-up call queue is shown condensed. See
+    // tools/impl/sales-pipeline-report.js and the PR description for the full
+    // timing rationale (one shared generator, two cron entries).
+    schedule: '45 13 * * 1',
+    name: 'sales_pipeline_report_bd',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendSalesPipelineReport } = await import('../tools/impl/sales-pipeline-report.js');
+        const result = await generateAndSendSalesPipelineReport({ mode: 'bd' });
+        logger.info('sales_pipeline_report_bd: done', result);
+      } catch (err) {
+        logger.error('sales_pipeline_report_bd: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Sales Pipeline / BD Report (Monday Business Development) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('sales_pipeline_report_bd: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Wednesday 9:30 AM — Accounts Payable report, ahead of the 9:45-10:45 AP
+    // calendar block. Live QBO Bill query each run (see getAPAgingReport in
+    // quickbooks.js) rather than a Supabase-cached source, so no AME/SA lock
+    // to wait on here.
+    schedule: '30 9 * * 3',
+    name: 'ap_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendAPReport } = await import('../tools/impl/ap-report.js');
+        const result = await generateAndSendAPReport();
+        logger.info('ap_report: done', result);
+      } catch (err) {
+        logger.error('ap_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Accounts Payable Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('ap_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Thursday 8:45 AM — Sales Pipeline / BD report, ahead of the 9:00-10:00 AM
+    // "Outbound Sales / Lead Follow-Up" calendar block. 'followup' mode leads
+    // with the full overdue follow-up call queue (working the existing
+    // pipeline framing) rather than the BD/prospecting-health framing above.
+    schedule: '45 8 * * 4',
+    name: 'sales_pipeline_report_followup',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendSalesPipelineReport } = await import('../tools/impl/sales-pipeline-report.js');
+        const result = await generateAndSendSalesPipelineReport({ mode: 'followup' });
+        logger.info('sales_pipeline_report_followup: done', result);
+      } catch (err) {
+        logger.error('sales_pipeline_report_followup: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Sales Pipeline / BD Report (Thursday Lead Follow-Up) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('sales_pipeline_report_followup: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Monday 12:45 PM — Marketing Performance report, ahead of the 1:00-2:00 PM
+    // Marketing Performance calendar block. Google Ads figures are fetched by
+    // shelling out to a small Python script that reuses the already-authenticated
+    // google-ads-agent daemon's client (see marketing-performance-ads-fetch.py) —
+    // that call degrades to an "unavailable" section on its own rather than
+    // throwing, so a daemon/venv hiccup doesn't block the SA-sourced won-job
+    // figures from still landing on time.
+    schedule: '45 12 * * 1',
+    name: 'marketing_performance_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendMarketingPerformanceReport } = await import('../tools/impl/marketing-performance-report.js');
+        const result = await generateAndSendMarketingPerformanceReport();
+        logger.info('marketing_performance_report: done', result);
+      } catch (err) {
+        logger.error('marketing_performance_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Marketing Performance Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('marketing_performance_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Weekdays 11:15 AM — Approvals Queue report, ahead of the 11:30 AM-12:00 PM
+    // Direct Report / Approval Window calendar block. v1 covers expense-report
+    // approvals only (see approvals-queue-report.js header comment for why QBO
+    // payroll time-off isn't included yet). Skips sending on a genuinely empty
+    // queue rather than mailing an "all clear" five days a week.
+    schedule: '15 11 * * 1-5',
+    name: 'approvals_queue_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendApprovalsQueueReport } = await import('../tools/impl/approvals-queue-report.js');
+        const result = await generateAndSendApprovalsQueueReport();
+        logger.info('approvals_queue_report: done', result);
+      } catch (err) {
+        logger.error('approvals_queue_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Approvals Queue Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('approvals_queue_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Tuesday 1:15 PM — Estimating Pipeline report, ahead of the Tue 1:30-4:30 PM
+    // "Estimating / Proposal Production" calendar block. Refreshed before EACH of
+    // the block's 3 weekly occurrences (Tue/Thu/Fri) rather than once a week —
+    // the backlog/aging numbers genuinely move day to day as estimates get built,
+    // sent, and won/lost, so a Monday-only snapshot would already be stale by
+    // Thursday. See PR description for the full timing rationale.
+    schedule: '15 13 * * 2',
+    name: 'estimating_pipeline_report_tue',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendEstimatingPipelineReport } = await import('../tools/impl/estimating-pipeline-report.js');
+        const result = await generateAndSendEstimatingPipelineReport({ blockLabel: "today's 1:30-4:30 PM Estimating/Proposal Production block" });
+        logger.info('estimating_pipeline_report_tue: done', result);
+      } catch (err) {
+        logger.error('estimating_pipeline_report_tue: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Estimating Pipeline Report (Tue) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('estimating_pipeline_report_tue: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Thursday 12:45 PM — same report, ahead of the Thu 1:00-4:30 PM occurrence.
+    schedule: '45 12 * * 4',
+    name: 'estimating_pipeline_report_thu',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendEstimatingPipelineReport } = await import('../tools/impl/estimating-pipeline-report.js');
+        const result = await generateAndSendEstimatingPipelineReport({ blockLabel: "today's 1:00-4:30 PM Estimating/Proposal Production block" });
+        logger.info('estimating_pipeline_report_thu: done', result);
+      } catch (err) {
+        logger.error('estimating_pipeline_report_thu: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Estimating Pipeline Report (Thu) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('estimating_pipeline_report_thu: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // Friday 12:45 PM — same report, ahead of the Fri 1:00-3:00 PM occurrence.
+    schedule: '45 12 * * 5',
+    name: 'estimating_pipeline_report_fri',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendEstimatingPipelineReport } = await import('../tools/impl/estimating-pipeline-report.js');
+        const result = await generateAndSendEstimatingPipelineReport({ blockLabel: "today's 1:00-3:00 PM Estimating/Proposal Production block" });
+        logger.info('estimating_pipeline_report_fri: done', result);
+      } catch (err) {
+        logger.error('estimating_pipeline_report_fri: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Estimating Pipeline Report (Fri) FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('estimating_pipeline_report_fri: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Sunday 11 PM — synthesize week's observations into reusable patterns
     schedule: '0 23 * * 0',
     name: 'weekly_synthesis',

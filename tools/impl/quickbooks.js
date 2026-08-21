@@ -156,27 +156,88 @@ export async function getPaymentsForWeek(startDate, endDate) {
 }
 
 /**
+ * Pages through a QBO query for a given entity + WHERE clause, following the
+ * same STARTPOSITION/PAGE_SIZE/MAX_PAGES defensive-cap pattern that
+ * getVendorBillsForPeriod (below) originally hand-rolled just for Bill —
+ * generalized here so getARAgingReport/getAPAgingReport (Balance > '0') and
+ * getVendorBillsForPeriod (TxnDate range) share one pagination implementation
+ * instead of drifting apart. Confirmed live 2026-08-21 that the *unpaginated*
+ * single-query version getARAgingReport/getAPAgingReport used before this
+ * (a single MAXRESULTS 300 call) was already silently hitting that exact cap
+ * in production for AR (bucket counts summed to precisely 300), meaning the
+ * weekly AR/Collections email had been under-reporting total AR for some
+ * unknown period. Fixed by routing both through this paginated helper.
+ */
+async function paginatedQuery(entity, whereClause) {
+  const PAGE_SIZE = 300;
+  const MAX_PAGES = 100; // real bill/invoice volume for one company never legitimately needs more pages than this
+  let rows = [];
+  let pageCount = 0;
+  for (let start = 1; ; start += PAGE_SIZE) {
+    if (++pageCount > MAX_PAGES) {
+      logger.warn('paginatedQuery: hit MAX_PAGES safety cap, stopping', { entity, whereClause, rowsSoFar: rows.length });
+      break;
+    }
+    const q = `SELECT * FROM ${entity} WHERE ${whereClause} STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
+    const res = await query({ query: q });
+    const page = res?.[entity] ?? [];
+    rows = rows.concat(page);
+    if (page.length < PAGE_SIZE) break;
+  }
+  return rows;
+}
+
+async function fetchAllOpenBalance(entity) {
+  return paginatedQuery(entity, "Balance > '0'");
+}
+
+/**
+ * Shared aging-bucket mechanics for getARAgingReport/getAPAgingReport: given
+ * an array of records that already carry { balance, ageDays }, buckets them
+ * by age, sorts each bucket by balance desc, and derives the $500+/60d+
+ * "flagged" list. Extracted so the AR and AP aging paths can't silently drift
+ * apart on bucket boundaries, sort order, or the flag threshold.
+ */
+function bucketOpenTransactionsByAge(records) {
+  const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [] };
+  let total = 0;
+
+  for (const record of records) {
+    total += record.balance;
+    if (record.ageDays <= 0)        buckets.current.push(record);
+    else if (record.ageDays <= 30)  buckets.d30.push(record);
+    else if (record.ageDays <= 60)  buckets.d60.push(record);
+    else if (record.ageDays <= 90)  buckets.d90.push(record);
+    else                             buckets.d120plus.push(record);
+  }
+
+  for (const b of Object.values(buckets)) b.sort((a, c) => c.balance - a.balance);
+
+  const flagged = [...buckets.d60, ...buckets.d90, ...buckets.d120plus]
+    .filter(r => r.balance >= 500)
+    .sort((a, b) => b.balance - a.balance);
+
+  return { buckets, flagged, total };
+}
+
+/**
  * Fetch all open QB invoices and bucket them by age.
  * Returns { buckets: { current, d30, d60, d90, d120plus }, flagged: [], total }
  * buckets contain arrays of invoice summaries.
  */
 export async function getARAgingReport() {
-  const res = await query({ query: 'SELECT * FROM Invoice WHERE Balance > \'0\' MAXRESULTS 300' });
-  const invoices = res?.Invoice ?? [];
+  const invoices = await fetchAllOpenBalance('Invoice');
   const today = new Date();
 
-  const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [] };
-  let total = 0;
-
+  const records = [];
   for (const inv of invoices) {
     const balance = Number(inv.Balance ?? 0);
     if (balance <= 0) continue;
-    total += balance;
 
     const dueDate = inv.DueDate ? new Date(inv.DueDate) : new Date(inv.TxnDate);
     const ageDays = Math.floor((today - dueDate) / 86400000);
 
-    const record = {
+    records.push({
       id: inv.Id,
       invoiceNum: inv.DocNumber,
       customer: inv.CustomerRef?.name ?? '—',
@@ -185,23 +246,61 @@ export async function getARAgingReport() {
       txnDate: inv.TxnDate,
       ageDays,
       memo: inv.PrivateNote ?? '',
-    };
-
-    if (ageDays <= 0)        buckets.current.push(record);
-    else if (ageDays <= 30)  buckets.d30.push(record);
-    else if (ageDays <= 60)  buckets.d60.push(record);
-    else if (ageDays <= 90)  buckets.d90.push(record);
-    else                     buckets.d120plus.push(record);
+    });
   }
 
-  // Sort each bucket by balance desc
-  for (const b of Object.values(buckets)) b.sort((a, c) => c.balance - a.balance);
+  return bucketOpenTransactionsByAge(records);
+}
 
-  const flagged = [...buckets.d60, ...buckets.d90, ...buckets.d120plus]
-    .filter(r => r.balance >= 500)
-    .sort((a, b) => b.balance - a.balance);
+/**
+ * Fetch all open QB vendor Bills and bucket them by age, mirroring
+ * getARAgingReport()'s exact bucket-and-return-shape convention above (AP's
+ * equivalent of Invoice). Also surfaces each bill's DocNumber, per-line
+ * amount total (lineTotal), and separately-tracked sales tax (taxAmt) so
+ * callers can detect duplicate bills / bills whose line items + tax don't
+ * sum to TotalAmt without a second QB round-trip. (QBO Bills carry sales tax
+ * in TxnTaxDetail.TotalTax, never as part of the Line array itself — a
+ * lineTotal-vs-TotalAmt comparison that ignores this would flag every
+ * legitimately taxed bill as a false "discrepancy".)
+ * Returns { buckets: { current, d30, d60, d90, d120plus }, flagged: [], total }
+ * buckets contain arrays of bill summaries.
+ */
+export async function getAPAgingReport() {
+  const bills = await fetchAllOpenBalance('Bill');
+  // Truncated to UTC midnight (not a raw "now" instant) so ageDays lines up
+  // exactly with callers that compute "today" the same way (e.g. ap-report.js's
+  // "bills due in the coming week" filter) — both then agree on what counts
+  // as "today" regardless of what hour the cron/manual run fires at.
+  const now = new Date();
+  const today = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 
-  return { buckets, flagged, total };
+  const records = [];
+  for (const b of bills) {
+    const balance = Number(b.Balance ?? 0);
+    if (balance <= 0) continue;
+
+    const dueDate = b.DueDate ? new Date(b.DueDate) : new Date(b.TxnDate);
+    const ageDays = Math.floor((today - dueDate) / 86400000);
+    const totalAmt = Number(b.TotalAmt ?? 0);
+    const lineTotal = (b.Line ?? []).reduce((s, l) => s + Number(l.Amount ?? 0), 0);
+    const taxAmt = Number(b.TxnTaxDetail?.TotalTax ?? 0);
+
+    records.push({
+      id: b.Id,
+      docNumber: b.DocNumber ?? null,
+      vendor: b.VendorRef?.name ?? '—',
+      balance,
+      totalAmt,
+      lineTotal,
+      taxAmt,
+      dueDate: b.DueDate ?? b.TxnDate,
+      txnDate: b.TxnDate,
+      ageDays,
+      memo: b.PrivateNote ?? '',
+    });
+  }
+
+  return bucketOpenTransactionsByAge(records);
 }
 
 /**
@@ -406,28 +505,14 @@ export async function createQBCCSubAccount(employeeName, lastFour) {
  * for a given job. No caller in this codebase queried Bill before this.
  */
 export async function getVendorBillsForPeriod(startDate, endDate) {
-  const PAGE_SIZE = 300;
-  // Defensive cap — this loop previously ran unbounded (crashed the process
-  // with an OOM) when a cache-key collision made every "page" replay the same
-  // cached first page forever, so page.length < PAGE_SIZE never fired. That
-  // root cause is fixed (see query()'s cache key), but this is real vendor
-  // bill volume for one company; there's no legitimate scenario needing more
-  // than this many pages, so bail loudly rather than risk the same failure
-  // mode again from some other cause.
-  const MAX_PAGES = 100;
-  let bills = [];
-  let pageCount = 0;
-  for (let start = 1; ; start += PAGE_SIZE) {
-    if (++pageCount > MAX_PAGES) {
-      logger.warn('getVendorBillsForPeriod: hit MAX_PAGES safety cap, stopping', { startDate, endDate, billsSoFar: bills.length });
-      break;
-    }
-    const q = `SELECT * FROM Bill WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
-    const res = await query({ query: q });
-    const page = res?.Bill ?? [];
-    bills = bills.concat(page);
-    if (page.length < PAGE_SIZE) break;
-  }
+  // Defensive cap on page count lives in the shared paginatedQuery() helper
+  // now (see its comment above) — this loop previously ran unbounded
+  // (crashed the process with an OOM) when a cache-key collision made every
+  // "page" replay the same cached first page forever, so page.length <
+  // PAGE_SIZE never fired. That root cause is fixed (see query()'s cache
+  // key), but real vendor bill volume for one company never legitimately
+  // needs more pages than the shared cap allows.
+  const bills = await paginatedQuery('Bill', `TxnDate >= '${startDate}' AND TxnDate <= '${endDate}'`);
 
   return bills.map(b => ({
     id: b.Id,

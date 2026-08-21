@@ -866,7 +866,7 @@ function parseCardAndAmount(text) {
 
 const FIRST_REMINDER_AFTER_HOURS      = 24;   // 1 day after initial SMS
 const SUBSEQUENT_REMINDER_AFTER_HOURS = 72;   // 3 days between follow-ups
-const MAX_REMINDERS                   = 3;    // stop after 3 reminders (escalate via weekly report)
+export const MAX_REMINDERS            = 3;    // stop after 3 reminders (escalate via weekly report)
 
 export async function sendExpenseReminders() {
   const now = new Date();
@@ -919,6 +919,99 @@ export async function sendExpenseReminders() {
 
   logger.info('Expense reminder run complete', { sent, checked: reports?.length ?? 0 });
   return { sent, checked: reports?.length ?? 0 };
+}
+
+// ── Pending Approvals Queue ──────────────────────────────────────
+// Shared read for anything currently open on an expense_reports row, regardless
+// of when it was created (unlike generateWeeklyExpenseReport's Mon-Sun window).
+// Used by approvals-queue-report.js so it doesn't re-derive this query -- see
+// MAX_REMINDERS/reminder_count above, which sendExpenseReminders also reads.
+//
+// Filters out known non-receipt noise vendors (see NON_RECEIPT_VENDOR_PATTERN
+// below) the same way backfillExpensesFromQbo/processVendorEmailReceipt do at
+// creation time. Live-data check while building the Approvals Queue report
+// (2026-08-20) found every single one of the 98 existing 'flagged' rows, plus
+// 8 'pending_employee' rows, are this exact kind of noise (Google Ads, Intuit
+// QBooks Online, HP Instant Ink, etc.) pre-dating the pattern's 2026-08-08 fix
+// -- they aren't real pending approvals, so surfacing them as if they needed
+// Michael's sign-off would have been actively misleading on day one.
+// NOTE: generateWeeklyExpenseReport() below does NOT apply this filter yet --
+// its Mon-Sun window naturally excludes most of this pre-2026-08-08 backlog,
+// and changing that report's shipped output wasn't in scope for this change.
+// Flagged as a follow-up if the two reports ever need to agree exactly.
+function filterNonReceiptNoise(rows) {
+  return rows.filter(r => !NON_RECEIPT_VENDOR_PATTERN.test(r.vendor || ''));
+}
+
+// No documented cap on how many non-complete rows can accumulate ('flagged'
+// and 'pending_maintenance_log' rows only ever clear by human action), so
+// this paginates with .range() instead of a single unbounded select --
+// PostgREST's default page-size cap (commonly 1000) would otherwise silently
+// truncate results with no error once the backlog grows past it.
+const APPROVALS_QUEUE_PAGE_SIZE = 1000;
+async function fetchAllPendingExpenseReports() {
+  const rows = [];
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from('expense_reports')
+      .select('id, employee_name, card_last_four, vendor, amount, transaction_date, created_at, status, reminder_count, sms_sent_at, phone_number, asset_id, job_number')
+      .neq('status', 'complete')
+      .order('created_at', { ascending: true })
+      .range(from, from + APPROVALS_QUEUE_PAGE_SIZE - 1);
+    if (error) throw new Error(`getPendingApprovalsQueue: query failed: ${error.message}`);
+    rows.push(...(data ?? []));
+    if (!data || data.length < APPROVALS_QUEUE_PAGE_SIZE) break;
+    from += APPROVALS_QUEUE_PAGE_SIZE;
+  }
+  return rows;
+}
+
+export async function getPendingApprovalsQueue() {
+  // Deliberately does NOT catch/swallow errors here -- a real Supabase outage
+  // must propagate so the cron task's own try/catch (approvals_queue_report in
+  // scheduler/cron.js) fires its Teams failure alert, instead of looking
+  // identical to a genuinely empty queue and silently skipping the send.
+  const rows = filterNonReceiptNoise(await fetchAllPendingExpenseReports());
+
+  const pendingEmployee = rows.filter(r => r.status === 'pending_employee');
+  // "No automation" = sms_sent_at was never set, which means
+  // sendExpenseReminders (it only ever touches rows with sms_sent_at already
+  // set) will never run on these -- e.g. no phone_number on file, or the
+  // initial SMS attempt failed. reminder_count stays 0 forever, so without
+  // this check these rows would misleadingly land in "awaitingEmployee" next
+  // to rows a real reminder cycle is actively working.
+  const noAutomation = pendingEmployee.filter(r => !r.sms_sent_at);
+  const withAutomation = pendingEmployee.filter(r => r.sms_sent_at);
+  // "Stalled" = the automated reminder flow (sendExpenseReminders, above) has
+  // exhausted MAX_REMINDERS and given up -- these are the ones that genuinely
+  // need Michael's decision (write off, call the employee directly, etc.)
+  // rather than another automated nudge.
+  const stalled = withAutomation.filter(r => (r.reminder_count ?? 0) >= MAX_REMINDERS);
+  const awaitingEmployee = withAutomation.filter(r => (r.reminder_count ?? 0) < MAX_REMINDERS);
+  const awaitingMaintenanceLog = rows.filter(r => r.status === 'pending_maintenance_log');
+  // Unidentified-card stubs from handleUnknownCard -- a charge nobody can even
+  // attribute to an employee/card yet. Arguably the most urgent bucket: there
+  // is no automation of any kind running on these until a human identifies
+  // the card.
+  const awaitingIdentification = rows.filter(r => r.status === 'pending_identification');
+  // 'flagged' is a defined status (see statusBadge below); every existing row
+  // with it turned out to be noise (see comment above) and gets filtered out
+  // above, but this stays in case a real flag ever gets assigned again.
+  const flagged = rows.filter(r => r.status === 'flagged');
+
+  const buckets = { stalled, noAutomation, awaitingEmployee, awaitingMaintenanceLog, awaitingIdentification, flagged };
+  const total = Object.values(buckets).reduce((s, b) => s + b.length, 0);
+  if (total !== rows.length) {
+    // Guards against a future new status value silently falling through every
+    // bucket -- better to log the gap than to show a queue total that doesn't
+    // match anything actually rendered in the email.
+    logger.warn('getPendingApprovalsQueue: bucket total does not match row count -- unhandled status?', {
+      total, rowCount: rows.length,
+    });
+  }
+
+  return { ...buckets, total };
 }
 
 // ── Weekly Expense Report ──────────────────────────────────────

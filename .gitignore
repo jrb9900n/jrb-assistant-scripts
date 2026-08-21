@@ -22,3 +22,7 @@ scratch/
 
 # Classification dry-run reports contain real client names/addresses — local only
 dry-run-report*.json
+
+# Python bytecode cache (marketing-performance-ads-fetch.py)
+__pycache__/
+*.pyc
