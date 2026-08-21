@@ -27,7 +27,14 @@ export async function gatherSAARaging() {
     .order('days_past_due', { ascending: false });
   if (error) {
     logger.warn('SA AR aging query failed', { err: error.message });
-    return { buckets: { current: [], d30: [], d60: [], d90: [], d120plus: [] }, flagged: [], total: 0 };
+    // `available: false` is additive — existing callers (ar-collections-
+    // report.js, cash-forecast-report.js, weekly-finance-report.js) only
+    // ever read .total/.buckets/.flagged directly and are unaffected by the
+    // extra field, but a query failure defaulting silently to total:0 was
+    // otherwise indistinguishable from a genuine zero-AR state to any new
+    // caller that actually needs to tell the two apart (e.g. an "AR
+    // unavailable" banner instead of a fabricated $0.00).
+    return { buckets: { current: [], d30: [], d60: [], d90: [], d120plus: [] }, flagged: [], total: 0, available: false };
   }
 
   const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [] };
@@ -56,7 +63,7 @@ export async function gatherSAARaging() {
     .filter(r => r.balance >= 500)
     .sort((a, b) => b.balance - a.balance);
 
-  return { buckets, flagged, total };
+  return { buckets, flagged, total, available: true };
 }
 
 // Monday (UTC) of the week containing referenceDate, as YYYY-MM-DD.
@@ -68,6 +75,45 @@ export function mondayOf(referenceDate = new Date()) {
   const diff = dow === 0 ? -6 : 1 - dow;
   d.setUTCDate(d.getUTCDate() + diff);
   return d.toISOString().slice(0, 10);
+}
+
+// Adds `days` (may be negative) to a YYYY-MM-DD (or full ISO) date string,
+// UTC-safe, returning a YYYY-MM-DD string. cash-forecast-report.js has its
+// OWN same-named local helper that looks identical but is NOT a duplicate of
+// this one — it returns a raw Date object (its callers rely on that for
+// direct Date comparisons in buildAPForecast's due-date bucketing), while
+// every caller here only ever needs the formatted string. Deliberately left
+// that file's version alone rather than forcing it onto this string-
+// returning contract, which would require touching its date-math-sensitive,
+// already-live forecast bucketing logic for a cosmetic rename, not a real
+// behavior fix. New string-returning callers (e.g. weekly-scorecard-report.js)
+// should use this shared version instead of adding another local copy.
+export function addDaysUTC(dateStr, days) {
+  const d = new Date(dateStr.length === 10 ? dateStr + 'T00:00:00Z' : dateStr);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+// Pure UTC calendar-day diff between two date-likes. Deliberately avoids
+// .setHours(0,0,0,0), which rolls a UTC-midnight-parsed date back one
+// calendar day on a server west of UTC — the exact off-by-one bug
+// estimating-pipeline-report.js's own /code-review caught and fixed live.
+// Comparing UTC calendar-day numbers directly sidesteps local time zone
+// entirely, matching mondayOf()'s own Date.UTC(...) convention above.
+// estimating-pipeline-report.js and sales-pipeline-report.js each carry
+// their own private copy of this same function (built before this shared
+// helpers file had one) — not retrofitted to import from here as part of
+// this change since both are already-merged files outside this change's
+// scope; new callers should use this shared version instead of adding yet
+// another copy.
+export function daysBetween(fromDateLike, toDateLike = new Date()) {
+  if (!fromDateLike) return null;
+  const from = new Date(fromDateLike);
+  if (Number.isNaN(from.getTime())) return null;
+  const to = new Date(toDateLike);
+  const fromUTC = Date.UTC(from.getUTCFullYear(), from.getUTCMonth(), from.getUTCDate());
+  const toUTC = Date.UTC(to.getUTCFullYear(), to.getUTCMonth(), to.getUTCDate());
+  return Math.max(0, Math.round((toUTC - fromUTC) / 86400000));
 }
 
 // SA sync freshness check — shared by any report reading sa_invoices, so a

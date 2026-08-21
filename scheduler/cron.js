@@ -546,6 +546,31 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Friday 2:45 PM — Weekly Business Scorecard, ahead of the 3:00-4:30 PM
+    // "Weekly Review / Next Week Prep" calendar block. A one-page synthesis of
+    // cash/AR/AP/marketing/sales/estimating/crew-load — reuses the data
+    // gathering already built for the other calendar-block reports rather
+    // than re-deriving it (see tools/impl/weekly-scorecard-report.js header).
+    schedule: '45 14 * * 5',
+    name: 'weekly_scorecard_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendWeeklyScorecardReport } = await import('../tools/impl/weekly-scorecard-report.js');
+        const result = await generateAndSendWeeklyScorecardReport();
+        logger.info('weekly_scorecard_report: done', result);
+      } catch (err) {
+        logger.error('weekly_scorecard_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Weekly Business Scorecard Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('weekly_scorecard_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Sunday 11 PM — synthesize week's observations into reusable patterns
     schedule: '0 23 * * 0',
     name: 'weekly_synthesis',
