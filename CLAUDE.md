@@ -421,6 +421,24 @@ Distinct from `memory/memory.js`'s existing Haiku-summarized long-term memory �
 
 ---
 
+## Autonomous Schedule Manager (Phase 1 built 2026-08-20)
+
+Michael's long-term goal, agreed as a 5-phase roadmap 2026-08-20: an assistant that learns his habits, manages his calendar proactively, and scans email to keep each block's to-do list current. Phase 1 (foundation) is built; phases 2-5 (estimate-visit scheduling via SA + Azure Maps drive time, general auto-displacement, email-driven to-dos, habit learning) are not yet started. Full detail in Claude Code memory `project-jrb-calendar-block-system-2026-08-20`.
+
+### What Phase 1 built
+- **The President Weekly Block Schedule is live on `michael@jrboehlke.com`'s calendar** as 25 true Outlook recurring series (no end date), built via `createCalendarEvent`'s new `recurrenceDaysOfWeek`/`recurrenceStartDate` params (see the `calendar-userEmail-fix` PR below).
+- **Root cause fixed**: `createCalendarEvent` was the one calendar function in `m365.js` that never accepted `userEmail` at all, even though its own tool schema always told the LLM to pass it — every event silently landed on `assistant@jrboehlke.com`'s own calendar instead. ~245 duplicate junk events from the failed attempts (including one caused by testing from the live repo dir instead of the fix's worktree — always check which checkout has a fix before running a live-data script against it) were cleaned up.
+- **`createCalendarEvent`/`updateCalendarEvent` now accept `categories`** — used to tag all 25 block-schedule events with the Outlook category `"JRB Block Schedule"` (applied to the series master; confirmed live that Graph correctly propagates it to every expanded occurrence). This is the reserved sentinel `tools/impl/calendar-watch.js` uses to tell block-schedule scaffolding apart from real meetings — never apply it to an actual appointment.
+- **`tools/impl/calendar-watch.js`** (new) — `getCalendarChanges({mailbox})` detects new/changed real (non-block) events via a Microsoft Graph `calendarView/delta` cursor stored in the new `calendar_delta_state` table, proactively re-bootstrapping before the delta window (fixed at bootstrap time, doesn't slide forward) would go stale, and recovering from a Graph-invalidated cursor (410/resyncRequired) with one fresh re-bootstrap instead of dying until a human clears the row. Deliberately not exposed as an agent tool — every call advances the stored cursor as a side effect, so an ad hoc conversational call would corrupt the cron task's own view of "what's new."
+- **`calendar_change_watch` cron task** (every 10 min) — Phase 1 stops at detection + a Teams notification; no auto-displacement yet (that's Phase 3). Matches the alert-once-on-failure/recovery pattern used by `sa_connectivity_check`/`ads_health_check`. A dedupe Set guards against Graph's own delta-redelivery behavior (confirmed live) without over-trusting it — notifications are only marked handled after a successful send, not before, so a failed Teams send retries on the next poll instead of being silently dropped forever.
+
+### Decisions locked with Michael for Phase 2+
+- Drive-time calculation: **Azure Maps** (stays in the existing Microsoft/Azure tenant, no new vendor credential).
+- Estimate-visit calendar blocks: **no invite sent to the client** — blocked time only, contact info in the body.
+- Auto-displacement autonomy: **follow the President Weekly Block Schedule's own displacement priority order automatically for Standard blocks; never silently touch PROTECTED/DEEP WORK blocks.**
+
+---
+
 ## FleetSharp GPS/Telematics Read Tools (built 2026-08-19)
 
 FleetSharp has no public API. Discovered via a real login capture: cookie-session auth (no
@@ -581,7 +599,7 @@ Table: `carddav_credentials` — columns: `email`, `name`, `token`, `active`, `c
 ---
 
 ## Supabase (jrb-assistant project — znpahinyplccdyoekfeo)
-Key tables: `rules` (agent rules/feedback loop; `source` column added 2026-08-20), `knowledge_log` (observations), `memory`/`agent_memory` (session summaries), `conversation_turns` (short-term raw Teams turn history, added 2026-08-20 — see Standing Rules Pipeline Fix section), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller; `session_id`/`extra_messages` columns added 2026-08-20), `email_catalog` (inbox audit trail), `carddav_credentials` (CardDAV access tokens)
+Key tables: `rules` (agent rules/feedback loop; `source` column added 2026-08-20), `knowledge_log` (observations), `memory`/`agent_memory` (session summaries), `conversation_turns` (short-term raw Teams turn history, added 2026-08-20 — see Standing Rules Pipeline Fix section), `mcp_tokens` (OAuth tokens, 1yr TTL), `agent_tasks` (task queue for poller; `session_id`/`extra_messages` columns added 2026-08-20), `email_catalog` (inbox audit trail), `carddav_credentials` (CardDAV access tokens), `calendar_delta_state` (Microsoft Graph delta-query cursor per mailbox, added 2026-08-20 for `calendar_change_watch` — see Autonomous Schedule Manager section)
 
 ---
 

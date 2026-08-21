@@ -91,6 +91,12 @@ async function waitForLockToAppear(lockFile, graceMs = 10_000, pollMs = 2000) {
 let saWasDown = false;
 let qbWasDown = false;
 let adsHealthWasDown = false;
+let calendarWatchWasDown = false;
+// Best-effort dedupe for calendar_change_watch -- Graph delta queries can
+// redeliver the same change across polls (confirmed live during testing).
+// Process-lifetime only, not persistent -- a restart can cause one
+// duplicate notification, an accepted tradeoff for Phase 1.
+const notifiedCalendarChangeIds = new Set();
 
 // branch_drift_check's debounce flag, persisted so a scheduler restart while
 // drift is still ongoing doesn't re-fire the "detected" alert unnecessarily
@@ -917,6 +923,79 @@ const SCHEDULED_TASKS = [
         if (!adsHealthWasDown) {
           adsHealthWasDown = true;
           await sendProactiveMessage(`⚠️ Google Ads Agent health check failed — daemon may be down.\n\nError: ${err.message}`).catch(() => {});
+        }
+      }
+    },
+  },
+  {
+    // Every 10 minutes — Phase 1 of the "autonomous schedule manager" roadmap
+    // agreed with Michael 2026-08-20. Detects new/changed events on his
+    // calendar that aren't JRB block-schedule blocks (a real meeting
+    // appearing, or an invite being accepted) via calendar-watch.js's Graph
+    // delta query. Detection + notification only -- no auto-displacement
+    // yet (that's Phase 3, which needs this plumbing first).
+    // No overlap lock between runs -- a run overlapping the next tick could
+    // race on calendar_delta_state's upsert. Accepted for Phase 1: this
+    // task's own Graph call is lightweight (single page for a normal
+    // mailbox, confirmed live) and finishes in well under 10 minutes in
+    // every observed run.
+    schedule: '*/10 * * * *',
+    name: 'calendar_change_watch',
+    run: async () => {
+      try {
+        const { getCalendarChanges } = await import('../tools/impl/calendar-watch.js');
+        const changes = await getCalendarChanges({ mailbox: 'michael@jrboehlke.com' });
+        for (const e of changes) {
+          // Keyed on id + lastModifiedDateTime, not just id -- a later genuine
+          // change to an already-notified event (reschedule, new acceptance)
+          // must still be reported, not swallowed as a false-positive repeat.
+          const dedupeKey = `${e.id}:${e.lastModifiedDateTime}`;
+          if (notifiedCalendarChangeIds.has(dedupeKey)) continue;
+          if (e.isCancelled) { notifiedCalendarChangeIds.add(dedupeKey); continue; } // nothing to notify, but don't re-process forever
+          const when = e.start
+            ? new Date(e.start + 'Z').toLocaleString('en-US', { timeZone: 'America/Chicago', dateStyle: 'medium', timeStyle: 'short' })
+            : 'unknown time';
+          const acceptedNote = e.responseStatus === 'accepted' && !e.isOrganizer ? ' (just accepted)' : '';
+          try {
+            await sendProactiveMessage(
+              `📅 New calendar item detected${acceptedNote}: **${e.subject}** at ${when}. Automatic block displacement isn't built yet — review for schedule conflicts.`
+            );
+            // Only mark as handled once the send actually succeeds -- marking
+            // it beforehand would permanently drop this change if the send
+            // failed (network blip, Bot Framework token issue), since the
+            // delta cursor has already moved past it and Graph won't
+            // redeliver it on a later poll.
+            notifiedCalendarChangeIds.add(dedupeKey);
+          } catch (sendErr) {
+            logger.warn('calendar_change_watch: notification send failed, will retry next poll', { err: sendErr.message, subject: e.subject });
+          }
+        }
+        // Bound memory rather than grow unbounded across a long-running process.
+        // Prune to the most recent half rather than a full wipe -- Graph can
+        // redeliver a just-notified change on the very next poll (confirmed
+        // live during testing), and a full clear would defeat the redelivery
+        // guard for everything notified just before the cap was hit, not only
+        // genuinely old entries.
+        if (notifiedCalendarChangeIds.size > 500) {
+          const recent = Array.from(notifiedCalendarChangeIds).slice(-250);
+          notifiedCalendarChangeIds.clear();
+          recent.forEach(k => notifiedCalendarChangeIds.add(k));
+        }
+        if (calendarWatchWasDown) {
+          calendarWatchWasDown = false;
+          logger.info('calendar_change_watch: recovered');
+          await sendProactiveMessage('✅ Calendar change monitoring recovered — detection is back online.').catch(() => {});
+        }
+      } catch (err) {
+        // Same alert-once-on-failure/once-on-recovery pattern as
+        // sa_connectivity_check/ads_health_check -- a 10-minute task that
+        // just logged and stayed silent on failure would leave Michael with
+        // no signal that calendar monitoring stopped working.
+        const errMsg = err?.message ?? String(err); // tolerate a non-Error throw rather than crashing this catch itself
+        logger.error('calendar_change_watch: failed', { err: errMsg });
+        if (!calendarWatchWasDown) {
+          calendarWatchWasDown = true;
+          await sendProactiveMessage(`⚠️ Calendar change monitoring failed — new meetings/accepted invites won't be detected until this recovers.\n\nError: ${errMsg.slice(0, 200)}`).catch(() => {});
         }
       }
     },
