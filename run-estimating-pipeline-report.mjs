@@ -19,7 +19,13 @@ if (!isExplicitRun) {
   process.exit(1);
 }
 
-import { generateAndSendEstimatingPipelineReport } from './tools/impl/estimating-pipeline-report.js';
+// Dynamic import keeps this truly conditional — a static `import` declaration is
+// hoisted and resolved before any runtime code runs (including the guard above),
+// meaning the module graph is always loaded regardless of the --run flag. A CJS
+// loader or misconfigured runner that ignores the .mjs extension would silently
+// execute the module body. The dynamic import here ensures the module is only
+// loaded when we have confirmed the --run flag is present.
+const { generateAndSendEstimatingPipelineReport } = await import('./tools/impl/estimating-pipeline-report.js');
 
 console.log('[TEST] Generating Estimating Pipeline report...');
 const result = await generateAndSendEstimatingPipelineReport();
