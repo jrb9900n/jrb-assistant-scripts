@@ -494,6 +494,27 @@ been observed yet. Session cookies cache to `fleetsharp-session-cache.json` for 
 
 ---
 
+## Multi-Company QuickBooks Support (built 2026-08-21)
+
+Michael needs QBO access to both **J.R. Boehlke, LLC** ("jrb", the original/default company) and **JRB Transport LLC** ("transport") at the same time. claude.ai's native Intuit QuickBooks connector can't hold two companies simultaneously (confirmed: adding the same connector twice under a different name is rejected — "A server with this URL already exists," an open Anthropic limitation), so this extends JRBAgent's own MCP server/tool layer (already registered as the "JRB Assistant" connector on claude.ai) to be company-aware instead.
+
+### Design
+One Intuit developer app (`QB_CLIENT_ID`/`QB_CLIENT_SECRET`) can be authorized against more than one QBO company file — each authorization gets its own realm ID + refresh token, but shares the same client credentials. No second app registration is needed.
+
+- `tools/impl/qb-token.js` — `QB_COMPANIES` config maps `'jrb'`/`'transport'` to their own Credential Manager target, refresh-token env var, and realm-ID env var. Per-company access-token cache/refresh-mutex state lives in a `Map` so a refresh for one company can never race or clobber the other's. `getQBAccessToken(company)`, `exchangeQBAuthCode(code, company, realmId)`, `buildQBAuthUrl(company, state)`, `getQBRealmId(company)` all take/default `company = 'jrb'` for backward compatibility.
+- `tools/impl/quickbooks.js` — every exported function takes an optional `company` param (default `'jrb'`), threaded into the QBO base URL and the Supabase query cache key (the cache key now includes `company` — otherwise identical query text against two companies would collide and serve one company's data to the other).
+- `tools/registry.js`'s `qb_query` tool schema exposes `company: 'jrb'|'transport'` so chat/MCP callers can target either company by name.
+- `teams/bot.js`'s `/qb-reauth`/`/qb-callback` routes accept `?company=transport`, encoded into the OAuth `state` param (`"company:suffix"`) so the callback knows which company's tokens to save. The callback now also persists `realmId` (previously only logged) — into the company's meta JSON file, not Credential Manager (not secret), so it's usable immediately without an agent restart.
+- `scheduler/cron.js`'s `qb_health_check` loops over `listQBCompanies()`, skipping any company with no realm ID configured yet (so Michael isn't alerted about a company he hasn't connected) — alert/recovery state is tracked per-company in a `Map`.
+
+### Required manual step (not yet done as of 2026-08-21)
+`launcher/start-agent.ps1` must inject two new Credential Manager values as env vars before JRB Transport's connection can work — `QB_REFRESH_TOKEN_TRANSPORT` and `QB_REALM_ID_TRANSPORT`, mirroring the existing `QB_REFRESH_TOKEN`/`QB_REALM_ID` lines. Per this file's Autonomy Rules, editing `start-agent.ps1` always requires Michael's explicit go-ahead first — it was not edited as part of this build. Once added and the agent restarted, Michael completes the one-time OAuth for JRB Transport by visiting `https://agent.jrboehlke.com/qb-reauth?secret=<CLAUDE_EXECUTE_SECRET>&company=transport` and authorizing against JRB Transport's company file when Intuit's login prompts for it.
+
+### Scope note
+Only `qb_query` (chat/MCP-facing) was made company-selectable in the tool schema layer — every other `quickbooks.js` export also accepts `company` for consistency/future use, but the weekly/scheduled report generators (AR/AP aging, cash forecast, commission engine, etc.) still call them with the implicit `'jrb'` default and were not changed to report on JRB Transport. CardDAV (`tools/impl/carddav.js`) is also unchanged — JRB-only by design.
+
+---
+
 ## Terminology note: "SA" always means ServiceAutopilot
 
 Confirmed directly by Michael 2026-08-17: "Anytime 'SA' is mentioned you may assume it is serviceautopilot." This applies both to interpreting his messages and to intent-matching code (see `teams/router.js`'s `isCrmActionRequest` - the bare `\bsa\b` token has been added/removed/re-added several times by well-meaning "cleanup"; it must stay). Do not narrow this based on a first-principles false-positive argument - ask Michael before changing it again.
@@ -504,6 +525,8 @@ Confirmed directly by Michael 2026-08-17: "Anytime 'SA' is mentioned you may ass
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
 Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`, `FLEETSHARP_URL`, `FLEETSHARP_EMAIL`, `FLEETSHARP_PASSWORD`, `GOOGLE_MAPS_API_KEY` (Routes API, drive-time calc for the estimate-visit scheduling feature — see Autonomous Schedule Manager section; set via `launcher/save-googlemaps-secrets.ps1`)
+
+Pending (see Multi-Company QuickBooks Support section): `QB_REFRESH_TOKEN_TRANSPORT`, `QB_REALM_ID_TRANSPORT` — for JRB Transport LLC's QBO connection, reusing the same `QB_CLIENT_ID`/`QB_CLIENT_SECRET` app. Not yet added to `start-agent.ps1`'s env injection (requires Michael's go-ahead per the launcher-edit autonomy rule) or populated in Credential Manager (populated automatically by the `/qb-reauth?company=transport` OAuth flow once the launcher change lands).
 
 Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 

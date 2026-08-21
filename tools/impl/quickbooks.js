@@ -5,10 +5,14 @@ import axios from 'axios';
 import { createHash } from 'crypto';
 import { cacheGet, cacheSet } from '../../memory/memory.js';
 import { logger } from '../../core/logger.js';
-import { getQBAccessToken } from './qb-token.js';
+import { getQBAccessToken, getQBRealmId } from './qb-token.js';
 
-const BASE = `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
-
+// One Intuit app can be authorized against more than one QBO company file —
+// every function below takes an optional `company` key ('jrb' default, or
+// 'transport' for JRB Transport LLC) so callers can address either without
+// duplicating this module. See tools/impl/qb-token.js for the per-company
+// credential/realm-ID config.
+const qbBase = (company = 'jrb') => `https://quickbooks.api.intuit.com/v3/company/${getQBRealmId(company)}`;
 const getToken = getQBAccessToken;
 
 // ── Payment method cleanup ────────────────────────────────────
@@ -19,13 +23,13 @@ const getToken = getQBAccessToken;
  * QBO doesn't support hard-deleting list entries that may be referenced
  * by historical transactions, only deactivating them.
  */
-export async function deactivatePaymentMethod({ id }) {
-  const token = await getToken();
-  const current = await query({ query: `SELECT Id, SyncToken FROM PaymentMethod WHERE Id = '${id}'` });
+export async function deactivatePaymentMethod({ id, company = 'jrb' }) {
+  const token = await getToken(company);
+  const current = await query({ query: `SELECT Id, SyncToken FROM PaymentMethod WHERE Id = '${id}'`, company });
   const syncToken = current?.PaymentMethod?.[0]?.SyncToken;
   if (syncToken === undefined) throw new Error(`QB deactivatePaymentMethod: PaymentMethod ${id} not found`);
 
-  const res = await axios.post(`${BASE}/paymentmethod`,
+  const res = await axios.post(`${qbBase(company)}/paymentmethod`,
     { Id: id, SyncToken: syncToken, sparse: true, Active: false },
     { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } });
   return res.data.PaymentMethod;
@@ -35,13 +39,13 @@ export async function deactivatePaymentMethod({ id }) {
  * Re-points a Payment's PaymentMethodRef via sparse update — a metadata-only
  * categorization change, never touches TotalAmt, TxnDate, or CustomerRef.
  */
-export async function updatePaymentMethodRef({ paymentId, newPaymentMethodId }) {
-  const token = await getToken();
-  const current = await query({ query: `SELECT Id, SyncToken FROM Payment WHERE Id = '${paymentId}'` });
+export async function updatePaymentMethodRef({ paymentId, newPaymentMethodId, company = 'jrb' }) {
+  const token = await getToken(company);
+  const current = await query({ query: `SELECT Id, SyncToken FROM Payment WHERE Id = '${paymentId}'`, company });
   const syncToken = current?.Payment?.[0]?.SyncToken;
   if (syncToken === undefined) throw new Error(`QB updatePaymentMethodRef: Payment ${paymentId} not found`);
 
-  const res = await axios.post(`${BASE}/payment`,
+  const res = await axios.post(`${qbBase(company)}/payment`,
     { Id: paymentId, SyncToken: syncToken, sparse: true, PaymentMethodRef: { value: newPaymentMethodId } },
     { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } });
   return res.data.Payment;
@@ -51,26 +55,26 @@ export async function updatePaymentMethodRef({ paymentId, newPaymentMethodId }) 
  * Re-points a Customer's ParentRef via sparse update — used to fix
  * incorrect sub-customer (Job) nesting without touching any transaction data.
  */
-export async function updateCustomerParent({ customerId, newParentId }) {
-  const token = await getToken();
-  const current = await query({ query: `SELECT Id, SyncToken FROM Customer WHERE Id = '${customerId}'` });
+export async function updateCustomerParent({ customerId, newParentId, company = 'jrb' }) {
+  const token = await getToken(company);
+  const current = await query({ query: `SELECT Id, SyncToken FROM Customer WHERE Id = '${customerId}'`, company });
   const syncToken = current?.Customer?.[0]?.SyncToken;
   if (syncToken === undefined) throw new Error(`QB updateCustomerParent: Customer ${customerId} not found`);
 
-  const res = await axios.post(`${BASE}/customer`,
+  const res = await axios.post(`${qbBase(company)}/customer`,
     { Id: customerId, SyncToken: syncToken, sparse: true, ParentRef: { value: newParentId }, Job: true },
     { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } });
   return res.data.Customer;
 }
 
 /** Deactivates a QBO Customer via sparse update (QBO has no hard-delete for entities with history). */
-export async function deactivateCustomer({ customerId }) {
-  const token = await getToken();
-  const current = await query({ query: `SELECT Id, SyncToken FROM Customer WHERE Id = '${customerId}'` });
+export async function deactivateCustomer({ customerId, company = 'jrb' }) {
+  const token = await getToken(company);
+  const current = await query({ query: `SELECT Id, SyncToken FROM Customer WHERE Id = '${customerId}'`, company });
   const syncToken = current?.Customer?.[0]?.SyncToken;
   if (syncToken === undefined) throw new Error(`QB deactivateCustomer: Customer ${customerId} not found`);
 
-  const res = await axios.post(`${BASE}/customer`,
+  const res = await axios.post(`${qbBase(company)}/customer`,
     { Id: customerId, SyncToken: syncToken, sparse: true, Active: false },
     { headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' } });
   return res.data.Customer;
@@ -81,14 +85,14 @@ export async function deactivateCustomer({ customerId }) {
 /**
  * Create a QBO customer. Pass parentId for a sub-customer (Job).
  */
-export async function createCustomer({ displayName, parentId }) {
-  const token = await getToken();
+export async function createCustomer({ displayName, parentId, company = 'jrb' }) {
+  const token = await getToken(company);
   const payload = { DisplayName: displayName };
   if (parentId) {
     payload.ParentRef = { value: parentId };
     payload.Job = true;
   }
-  const res = await axios.post(`${BASE}/customer`, payload, {
+  const res = await axios.post(`${qbBase(company)}/customer`, payload, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Content-Type': 'application/json' },
   });
   return res.data.Customer;
@@ -97,11 +101,12 @@ export async function createCustomer({ displayName, parentId }) {
 // ── Query ─────────────────────────────────────────────────────
 
 /**
- * Run a QBO SQL-like query. Results are cached by query string.
+ * Run a QBO SQL-like query. Results are cached by query string + company.
  * @param {object} opts
  * @param {string} opts.query - e.g. "SELECT * FROM Invoice STARTPOSITION 1 MAXRESULTS 100"
+ * @param {string} [opts.company] - 'jrb' (default) or 'transport'
  */
-export async function query({ query: qStr }) {
+export async function query({ query: qStr, company = 'jrb' }) {
   // Cache check — avoids re-hitting QB on every scheduler tick.
   // Fixed 2026-07-31: a real bug, not just today's symptom — the old key
   // (base64(qStr).slice(0, 60)) only captures the first ~45 bytes of the
@@ -116,15 +121,18 @@ export async function query({ query: qStr }) {
   // heap concatenating the same 300 bills over and over. Hashing the whole
   // query string (not just its first 60 base64 chars) guarantees distinct
   // queries never share a key, regardless of where they differ.
-  const cacheKey = `qb:${createHash('sha256').update(qStr).digest('hex')}`;
+  // `company` is folded into the key too (added alongside multi-company
+  // support) — otherwise the same query text against two different QBO
+  // companies would collide and silently serve one company's data to the other.
+  const cacheKey = `qb:${company}:${createHash('sha256').update(qStr).digest('hex')}`;
   const cached = await cacheGet(cacheKey);
   if (cached) {
-    logger.debug('QB cache hit', { query: qStr.slice(0, 60) });
+    logger.debug('QB cache hit', { query: qStr.slice(0, 60), company });
     return JSON.parse(cached);
   }
 
-  const token = await getToken();
-  const res = await axios.get(`${BASE}/query`, {
+  const token = await getToken(company);
+  const res = await axios.get(`${qbBase(company)}/query`, {
     params: { query: qStr },
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
   });
@@ -138,9 +146,9 @@ export async function query({ query: qStr }) {
  * Fetch all QB Payments in a date range, sorted by amount descending.
  * Returns array of { id, date, customerName, amount, paymentMethod, linkedInvoices }
  */
-export async function getPaymentsForWeek(startDate, endDate) {
+export async function getPaymentsForWeek(startDate, endDate, company = 'jrb') {
   const q = `SELECT * FROM Payment WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 300`;
-  const res = await query({ query: q });
+  const res = await query({ query: q, company });
   const payments = res?.Payment ?? [];
   return payments
     .map(p => ({
@@ -168,18 +176,18 @@ export async function getPaymentsForWeek(startDate, endDate) {
  * weekly AR/Collections email had been under-reporting total AR for some
  * unknown period. Fixed by routing both through this paginated helper.
  */
-async function paginatedQuery(entity, whereClause) {
+async function paginatedQuery(entity, whereClause, company = 'jrb') {
   const PAGE_SIZE = 300;
   const MAX_PAGES = 100; // real bill/invoice volume for one company never legitimately needs more pages than this
   let rows = [];
   let pageCount = 0;
   for (let start = 1; ; start += PAGE_SIZE) {
     if (++pageCount > MAX_PAGES) {
-      logger.warn('paginatedQuery: hit MAX_PAGES safety cap, stopping', { entity, whereClause, rowsSoFar: rows.length });
+      logger.warn('paginatedQuery: hit MAX_PAGES safety cap, stopping', { entity, whereClause, company, rowsSoFar: rows.length });
       break;
     }
     const q = `SELECT * FROM ${entity} WHERE ${whereClause} STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
-    const res = await query({ query: q });
+    const res = await query({ query: q, company });
     const page = res?.[entity] ?? [];
     rows = rows.concat(page);
     if (page.length < PAGE_SIZE) break;
@@ -187,8 +195,8 @@ async function paginatedQuery(entity, whereClause) {
   return rows;
 }
 
-async function fetchAllOpenBalance(entity) {
-  return paginatedQuery(entity, "Balance > '0'");
+async function fetchAllOpenBalance(entity, company = 'jrb') {
+  return paginatedQuery(entity, "Balance > '0'", company);
 }
 
 /**
@@ -225,8 +233,8 @@ function bucketOpenTransactionsByAge(records) {
  * Returns { buckets: { current, d30, d60, d90, d120plus }, flagged: [], total }
  * buckets contain arrays of invoice summaries.
  */
-export async function getARAgingReport() {
-  const invoices = await fetchAllOpenBalance('Invoice');
+export async function getARAgingReport(company = 'jrb') {
+  const invoices = await fetchAllOpenBalance('Invoice', company);
   const today = new Date();
 
   const records = [];
@@ -265,8 +273,8 @@ export async function getARAgingReport() {
  * Returns { buckets: { current, d30, d60, d90, d120plus }, flagged: [], total }
  * buckets contain arrays of bill summaries.
  */
-export async function getAPAgingReport() {
-  const bills = await fetchAllOpenBalance('Bill');
+export async function getAPAgingReport(company = 'jrb') {
+  const bills = await fetchAllOpenBalance('Bill', company);
   // Truncated to UTC midnight (not a raw "now" instant) so ageDays lines up
   // exactly with callers that compute "today" the same way (e.g. ap-report.js's
   // "bills due in the coming week" filter) — both then agree on what counts
@@ -307,9 +315,9 @@ export async function getAPAgingReport() {
  * Fetch QB invoices issued in a date range for revenue-by-category reporting.
  * Returns array categorized using simplified QB description rules.
  */
-export async function getInvoicesForWeek(startDate, endDate) {
+export async function getInvoicesForWeek(startDate, endDate, company = 'jrb') {
   const q = `SELECT * FROM Invoice WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 300`;
-  const res = await query({ query: q });
+  const res = await query({ query: q, company });
   const invoices = res?.Invoice ?? [];
 
   const QB_CATEGORY_RULES = [
@@ -359,9 +367,9 @@ export async function getInvoicesForWeek(startDate, endDate) {
  * Fetch Deposit records for Old National Checking (account 423) for a date range.
  * Returns array of deposits, flagging any lines with no CustomerRef (potentially unidentified cash).
  */
-export async function getOldNationalDeposits(startDate, endDate) {
+export async function getOldNationalDeposits(startDate, endDate, company = 'jrb') {
   const q = `SELECT * FROM Deposit WHERE TxnDate >= '${startDate}' AND TxnDate <= '${endDate}' MAXRESULTS 200`;
-  const res = await query({ query: q });
+  const res = await query({ query: q, company });
   const deposits = res?.Deposit ?? [];
 
   // Filter to Old National account (Id 423)
@@ -389,10 +397,10 @@ export async function getOldNationalDeposits(startDate, endDate) {
  * Fetch a single Purchase entity by ID from QBO.
  * Used by the expense capture webhook handler.
  */
-export async function getPurchase(id) {
-  const token = await getToken();
+export async function getPurchase(id, company = 'jrb') {
+  const token = await getToken(company);
   const res = await axios.get(
-    `${BASE}/purchase/${id}`,
+    `${qbBase(company)}/purchase/${id}`,
     {
       params: { minorversion: 65 },
       headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
@@ -409,8 +417,8 @@ export async function getPurchase(id) {
  * @param {string} fileName       - display filename in QBO
  * @returns {string} QBO Attachable ID
  */
-export async function uploadReceiptToQbo(transactionId, fileBuffer, contentType, fileName) {
-  const token = await getToken();
+export async function uploadReceiptToQbo(transactionId, fileBuffer, contentType, fileName, company = 'jrb') {
+  const token = await getToken(company);
   const boundary = `JRBBoundary${Date.now()}`;
 
   const metadata = JSON.stringify({
@@ -434,7 +442,7 @@ export async function uploadReceiptToQbo(transactionId, fileBuffer, contentType,
   const end = Buffer.from(`\r\n--${boundary}--\r\n`);
   const body = Buffer.concat([part1, part2Header, fileBuffer, end]);
 
-  const res = await axios.post(`${BASE}/upload`, body, {
+  const res = await axios.post(`${qbBase(company)}/upload`, body, {
     params: { minorversion: 65 },
     headers: {
       Authorization: `Bearer ${token}`,
@@ -456,15 +464,15 @@ export async function uploadReceiptToQbo(transactionId, fileBuffer, contentType,
  * Create a CreditCard sub-account under the Chase parent account in QBO.
  * Called when an unknown Chase card is identified and linked to an employee.
  */
-export async function createQBCCSubAccount(employeeName, lastFour) {
-  const token = await getToken();
+export async function createQBCCSubAccount(employeeName, lastFour, company = 'jrb') {
+  const token = await getToken(company);
   const headers = {
     Authorization: `Bearer ${token}`,
     Accept: 'application/json',
     'Content-Type': 'application/json',
   };
 
-  const parentRes = await axios.get(`${BASE}/query`, {
+  const parentRes = await axios.get(`${qbBase(company)}/query`, {
     params: { query: "SELECT * FROM Account WHERE AccountType = 'CreditCard' MAXRESULTS 50" },
     headers,
   });
@@ -477,7 +485,7 @@ export async function createQBCCSubAccount(employeeName, lastFour) {
 
   const accountName = `${employeeName} ...${lastFour}`;
   const createRes = await axios.post(
-    `${BASE}/account`,
+    `${qbBase(company)}/account`,
     {
       Name: accountName,
       AccountType: 'CreditCard',
@@ -504,7 +512,7 @@ export async function createQBCCSubAccount(employeeName, lastFour) {
  * refs surfaced (when populated) — used to find candidate subcontractor costs
  * for a given job. No caller in this codebase queried Bill before this.
  */
-export async function getVendorBillsForPeriod(startDate, endDate) {
+export async function getVendorBillsForPeriod(startDate, endDate, company = 'jrb') {
   // Defensive cap on page count lives in the shared paginatedQuery() helper
   // now (see its comment above) — this loop previously ran unbounded
   // (crashed the process with an OOM) when a cache-key collision made every
@@ -512,7 +520,7 @@ export async function getVendorBillsForPeriod(startDate, endDate) {
   // PAGE_SIZE never fired. That root cause is fixed (see query()'s cache
   // key), but real vendor bill volume for one company never legitimately
   // needs more pages than the shared cap allows.
-  const bills = await paginatedQuery('Bill', `TxnDate >= '${startDate}' AND TxnDate <= '${endDate}'`);
+  const bills = await paginatedQuery('Bill', `TxnDate >= '${startDate}' AND TxnDate <= '${endDate}'`, company);
 
   return bills.map(b => ({
     id: b.Id,
@@ -612,8 +620,8 @@ export function matchBillsToJob(job, bills) {
  * (e.g. outstanding/uncleared transactions, undeposited funds) — that's a
  * much larger effort than a directional weekly cash forecast needs.
  */
-export async function getCashBalance() {
-  const res = await query({ query: "SELECT * FROM Account WHERE AccountType = 'Bank'" });
+export async function getCashBalance(company = 'jrb') {
+  const res = await query({ query: "SELECT * FROM Account WHERE AccountType = 'Bank'", company });
   const accounts = (res?.Account ?? []).map(a => ({
     id: a.Id,
     name: a.Name,
@@ -637,8 +645,8 @@ export async function getCashBalance() {
  * company is currently in the dozens (see getVendorBillsForPeriod's
  * paginated pattern above if that ever changes and this needs to grow up).
  */
-export async function getOpenBillsForForecast() {
-  const res = await query({ query: "SELECT * FROM Bill WHERE Balance > '0' MAXRESULTS 1000" });
+export async function getOpenBillsForForecast(company = 'jrb') {
+  const res = await query({ query: "SELECT * FROM Bill WHERE Balance > '0' MAXRESULTS 1000", company });
   const bills = res?.Bill ?? [];
   const today = new Date(); today.setUTCHours(0, 0, 0, 0);
 
@@ -678,7 +686,7 @@ export async function getOpenBillsForForecast() {
  * billed via a vendor Bill they're already covered by getOpenBillsForForecast();
  * if not, they're a known gap (see report email assumptions).
  */
-export async function getPayrollCashOutflowEstimate({ lookbackDays = 56 } = {}) {
+export async function getPayrollCashOutflowEstimate({ lookbackDays = 56, company = 'jrb' } = {}) {
   const cutoff = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10);
 
   // Paginated like getVendorBillsForPeriod above — a single MAXRESULTS-300
@@ -697,7 +705,7 @@ export async function getPayrollCashOutflowEstimate({ lookbackDays = 56 } = {}) 
       break;
     }
     const q = `SELECT * FROM Purchase WHERE TxnDate >= '${cutoff}' STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
-    const res = await query({ query: q });
+    const res = await query({ query: q, company });
     const page = res?.Purchase ?? [];
     purchases = purchases.concat(page);
     if (page.length < PAGE_SIZE) break;
