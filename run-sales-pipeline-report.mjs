@@ -24,7 +24,12 @@ if (!isExplicitRun) {
 const modeArg = process.argv.find(a => a.startsWith('--mode='));
 const mode = modeArg ? modeArg.split('=')[1] : 'followup';
 
-import { generateAndSendSalesPipelineReport } from './tools/impl/sales-pipeline-report.js';
+// Dynamic import used intentionally: static `import` declarations are hoisted
+// and evaluated at module link time, before any runtime code runs — including
+// the safety guard above. Using dynamic import() here ensures the module (and
+// any of its top-level side effects) is only loaded after the guard has
+// confirmed --run was passed explicitly.
+const { generateAndSendSalesPipelineReport } = await import('./tools/impl/sales-pipeline-report.js');
 
 console.log(`[TEST] Generating Sales Pipeline / BD report (mode=${mode})...`);
 const result = await generateAndSendSalesPipelineReport({ mode });
