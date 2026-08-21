@@ -595,3 +595,125 @@ export function matchBillsToJob(job, bills) {
   }
   return matches;
 }
+
+// ── Cash forecast support (12-Week Cash Forecast report) ───────────────────
+
+/**
+ * Real starting-cash figure for the cash forecast report: sums CurrentBalance
+ * across every QBO Account with AccountType 'Bank' (checking/savings). This is
+ * a real QBO balance, not a fabricated one — but NOT guaranteed to be
+ * second-fresh: it goes through query()'s shared Supabase cache (see query()
+ * above), so if anything else in this codebase issued the exact same query
+ * within the last CACHE_TTL_SECONDS (1hr default), this returns that cached
+ * result rather than re-hitting QBO. That's an intentional rate-limit
+ * tradeoff shared by every other reporting function in this file — acceptable
+ * for a weekly report, just not literally "as of this exact second."
+ * Also deliberately does NOT attempt a full balance-sheet reconciliation
+ * (e.g. outstanding/uncleared transactions, undeposited funds) — that's a
+ * much larger effort than a directional weekly cash forecast needs.
+ */
+export async function getCashBalance() {
+  const res = await query({ query: "SELECT * FROM Account WHERE AccountType = 'Bank'" });
+  const accounts = (res?.Account ?? []).map(a => ({
+    id: a.Id,
+    name: a.Name,
+    balance: Number(a.CurrentBalance ?? 0),
+  }));
+  const total = accounts.reduce((s, a) => s + a.balance, 0);
+  return { total, accounts };
+}
+
+/**
+ * Minimal standalone "bills due" query for the cash forecast report.
+ *
+ * Deliberately NOT the same thing as the fuller getAPAgingReport() being
+ * built on the separate (unmerged, as of this writing) claude/ap-report
+ * branch — this repo must stay independently mergeable, so this queries
+ * open Bills directly rather than depending on that branch's helpers
+ * (fetchAllOpenBalance/bucketOpenTransactionsByAge). Revisit whether this
+ * should be replaced by getAPAgingReport() once that branch merges.
+ *
+ * Single-page query (MAXRESULTS 1000) — real open-bill volume for this
+ * company is currently in the dozens (see getVendorBillsForPeriod's
+ * paginated pattern above if that ever changes and this needs to grow up).
+ */
+export async function getOpenBillsForForecast() {
+  const res = await query({ query: "SELECT * FROM Bill WHERE Balance > '0' MAXRESULTS 1000" });
+  const bills = res?.Bill ?? [];
+  const today = new Date(); today.setUTCHours(0, 0, 0, 0);
+
+  return bills.map(b => {
+    const dueDate = b.DueDate ? new Date(b.DueDate) : new Date(b.TxnDate);
+    const ageDays = Math.floor((today - dueDate) / 86400000);
+    return {
+      id: b.Id,
+      vendor: b.VendorRef?.name ?? b.VendorAddr?.Line1 ?? '—',
+      balance: Number(b.Balance ?? 0),
+      dueDate: b.DueDate ?? b.TxnDate,
+      ageDays, // positive = overdue, negative = not yet due
+    };
+  });
+}
+
+/**
+ * Heuristic weekly payroll cash-outflow estimate for the cash forecast report.
+ *
+ * QuickBooks Payroll has its own separate API/scopes for pay schedules and
+ * run history (payroll.tools.* on the Payroll product) — this integration's
+ * QBO app is only authorized for the regular Accounting API, so there is no
+ * direct read of ADP/QBO Payroll's actual pay calendar available here.
+ *
+ * Instead: every actual payroll run shows up as a real cash-ledger posting to
+ * the "Payroll Payable" account (confirmed live against production data,
+ * e.g. $13,996.66 on 2026-07-10, $20,987.99 on 2026-07-17, ... — the clearing
+ * account for net wages actually paid out). Summing those postings over a
+ * trailing window and dividing by the number of weeks gives a real-data-
+ * derived average weekly payroll cash outflow — smoothed, not a real pay
+ * calendar, and explicitly documented as such in the report email.
+ *
+ * Deliberately excludes employer payroll taxes / ADP fees / benefits lines
+ * (posted to separate accounts like "Payroll Tax Expense") — those aren't
+ * always cash-same-week as the net-pay run, and mixing them in would make
+ * this number harder to sanity-check against a bank statement. If they're
+ * billed via a vendor Bill they're already covered by getOpenBillsForForecast();
+ * if not, they're a known gap (see report email assumptions).
+ */
+export async function getPayrollCashOutflowEstimate({ lookbackDays = 56 } = {}) {
+  const cutoff = new Date(Date.now() - lookbackDays * 86400000).toISOString().slice(0, 10);
+
+  // Paginated like getVendorBillsForPeriod above — a single MAXRESULTS-300
+  // page silently truncated real data here (confirmed live: JRB's card-heavy
+  // Purchase volume, see the expense capture system, hit exactly 300 rows in
+  // a 120-day window during development), which would have quietly
+  // undercounted "Payroll Payable" postings and understated every week's
+  // payroll line with no warning anywhere in the report.
+  const PAGE_SIZE = 300;
+  const MAX_PAGES = 20; // 6,000 purchases in an 8-week window would be a real anomaly, not legitimate volume
+  let purchases = [];
+  let pageCount = 0;
+  for (let start = 1; ; start += PAGE_SIZE) {
+    if (++pageCount > MAX_PAGES) {
+      logger.warn('getPayrollCashOutflowEstimate: hit MAX_PAGES safety cap, stopping', { lookbackDays, purchasesSoFar: purchases.length });
+      break;
+    }
+    const q = `SELECT * FROM Purchase WHERE TxnDate >= '${cutoff}' STARTPOSITION ${start} MAXRESULTS ${PAGE_SIZE}`;
+    const res = await query({ query: q });
+    const page = res?.Purchase ?? [];
+    purchases = purchases.concat(page);
+    if (page.length < PAGE_SIZE) break;
+  }
+
+  let sampleTotal = 0;
+  let txnCount = 0;
+  for (const p of purchases) {
+    for (const l of (p.Line ?? [])) {
+      if (l.AccountBasedExpenseLineDetail?.AccountRef?.name === 'Payroll Payable') {
+        sampleTotal += Number(l.Amount ?? 0);
+        txnCount += 1;
+      }
+    }
+  }
+  const lookbackWeeks = lookbackDays / 7;
+  const weeklyAverage = txnCount > 0 ? sampleTotal / lookbackWeeks : 0;
+  return { weeklyAverage, lookbackDays, lookbackWeeks, sampleTotal, txnCount };
+}

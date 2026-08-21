@@ -257,6 +257,31 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 9:45 AM — 12-Week Cash Forecast, ahead of the 10:00-11:00 12-Week
+    // Cash Forecast calendar block. Reuses the same AR aging data as
+    // ar_collections_report (8:45 AM) plus a live QBO bank balance, open
+    // bills, and a payroll cash-outflow heuristic — see tools/impl/
+    // cash-forecast-report.js for the full set of documented assumptions.
+    schedule: '45 9 * * 1',
+    name: 'cash_forecast_report',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateAndSendCashForecastReport } = await import('../tools/impl/cash-forecast-report.js');
+        const result = await generateAndSendCashForecastReport();
+        logger.info('cash_forecast_report: done', result);
+      } catch (err) {
+        logger.error('cash_forecast_report: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`12-Week Cash Forecast Report FAILED to send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('cash_forecast_report: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Monday 1:45 PM — Sales Pipeline / BD report, ahead of the 2:00-3:00 PM
     // "Outbound Sales / Business Development" calendar block. 'bd' mode leads
     // with pipeline-by-stage + win rate/deal size (sales health, prospecting

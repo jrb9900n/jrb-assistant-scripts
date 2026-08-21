@@ -10,7 +10,7 @@
 
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
-import { supabase, gatherSAARaging, f$, fD, ageBadge, masterCustomer, sectionHeader, alertBox } from './ar-report-helpers.js';
+import { supabase, gatherSAARaging, mondayOf, gatherSAFreshness, f$, fD, ageBadge, masterCustomer, sectionHeader, alertBox } from './ar-report-helpers.js';
 
 const DELINQUENT_MIN_AGE_DAYS = 30;
 const DELINQUENT_MAX_ROWS = 10;
@@ -21,14 +21,6 @@ const DELINQUENT_MAX_ROWS = 10;
 const CALL_QUEUE_MIN_BALANCE = 500;
 const CALL_QUEUE_MAX_ROWS = 15;
 const STALE_DATA_HOURS = 24;
-
-function mondayOf(referenceDate = new Date()) {
-  const d = new Date(Date.UTC(referenceDate.getUTCFullYear(), referenceDate.getUTCMonth(), referenceDate.getUTCDate()));
-  const dow = d.getUTCDay(); // 0=Sun
-  const diff = dow === 0 ? -6 : 1 - dow;
-  d.setUTCDate(d.getUTCDate() + diff);
-  return d.toISOString().slice(0, 10);
-}
 
 // Trailing-28-day invoiced revenue, for a simple DSO estimate: total open AR /
 // (trailing revenue / 28). Not a textbook average-AR DSO (would need historical
@@ -45,18 +37,6 @@ async function gatherTrailing28DayRevenue() {
     return 0;
   }
   return (data ?? []).reduce((s, r) => s + Number(r.invoice_total ?? 0), 0);
-}
-
-async function gatherFreshnessStatus() {
-  const { data } = await supabase
-    .from('sa_invoices')
-    .select('synced_at')
-    .order('synced_at', { ascending: false })
-    .limit(1);
-  const ts = data?.[0]?.synced_at ? new Date(data[0].synced_at).getTime() : 0;
-  if (!ts) return { stale: true, ageHours: 999 };
-  const ageHours = Math.round((Date.now() - ts) / 3600000);
-  return { stale: ageHours > STALE_DATA_HOURS, ageHours };
 }
 
 // Reads last week's DSO snapshot for the trend line, writes this week's row.
@@ -264,7 +244,7 @@ function buildEmail({ arAging, dso, previousDso, topDelinquent, callQueue, fresh
 
 export async function generateAndSendARCollectionsReport() {
   const weekStart = mondayOf();
-  const [arAging, freshness] = await Promise.all([gatherSAARaging(), gatherFreshnessStatus()]);
+  const [arAging, freshness] = await Promise.all([gatherSAARaging(), gatherSAFreshness({ staleHours: STALE_DATA_HOURS })]);
   const { dso, previousDso } = await gatherAndRecordDSO(arAging.total);
   const topDelinquent = buildTopDelinquent(arAging);
   const callQueue = await buildCollectionCallQueue(arAging);
