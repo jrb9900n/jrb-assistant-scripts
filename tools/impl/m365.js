@@ -239,7 +239,7 @@ export async function getEmailAttachmentBytes({ email_id, attachment_id, userEma
   return Buffer.from(data.contentBytes, 'base64');
 }
 
-export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail } = {}) {
+export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate } = {}) {
   const user = userEmail ?? USER();
   const event = {
     subject,
@@ -249,8 +249,14 @@ export async function createCalendarEvent({ subject, start, end, body = '', time
     isReminderOn: true,
     reminderMinutesBeforeStart: 1440,
   };
+  if (recurrenceDaysOfWeek?.length) {
+    event.recurrence = {
+      pattern: { type: 'weekly', interval: 1, daysOfWeek: recurrenceDaysOfWeek },
+      range: { type: 'noEnd', startDate: recurrenceStartDate ?? start.slice(0, 10) },
+    };
+  }
   const data = await graph('POST', `/users/${user}/events`, event);
-  return { created: true, event_id: data.id, subject, start, calendar: user };
+  return { created: true, event_id: data.id, subject, start, calendar: user, recurring: !!event.recurrence };
 }
 
 // ── Inbox folder management ───────────────────────────────────
