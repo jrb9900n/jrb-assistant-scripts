@@ -384,8 +384,19 @@ const AGED_REPORT_BUCKET_MAP = {
  *
  * Each record: { name (vendor or customer), txnDate, txnType, docNumber,
  * dueDate, balance, totalAmt }.
+ *
+ * `ignoreOnOrBefore` (optional, YYYY-MM-DD): drops any record whose due date
+ * (falling back to txn date) is on or before this date — entirely, not just
+ * out of the headline total; it's not returned in any bucket, including
+ * writeOffCandidate. Also a caller-supplied policy, not a QBO fact, same as
+ * writeOffThresholdDays: bank-monthly-report.js passes '2023-08-20' to drop
+ * the exact QuickBooks data-conversion-artifact dump documented above, since
+ * Michael wants that noise fully excluded rather than merely flagged
+ * alongside genuinely old-but-real debt like the Sealmaster bills. Returned
+ * counts/total let the caller log or surface what was dropped rather than it
+ * vanishing with no trace anywhere.
  */
-export async function getAgedReportAsOf({ reportName, asOfDate, company = 'jrb', writeOffThresholdDays = 365 }) {
+export async function getAgedReportAsOf({ reportName, asOfDate, company = 'jrb', writeOffThresholdDays = 365, ignoreOnOrBefore = null }) {
   const token = await getToken(company);
   const realmId = getQBRealmId(company);
   // getQBRealmId() itself stays permissive (returns null) rather than
@@ -428,6 +439,9 @@ export async function getAgedReportAsOf({ reportName, asOfDate, company = 'jrb',
 
   const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [], writeOffCandidate: [] };
   const asOfMs = new Date(asOfDate + 'T00:00:00Z').getTime();
+  const ignoreCutoffMs = ignoreOnOrBefore ? new Date(ignoreOnOrBefore + 'T00:00:00Z').getTime() : null;
+  let ignoredCount = 0;
+  let ignoredTotal = 0;
   const sections = res.data?.Rows?.Row ?? [];
   for (const section of sections) {
     const label = (section.Header?.ColData?.[0]?.value ?? '').toLowerCase().trim();
@@ -453,6 +467,15 @@ export async function getAgedReportAsOf({ reportName, asOfDate, company = 'jrb',
       if (balance <= 0) continue;
       const dueDate = cd[dueDateIdx]?.value || null;
       const txnDate = cd[txnDateIdx]?.value || null;
+      const ageAnchor = dueDate || txnDate;
+      if (ignoreCutoffMs !== null && ageAnchor) {
+        const anchorMs = new Date(ageAnchor + 'T00:00:00Z').getTime();
+        if (anchorMs <= ignoreCutoffMs) {
+          ignoredCount += 1;
+          ignoredTotal += balance;
+          continue;
+        }
+      }
       const rawAmt = Number(cd[amtIdx]?.value);
       const record = {
         name: cd[nameIdx]?.value ?? '—',
@@ -466,7 +489,6 @@ export async function getAgedReportAsOf({ reportName, asOfDate, company = 'jrb',
       // Only the "91+ days" bucket can possibly be old enough to qualify —
       // no need to date-check current/d30/d60/d90 rows at all.
       if (bucketKey === 'd120plus') {
-        const ageAnchor = dueDate || txnDate;
         const ageDays = ageAnchor ? (asOfMs - new Date(ageAnchor + 'T00:00:00Z').getTime()) / 86400000 : Infinity;
         if (ageDays > writeOffThresholdDays) {
           buckets.writeOffCandidate.push(record);
@@ -479,7 +501,11 @@ export async function getAgedReportAsOf({ reportName, asOfDate, company = 'jrb',
   for (const b of Object.values(buckets)) b.sort((a, c) => c.balance - a.balance);
   const total = Object.values(buckets).flat().reduce((s, r) => s + r.balance, 0);
 
-  return { asOfDate, buckets, total };
+  if (ignoredCount > 0) {
+    logger.info('getAgedReportAsOf: ignored records on/before cutoff', { reportName, company, ignoreOnOrBefore, ignoredCount, ignoredTotal });
+  }
+
+  return { asOfDate, buckets, total, ignoredCount, ignoredTotal };
 }
 
 /**
