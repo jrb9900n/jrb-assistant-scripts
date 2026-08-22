@@ -13,7 +13,10 @@ const OPENAI_API_KEY = () => process.env.OPENAI_API_KEY;
 
 // OpenAI's TTS endpoint rejects input over 4096 characters -- a long agent
 // reply needs truncating before synthesis, not just failing outright.
-const TTS_MAX_INPUT_CHARS = 4000;
+// Exported so callers can pre-truncate `text` before passing it to both
+// synthesizeSpeech() and replyToTeamsWithAudio(), keeping the displayed
+// text and spoken audio in sync (Finding 4).
+export const TTS_MAX_INPUT_CHARS = 4000;
 
 /**
  * Transcribe a voice memo to text via OpenAI's Whisper API.
@@ -56,6 +59,9 @@ export async function transcribeAudio({ audioBuffer, mimeType, filename = 'voice
 
 /**
  * Synthesize speech from text via OpenAI's TTS API.
+ * Input is truncated to TTS_MAX_INPUT_CHARS before synthesis. Callers should
+ * pre-truncate using TTS_MAX_INPUT_CHARS so the displayed reply text also
+ * reflects the truncation (keeping spoken and displayed content in sync).
  * @param {string} text
  * @returns {Promise<Buffer|null>} MP3 audio bytes, or null if unavailable/failed.
  */
