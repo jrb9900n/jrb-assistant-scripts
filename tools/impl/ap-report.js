@@ -430,7 +430,13 @@ export async function generateAndSendAPReport() {
   // fire the Teams alert, same protection bank-monthly-report.js applies for
   // its own equivalent total-outage case.
   if (includedLabels.length === 0) {
-    throw new Error(`ap_report: total outage — every AP entity failed to fetch (${entityResults.map(r => r.label).join(', ')})`);
+    // failedLabels (real fetch failures), NOT entityResults.map(r => r.label)
+    // (every entity, including ones simply never OAuth-authorized) — using
+    // the latter would name a notConnected company (e.g. Propco today) as
+    // having "failed to fetch" alongside genuinely broken ones, misdirecting
+    // whoever triages the resulting Teams alert.
+    const detail = failedLabels.length ? `every AP entity failed to fetch (${failedLabels.join(', ')})` : 'no AP entity is connected yet';
+    throw new Error(`ap_report: total outage — ${detail}`);
   }
 
   // Note: getAPAgingReport() also returns `flagged` (60d+/$500+ bills, same

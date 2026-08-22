@@ -354,7 +354,7 @@ function crewTableHtml(rows, valueLabel) {
   return html;
 }
 
-function buildEmail({ weekStart, nextMonday, nextSunday, cashByCompany, apByCompany, combinedCash, cashAvailable, combinedAp, apAvailable, jrbAp, jrbApAvailable, net, nextWeekCash, arAging, arFlaggedCount, marketing, sales, estimating, crew, freshness, isDelayedRun }) {
+function buildEmail({ weekStart, nextMonday, nextSunday, cashByCompany, apByCompany, cashOk, apOk, combinedCash, cashAvailable, combinedAp, apAvailable, jrbAp, jrbApAvailable, net, nextWeekCash, arAging, arFlaggedCount, marketing, sales, estimating, crew, freshness, isDelayedRun }) {
   // arAging.available is false only when gatherSAARaging()'s own Supabase
   // query failed (see ar-report-helpers.js) — its total:0 default in that
   // case is a query-failure sentinel, not a real zero AR balance, so it must
@@ -366,10 +366,15 @@ function buildEmail({ weekStart, nextMonday, nextSunday, cashByCompany, apByComp
   // company to have succeeded, so a combined total can silently exclude a
   // failed entity (e.g. JRB itself) with no visible caveat at the headline —
   // flagged explicitly here rather than presenting a partial sum as if it
-  // were the real group total.
-  const cashOk = cashByCompany.filter(c => c.connected && !c.error);
+  // were the real group total. Uses the SAME `cashOk`/`apOk` arrays
+  // summarizeAcrossCompanies() already computed for combinedCash/combinedAp
+  // (passed in, not re-derived) — a local re-filter here previously used a
+  // looser `connected && !error` check missing summarizeAcrossCompanies'
+  // Number.isFinite guard, so a company returning a non-numeric total (e.g.
+  // a malformed QBO response) could silently count as "ok" here while
+  // already being excluded from the actual combined sum, hiding a real
+  // partial-failure from the caveat banner.
   const cashPartial = cashAvailable && cashOk.length < cashByCompany.filter(c => c.connected).length;
-  const apOk = apByCompany.filter(c => c.connected && !c.error);
   const apPartial = apAvailable && apOk.length < apByCompany.filter(c => c.connected).length;
 
   let html = `<!DOCTYPE html>
@@ -653,14 +658,14 @@ export async function generateAndSendWeeklyScorecardReport() {
   // (not re-derived inside buildEmail) so the email body and the subject
   // line/logged summary below can never silently disagree.
   const arAvailable = arAging.available !== false;
-  const { combinedTotal: combinedCash, available: cashAvailable } = summarizeAcrossCompanies(cashByCompany, c => c.total);
-  const { combinedTotal: combinedAp, available: apAvailable } = summarizeAcrossCompanies(apByCompany, c => c.total);
+  const { ok: cashOk, combinedTotal: combinedCash, available: cashAvailable } = summarizeAcrossCompanies(cashByCompany, c => c.total);
+  const { ok: apOk, combinedTotal: combinedAp, available: apAvailable } = summarizeAcrossCompanies(apByCompany, c => c.total);
   const jrbAp = apByCompany.find(c => c.company === 'jrb');
   const jrbApAvailable = jrbAp?.connected && !jrbAp?.error && Number.isFinite(jrbAp?.total);
   const net = (jrbApAvailable && arAvailable && Number.isFinite(arAging.total)) ? (arAging.total - jrbAp.total) : null;
 
   const body = buildEmail({
-    weekStart, nextMonday, nextSunday, cashByCompany, apByCompany,
+    weekStart, nextMonday, nextSunday, cashByCompany, apByCompany, cashOk, apOk,
     combinedCash, cashAvailable, combinedAp, apAvailable, jrbAp, jrbApAvailable, net,
     nextWeekCash, arAging, arFlaggedCount, marketing, sales, estimating, crew, freshness, isDelayedRun,
   });
