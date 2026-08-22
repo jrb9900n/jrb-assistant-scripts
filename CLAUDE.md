@@ -451,6 +451,25 @@ Michael's long-term goal, agreed as a 5-phase roadmap 2026-08-20: an assistant t
 - "Next Estimating block" tie-break: **whichever occurs first chronologically** (Tuesday vs. Thursday doesn't matter, soonest wins).
 - Auto-displacement autonomy: **follow the President Weekly Block Schedule's own displacement priority order automatically for Standard blocks; never silently touch PROTECTED/DEEP WORK blocks.**
 
+> **Known gap found 2026-08-21, not yet fixed**: `GOOGLE_MAPS_API_KEY` is stored in Credential Manager but is **never actually injected by `launcher/start-agent.ps1`** — it's simply missing from that file's hardcoded `$secrets` hashtable. The live drive-time feature has therefore likely been silently returning `status: 'unavailable'` in production this whole time (confirmed the code degrades gracefully, so no crash — just no drive-time blocks), even after the Routes API was enabled. Earlier live verification of `getDriveTimeMinutes()` only proved the Google API itself works; it used a standalone test script that manually set the env var, not the real launcher path. Needs Michael's go-ahead to add one line to `start-agent.ps1` (per this file's Autonomy Rules) — bundle with the `OPENAI_API_KEY` addition below since both need the same kind of launcher edit.
+
+---
+
+## Teams Voice Messages (built 2026-08-21)
+
+Michael asked for two things: the bot transcribing a voice memo he sends in Teams, and the bot being able to reply with a spoken voice message "like OpenAI can do." Chose **OpenAI for both directions** (Whisper for transcription, OpenAI's TTS API for spoken replies) over Azure Speech after initially considering Azure — one vendor, one credential, and it directly matches the ChatGPT-voice-mode comparison Michael drew.
+
+### How it works
+- `tools/impl/openai-voice.js` (new): `transcribeAudio({audioBuffer, mimeType, filename})` via `POST /v1/audio/transcriptions` (Whisper), `synthesizeSpeech(text)` via `POST /v1/audio/speech` (TTS, `tts-1`/`alloy`, capped at 4000 input chars — OpenAI's TTS endpoint rejects longer input). Both degrade to `null` on any failure (no key, bad audio, network error) rather than throwing.
+- `teams/bot.js`'s `extractAndTranscribeVoiceMemo()` downloads a voice memo's `audio/*` attachment via the bot's own existing `getBotToken()` (same auth Teams requires for image attachments), caps at 25MB, transcribes it. Called **before** the `if (!userText) return` bail, since a voice memo typically carries no `activity.text` at all — bailing first would silently drop the whole message.
+- **Voice replies are on-request only** (Michael's explicit choice, not "mirror how you sent it") — `WANTS_VOICE_REPLY_RE` matches phrases like "reply with voice"/"say that out loud" in the (possibly-transcribed) message text. When it matches, `remember()` synthesizes speech and sends it as an `audio/mp3` **data URI** attachment (no new storage dependency — input is already capped at 4000 chars, so payload size stays reasonable) instead of a plain text reply, falling back to text if synthesis fails for any reason.
+
+### Setup step needed (not yet done as of 2026-08-21)
+`OPENAI_API_KEY` needs to be created at platform.openai.com (new vendor account/credential, like Google Maps was) and saved via the new `launcher/save-openai-secrets.ps1`. **Also needs adding to `launcher/start-agent.ps1`'s `$secrets` hashtable** — not yet done, requires Michael's go-ahead per the launcher-edit autonomy rule (bundle with the `GOOGLE_MAPS_API_KEY` fix noted above, since both are the same kind of one-line addition).
+
+### Not yet verified live
+Built and syntax-checked, but not tested against a real Teams voice memo or a real OpenAI API call — needs `OPENAI_API_KEY` in place first. Unverified assumptions worth confirming once live: (1) Teams' actual `contentType` for a voice memo attachment matches the `audio/*` pattern assumed here, (2) Teams renders/plays a bot-sent `data:audio/mp3;base64,...` attachment correctly (no live confirmation this works the way image attachments do).
+
 ---
 
 ## FleetSharp GPS/Telematics Read Tools (built 2026-08-19)
@@ -529,6 +548,8 @@ All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode.
 Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`, `FLEETSHARP_URL`, `FLEETSHARP_EMAIL`, `FLEETSHARP_PASSWORD`, `GOOGLE_MAPS_API_KEY` (Routes API, drive-time calc for the estimate-visit scheduling feature — see Autonomous Schedule Manager section; set via `launcher/save-googlemaps-secrets.ps1`)
 
 Pending (see Multi-Company QuickBooks Support section): `QB_REFRESH_TOKEN_TRANSPORT`, `QB_REALM_ID_TRANSPORT` — for JRB Transport LLC's QBO connection, reusing the same `QB_CLIENT_ID`/`QB_CLIENT_SECRET` app. Not yet added to `start-agent.ps1`'s env injection (requires Michael's go-ahead per the launcher-edit autonomy rule) or populated in Credential Manager (populated automatically by the `/qb-reauth?company=transport` OAuth flow once the launcher change lands).
+
+Pending (see Teams Voice Messages section): `OPENAI_API_KEY` — Whisper transcription + TTS voice replies. Not yet created, not yet added to `start-agent.ps1`'s env injection. **Also pending, discovered while building this**: `GOOGLE_MAPS_API_KEY` is in Credential Manager but was never actually added to `start-agent.ps1` either, despite being documented above as configured — the live drive-time feature has likely never worked in production as a result. Both need the same one-line `start-agent.ps1` addition; bundle them together once Michael approves.
 
 Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
 

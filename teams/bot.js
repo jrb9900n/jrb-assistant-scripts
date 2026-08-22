@@ -132,6 +132,36 @@ async function replyToTeams(activity, text) {
   }
 }
 
+// Same as replyToTeams, but attaches synthesized speech audio as a data URI.
+// A data URI (vs. uploading to storage and linking) keeps this self-contained
+// -- no new storage dependency -- and stays well within reasonable payload
+// size for a single spoken reply, since synthesizeSpeech's input is already
+// capped at TTS_MAX_INPUT_CHARS before this is ever called.
+async function replyToTeamsWithAudio(activity, text, audioBuffer) {
+  const token = await getBotToken();
+  const serviceUrl = activity.serviceUrl.replace(/\/$/, '');
+  const url = `${serviceUrl}/v3/conversations/${activity.conversation.id}/activities/${activity.id}`;
+  const replyRes = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      type: 'message',
+      text,
+      attachments: [{
+        contentType: 'audio/mp3',
+        contentUrl: `data:audio/mp3;base64,${audioBuffer.toString('base64')}`,
+        name: 'voice-reply.mp3',
+      }],
+    }),
+  });
+  if (!replyRes.ok) {
+    logger.error('Teams voice reply failed', { status: replyRes.status, body: await replyRes.text() });
+  }
+}
+
 // ── /notify endpoint — send a proactive Teams message to Michael ──────────────
 async function handleNotify(req, res) {
   const auth = req.headers['x-execute-secret'] || req.headers['authorization']?.replace('Bearer ', '');
@@ -263,6 +293,46 @@ async function extractImageAttachments(activity) {
   return images;
 }
 
+// ── Teams voice memos ────────────────────────────────────────────────────────
+// A voice memo arrives as a single `audio/*` attachment, same download/auth
+// mechanics as an image attachment above, but piped through OpenAI's Whisper
+// API for transcription instead of handed to the model as-is (Claude doesn't
+// take raw audio input). A voice memo typically carries no activity.text at
+// all, so the caller must fold this transcript in BEFORE deciding whether the
+// message has any actionable content.
+const AUDIO_CONTENT_TYPE_RE = /^audio\//i;
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // generous cap for a several-minute voice memo
+
+async function extractAndTranscribeVoiceMemo(activity) {
+  const attachments = activity.attachments || [];
+  const audioAtt = attachments.find(a => a.contentUrl && AUDIO_CONTENT_TYPE_RE.test(a.contentType || ''));
+  if (!audioAtt) return null;
+
+  try {
+    const token = await getBotToken();
+    const res = await fetch(audioAtt.contentUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      logger.warn('Teams: voice memo download failed', { status: res.status, contentType: audioAtt.contentType });
+      return null;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > MAX_AUDIO_BYTES) {
+      logger.warn('Teams: voice memo too large, skipping', { size: buf.length, max: MAX_AUDIO_BYTES });
+      return null;
+    }
+    const { transcribeAudio } = await import('../tools/impl/openai-voice.js');
+    return await transcribeAudio({ audioBuffer: buf, mimeType: audioAtt.contentType, filename: audioAtt.name || 'voice-memo' });
+  } catch (err) {
+    logger.warn('Teams: voice memo transcription error', { err: err.message });
+    return null;
+  }
+}
+
+// A user asking for a spoken reply is the only trigger for voice output
+// (Michael's explicit choice — replies stay text-only otherwise, even when
+// the incoming message was itself a voice memo).
+const WANTS_VOICE_REPLY_RE = /\b(reply|respond|answer|say|read|talk|speak)\b.{0,30}\b(voice|audio|out loud|aloud)\b|\b(voice|audio)\b.{0,10}\breply\b/i;
+
 // ── Teams activity handler ────────────────────────────────────────────────────
 async function handleTeamsActivity(req, res) {
   let body = '';
@@ -278,8 +348,19 @@ async function handleTeamsActivity(req, res) {
 
   if (activity.type !== 'message') return;
 
-  const userText = (activity.text || '').replace(/<[^>]+>/g, '').trim();
+  const rawText = (activity.text || '').replace(/<[^>]+>/g, '').trim();
+
+  // Transcribe any voice memo BEFORE the empty-text bail below -- a voice
+  // memo typically arrives with activity.text empty, carrying its entire
+  // content in the audio attachment. Bailing on !userText first would
+  // silently drop the whole message.
+  const voiceTranscript = await extractAndTranscribeVoiceMemo(activity);
+  const userText = voiceTranscript
+    ? (rawText ? `${rawText}\n\n[Voice memo transcript]: ${voiceTranscript}` : voiceTranscript)
+    : rawText;
   if (!userText) return;
+
+  const wantsVoiceReply = WANTS_VOICE_REPLY_RE.test(userText);
 
   // Persist conversation reference so we can send proactive messages later
   saveConversationRef(activity);
@@ -324,7 +405,23 @@ async function handleTeamsActivity(req, res) {
     }),
   ]);
 
-  async function remember(text) {
+  async function remember(text, { voiceReply = false } = {}) {
+    if (voiceReply) {
+      try {
+        const { synthesizeSpeech } = await import('../tools/impl/openai-voice.js');
+        const audio = await synthesizeSpeech(text);
+        if (audio) {
+          await replyToTeamsWithAudio(activity, text, audio);
+          saveTurn(sessionId, 'assistant', text).catch(err =>
+            logger.warn('Teams: saveTurn (assistant) failed', { err: err.message })
+          );
+          return;
+        }
+        logger.warn('Teams: voice reply requested but synthesis unavailable, falling back to text');
+      } catch (err) {
+        logger.warn('Teams: voice reply synthesis error, falling back to text', { err: err.message });
+      }
+    }
     await replyToTeams(activity, text);
     saveTurn(sessionId, 'assistant', text).catch(err =>
       logger.warn('Teams: saveTurn (assistant) failed', { err: err.message })
@@ -456,7 +553,7 @@ Message: "${userText}"
         await remember(result);
       }
     } else {
-      await remember(result);
+      await remember(result, { voiceReply: wantsVoiceReply });
     }
   } catch (err) {
     logger.error('Teams handler error', { err: err.message });
