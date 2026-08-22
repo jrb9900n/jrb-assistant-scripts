@@ -38,7 +38,7 @@
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
 import { getAgedReportAsOf } from './quickbooks.js';
-import { listQBCompanies, getQBCompanyLabel } from './qb-token.js';
+import { listQBCompanies, getQBCompanyLabel, getQBRealmId } from './qb-token.js';
 import { f$, fD, sectionHeader, alertBox } from './ar-report-helpers.js';
 
 const WRITE_OFF_THRESHOLD_DAYS = 365;
@@ -92,6 +92,13 @@ async function fetchAR(asOfDate) {
 }
 
 async function fetchAPEntity({ company, label }, asOfDate) {
+  // Not yet OAuth-authorized (e.g. a company added to the registry before
+  // Michael completes /qb-reauth for it) — skip quietly rather than
+  // surfacing a "data unavailable" warning every month for a company that
+  // was never connected in the first place. mergeAPEntities() below only
+  // shows failedLabels for a REAL fetch failure, not this case.
+  if (!getQBRealmId(company)) return { ok: false, company, label, notConnected: true };
+
   try {
     const raw = await getAgedReportAsOf({ reportName: 'AgedPayableDetail', asOfDate, company, writeOffThresholdDays: WRITE_OFF_THRESHOLD_DAYS });
     const excluded = EXCLUDED_INTERCOMPANY_VENDORS[company] ?? new Set();
@@ -115,13 +122,21 @@ async function fetchAPEntity({ company, label }, asOfDate) {
 // way so buildAgingTable()/buildWriteOffBox() don't need to special-case it.
 function mergeAPEntities(results) {
   const ok = results.filter(r => r.ok);
-  const failed = results.filter(r => !r.ok);
+  // notConnected entities are omitted from the failure banner (see
+  // fetchAPEntity) — only a real fetch failure on an already-authorized
+  // entity is worth flagging every month.
+  const failed = results.filter(r => !r.ok && !r.notConnected);
   const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [], writeOffCandidate: [] };
   for (const r of ok) {
     for (const key of Object.keys(buckets)) buckets[key].push(...(r.buckets[key] ?? []));
   }
   for (const b of Object.values(buckets)) b.sort((a, c) => c.balance - a.balance);
-  return { buckets, ok: ok.length > 0, failedLabels: failed.map(r => r.label) };
+  // includedLabels (not AP_ENTITIES, which lists every CONFIGURED company
+  // regardless of connection status) is what the "Consolidated (...)" header
+  // below should list — otherwise a company added to QB_COMPANIES but not
+  // yet OAuth-authorized (e.g. Propco as of this writing) would be claimed
+  // as consolidated in the header while contributing zero real data.
+  return { buckets, ok: ok.length > 0, includedLabels: ok.map(r => r.label), failedLabels: failed.map(r => r.label) };
 }
 
 function buildAgingTable(buckets) {
@@ -169,7 +184,7 @@ function buildEmail({ asOfDate, arResult, apMerged }) {
 
 <!-- HEADER -->
 <tr><td style="background-color:#1a1a2e;padding:24px 32px;">
-  <p style="margin:0;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:0.5px;">J.R. Boehlke, LLC &amp; JRB Transport LLC</p>
+  <p style="margin:0;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:0.5px;">JRB Group</p>
   <p style="margin:4px 0 0;color:#aaaacc;font-size:13px;">Monthly Bank Report &nbsp;|&nbsp; As of ${fD(asOfDate)}</p>
 </td></tr>
 
@@ -195,7 +210,7 @@ function buildEmail({ asOfDate, arResult, apMerged }) {
   }
 
   // ── Accounts Payable (Consolidated) ──────────────────────────────────────
-  html += sectionHeader('Accounts Payable — Consolidated (J.R. Boehlke + JRB Transport)');
+  html += sectionHeader(`Accounts Payable — Consolidated (${apMerged.includedLabels.length ? apMerged.includedLabels.join(' + ') : 'none available this run'})`);
   if (!apMerged.ok) {
     html += alertBox('#fff8f0', '#e6a817', 'AP Data Unavailable', `<p style="margin:0;font-size:13px;color:#533f03;">Couldn't reach QuickBooks for any AP entity this run.</p>`);
   } else {
@@ -244,7 +259,15 @@ export async function generateAndSendBankMonthlyReport({ asOfDate: asOfOverride 
   // "succeeding" with an all-unavailable email visible only if Michael
   // happens to open and read it before his bank deadline.
   if (!arResult.ok && !apMerged.ok) {
-    throw new Error(`bank_monthly_report: total outage — AR failed (${arResult.error}) and every AP company failed (${apMerged.failedLabels.join(', ')})`);
+    // apMerged.failedLabels can be empty here (e.g. every AP company is
+    // simply notConnected rather than erroring) — describe that case
+    // explicitly instead of throwing a message with a blank parenthetical
+    // that gives an on-call reader no information about what actually
+    // happened.
+    const apDetail = apMerged.failedLabels.length
+      ? `every AP company failed (${apMerged.failedLabels.join(', ')})`
+      : 'no AP company is connected yet';
+    throw new Error(`bank_monthly_report: total outage — AR failed (${arResult.error}) and ${apDetail}`);
   }
 
   const body = buildEmail({ asOfDate, arResult, apMerged });
