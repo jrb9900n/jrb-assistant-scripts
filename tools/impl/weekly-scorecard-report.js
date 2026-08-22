@@ -10,13 +10,24 @@
 // 12-Week Cash Forecast, Marketing Performance, Sales Pipeline/BD,
 // Estimating Pipeline, Field/Client Meetings Briefing) plus the pre-existing
 // Sunday 6 AM Weekly Finance Report. Rather than re-deriving any of that:
-//   - Cash: reuses quickbooks.js's getCashBalance() directly (same function
-//     cash-forecast-report.js calls), plus reads that report's own
-//     cash_forecast_snapshots row (written every Monday) for a one-line
+//   - Cash: multi-entity (added 2026-08-21) — gatherCashAndApByCompany()
+//     calls quickbooks.js's getCashBalance() per configured QB company (see
+//     qb-token.js's listQBCompanies()) via the shared gatherAcrossCompanies
+//     helper, combined into one group total; JRB Transport LLC and JRB
+//     Granville Propco's own accounts are broken out in their own sections.
+//     Also reads cash-forecast-report.js's own cash_forecast_snapshots row
+//     (written every Monday, itself combined-all-entities) for a one-line
 //     "next week's projected cash" pointer instead of recomputing the
 //     12-week heuristic model.
-//   - AR / AP: reuses ar-report-helpers.js's gatherSAARaging() and
-//     quickbooks.js's getAPAgingReport() directly for the two totals.
+//   - AR / AP: AR reuses ar-report-helpers.js's gatherSAARaging() — J.R.
+//     Boehlke only, since Service Autopilot doesn't track the other
+//     entities' customers (confirmed by Michael, they have no A/R at all).
+//     AP is multi-entity like Cash above (same gatherCashAndApByCompany()
+//     call, since QBO's own API happens to serve both cheaply together) —
+//     shown per-entity + combined; the "Net (AR-AP)" figure stays JRB-vs-JRB
+//     only, since blending J.R. Boehlke's receivables against the whole
+//     group's payables would fabricate a working-capital number no single
+//     entity actually has.
 //   - Marketing / Sales KPIs: marketing-performance-report.js and
 //     sales-pipeline-report.js only export their top-level `generateAndSend*`
 //     functions (their gather/compute helpers are internal, entangled with
@@ -53,8 +64,9 @@
 
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
-import { supabase, gatherSAARaging, gatherSAFreshness, mondayOf, addDaysUTC, daysBetween, f$, fD, sectionHeader, alertBox } from './ar-report-helpers.js';
+import { supabase, gatherSAARaging, gatherSAFreshness, mondayOf, addDaysUTC, daysBetween, f$, fD, sectionHeader, alertBox, entityDivider } from './ar-report-helpers.js';
 import { getCashBalance, getAPAgingReport } from './quickbooks.js';
+import { gatherAcrossCompanies, summarizeAcrossCompanies } from './qb-token.js';
 import { getCrews } from './scheduling.js';
 
 const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
@@ -176,6 +188,28 @@ async function gatherLatestSalesPipelineSnapshot() {
     logger.warn('weekly_scorecard_report: sales_pipeline_snapshots read failed', { err: err.message });
     return null;
   }
+}
+
+// ── Cash / AP: multi-entity (added 2026-08-21) ──────────────────────────────
+// Confirmed by Michael — JRB Transport LLC and JRB Granville Propco have no
+// A/R or commissions of their own, but their cash position and AP should
+// still appear here. Both gathers loop over every configured QB company
+// (tools/impl/qb-token.js's listQBCompanies()); a company never OAuth-
+// authorized yet is silently omitted (not an error), one whose live query
+// fails is flagged with `error` rather than silently dropped from totals.
+// Combined into one gatherAcrossCompanies pass (not two separate ones) so
+// each company's realm-ID/not-connected check — including the blocking
+// meta-file read getQBRealmId() falls back to for a not-yet-restarted
+// process, see qb-token.js — only happens once per company per run, and so
+// cash/AP for a given company always land in the same result object.
+async function gatherCashAndApByCompany() {
+  return gatherAcrossCompanies(async company => {
+    const [{ total: cashTotal, accounts }, { total: apTotal }] = await Promise.all([
+      getCashBalance(company),
+      getAPAgingReport(company),
+    ]);
+    return { cashTotal, accounts, apTotal };
+  });
 }
 
 // ── Cash: pointer to next week's already-computed forecast ─────────────────
@@ -320,17 +354,28 @@ function crewTableHtml(rows, valueLabel) {
   return html;
 }
 
-function buildEmail({ weekStart, nextMonday, nextSunday, cash, apAging, nextWeekCash, arAging, arFlaggedCount, marketing, sales, estimating, crew, freshness, isDelayedRun }) {
+function buildEmail({ weekStart, nextMonday, nextSunday, cashByCompany, apByCompany, cashOk, apOk, combinedCash, cashAvailable, combinedAp, apAvailable, jrbAp, jrbApAvailable, net, nextWeekCash, arAging, arFlaggedCount, marketing, sales, estimating, crew, freshness, isDelayedRun }) {
   // arAging.available is false only when gatherSAARaging()'s own Supabase
   // query failed (see ar-report-helpers.js) — its total:0 default in that
   // case is a query-failure sentinel, not a real zero AR balance, so it must
   // not be rendered as one.
   const arAvailable = arAging.available !== false;
   const arTotal = arAvailable ? arAging.total : null;
-  const cashAvailable = !cash.unavailable && Number.isFinite(cash.total);
-  const apAvailable = !apAging.unavailable && Number.isFinite(apAging.total);
-  const apTotal = apAvailable ? apAging.total : null;
-  const net = (apAvailable && arAvailable && Number.isFinite(arTotal)) ? (arTotal - apTotal) : null;
+
+  // Partial-failure detection: cashAvailable/apAvailable only require ONE
+  // company to have succeeded, so a combined total can silently exclude a
+  // failed entity (e.g. JRB itself) with no visible caveat at the headline —
+  // flagged explicitly here rather than presenting a partial sum as if it
+  // were the real group total. Uses the SAME `cashOk`/`apOk` arrays
+  // summarizeAcrossCompanies() already computed for combinedCash/combinedAp
+  // (passed in, not re-derived) — a local re-filter here previously used a
+  // looser `connected && !error` check missing summarizeAcrossCompanies'
+  // Number.isFinite guard, so a company returning a non-numeric total (e.g.
+  // a malformed QBO response) could silently count as "ok" here while
+  // already being excluded from the actual combined sum, hiding a real
+  // partial-failure from the caveat banner.
+  const cashPartial = cashAvailable && cashOk.length < cashByCompany.filter(c => c.connected).length;
+  const apPartial = apAvailable && apOk.length < apByCompany.filter(c => c.connected).length;
 
   let html = `<!DOCTYPE html>
 <html lang="en">
@@ -342,7 +387,7 @@ function buildEmail({ weekStart, nextMonday, nextSunday, cash, apAging, nextWeek
 
 <!-- HEADER -->
 <tr><td style="background-color:#1a1a2e;padding:24px 32px;">
-  <p style="margin:0;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:0.5px;">J.R. Boehlke, LLC</p>
+  <p style="margin:0;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:0.5px;">JRB Group</p>
   <p style="margin:4px 0 0;color:#aaaacc;font-size:13px;">Weekly Business Scorecard &nbsp;|&nbsp; Week of ${fD(weekStart)} &nbsp;|&nbsp; ahead of the 3:00-4:30 PM Weekly Review / Next Week Prep block</p>
 </td></tr>
 
@@ -369,59 +414,113 @@ function buildEmail({ weekStart, nextMonday, nextSunday, cash, apAging, nextWeek
 
   // ── Top KPI bar ────────────────────────────────────────────────────────────
   html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#eef1fa;border-radius:4px;margin-bottom:20px;"><tr>
-  ${statTile(cashAvailable ? f$(cash.total) : '&mdash;', 'Cash On Hand', '#1a6e1a')}
-  ${statTile(net !== null ? f$(net) : '&mdash;', 'AR &minus; AP', net !== null && net >= 0 ? '#1a6e1a' : net !== null ? '#c0392b' : '#1a1a2e')}
+  ${statTile(cashAvailable ? f$(combinedCash) : '&mdash;', cashPartial ? 'Cash On Hand (Partial — see below)' : 'Cash On Hand (All Entities)', '#1a6e1a')}
+  ${statTile(net !== null ? f$(net) : '&mdash;', 'JRB AR &minus; AP', net !== null && net >= 0 ? '#1a6e1a' : net !== null ? '#c0392b' : '#1a1a2e')}
   ${statTile(sales ? f$(sales.open_pipeline_value) : '&mdash;', 'Open Sales Pipeline')}
   ${statTile(estimating.available ? f$(estimating.value) : '&mdash;', 'Estimating Backlog', '#b35900')}
 </tr></table>`;
 
   // ── Section: Cash Position ──────────────────────────────────────────────────
-  html += sectionHeader('Cash Position');
+  // Multi-entity: JRB Transport LLC and JRB Granville Propco have their own
+  // bank accounts, separate from J.R. Boehlke's — shown as their own rows
+  // below combined into one total, never blended account-by-account.
+  html += sectionHeader('Cash Position (All Entities)');
   if (!cashAvailable) {
     html += alertBox('#fff0f0', '#c0392b', 'Cash Position Unavailable This Run',
-      `<p style="margin:0;font-size:13px;color:#7a1f1f;">The QuickBooks bank balance lookup failed this run — figures below are not shown rather than guessed. Check QuickBooks directly or wait for the next run.</p>`);
+      `<p style="margin:0;font-size:13px;color:#7a1f1f;">No QuickBooks bank balance could be fetched from any entity this run — figures below are not shown rather than guessed. This means either no entity is authorized yet, or a connected entity's lookup failed — check QuickBooks directly or wait for the next run.</p>`);
   } else {
-    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">`;
-    for (const acct of cash.accounts) {
-      html += `<tr>
-        <td style="padding:5px 6px;font-size:13px;color:#444444;">${acct.name}</td>
-        <td style="padding:5px 6px;font-size:13px;font-weight:bold;color:#333333;text-align:right;white-space:nowrap;">${f$(acct.balance)}</td>
-      </tr>`;
+    if (cashPartial) {
+      const missing = cashByCompany.filter(c => c.connected && c.error).map(c => c.label).join(', ');
+      html += `<p style="margin:0 0 10px;font-size:12px;color:#c0392b;">Combined total below is PARTIAL — includes ${cashOk.map(c => c.label).join(', ')}; missing ${missing} (lookup failed this run).</p>`;
     }
-    html += `<tr><td style="padding:6px 6px;font-size:13px;font-weight:bold;color:#1a1a2e;">Total</td><td style="padding:6px 6px;font-size:14px;font-weight:bold;color:#1a6e1a;text-align:right;white-space:nowrap;">${f$(cash.total)}</td></tr>`;
-    html += `</table>`;
+    for (const c of cashByCompany) {
+      if (!c.connected) continue; // not yet OAuth-authorized — nothing to show
+      if (c.error) {
+        html += `<p style="margin:0 0 8px;font-size:12px;color:#c0392b;">${c.label}: cash lookup failed (${c.error}).</p>`;
+        continue;
+      }
+      html += entityDivider(c.label);
+      html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:4px;">`;
+      for (const acct of c.accounts) {
+        html += `<tr>
+          <td style="padding:4px 6px;font-size:13px;color:#444444;">${acct.name}</td>
+          <td style="padding:4px 6px;font-size:13px;font-weight:bold;color:#333333;text-align:right;white-space:nowrap;">${f$(acct.balance)}</td>
+        </tr>`;
+      }
+      html += `<tr><td style="padding:5px 6px;font-size:12px;font-weight:bold;color:#1a1a2e;">Subtotal</td><td style="padding:5px 6px;font-size:13px;font-weight:bold;color:#1a6e1a;text-align:right;white-space:nowrap;">${f$(c.total)}</td></tr>`;
+      html += `</table>`;
+    }
+    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:8px 0 8px;border-top:1px solid #e8e8e8;"><tr>
+      <td style="padding:8px 6px 0;font-size:13px;font-weight:bold;color:#1a1a2e;">Combined Total</td>
+      <td style="padding:8px 6px 0;font-size:15px;font-weight:bold;color:#1a6e1a;text-align:right;white-space:nowrap;">${f$(combinedCash)}</td>
+    </tr></table>`;
   }
   if (nextWeekCash) {
-    html += `<p style="margin:0 0 16px;font-size:12px;color:#555577;">Next week's projection (from Monday's 12-Week Cash Forecast): starting ~${f$(nextWeekCash.starting)}, ending ~${f$(nextWeekCash.ending)}. See that report for the full model and its assumptions.</p>`;
+    html += `<p style="margin:0 0 16px;font-size:12px;color:#555577;">Next week's projection (from Monday's 12-Week Cash Forecast, combined all entities): starting ~${f$(nextWeekCash.starting)}, ending ~${f$(nextWeekCash.ending)}. See that report for the full model, per-entity breakdown, and its assumptions.</p>`;
   } else {
     html += `<p style="margin:0 0 16px;font-size:11px;color:#aaaaaa;font-style:italic;">Next week's cash projection not available this run — see Monday's 12-Week Cash Forecast report.</p>`;
   }
 
   // ── Section: AR / AP Snapshot ────────────────────────────────────────────────
+  // AR is J.R. Boehlke-only (Service Autopilot doesn't track the other
+  // entities' customers — confirmed by Michael, they have no A/R at all).
+  // AP is shown per-entity + combined, since Transport/Propco's AP is real
+  // exposure even though they carry no AR. Net (AR-AP) stays JRB-vs-JRB —
+  // blending J.R. Boehlke's receivables against the whole group's payables
+  // would fabricate a working-capital number no single entity actually has.
   html += sectionHeader('AR / AP Snapshot');
   if (!arAvailable) {
     html += alertBox('#fff0f0', '#c0392b', 'AR Total Unavailable This Run',
       `<p style="margin:0;font-size:13px;color:#7a1f1f;">The Supabase AR aging query failed this run — AR and Net figures below are not shown rather than guessed as $0.</p>`);
   }
   if (!apAvailable) {
-    html += alertBox('#fff8f0', '#e6a817', 'AP Total Unavailable This Run',
-      `<p style="margin:0;font-size:13px;color:#533f03;">The QuickBooks AP aging lookup failed this run — AP and Net figures below are not shown rather than guessed.${arAvailable ? ' AR is still shown (a separate, Supabase-backed source).' : ''}</p>`);
+    html += alertBox('#fff8f0', '#e6a817', 'AP Totals Unavailable This Run',
+      `<p style="margin:0;font-size:13px;color:#533f03;">No QuickBooks AP aging could be fetched from any entity this run — AP and Net figures below are not shown rather than guessed. This means either no entity is authorized yet, or a connected entity's lookup failed.${arAvailable ? ' AR is still shown (a separate, Supabase-backed source).' : ''}</p>`);
+  } else if (!jrbApAvailable) {
+    // apAvailable only requires ONE company to have succeeded — if Transport
+    // or Propco loaded fine but JRB itself didn't, apAvailable stays true (so
+    // the banner above never fires) even though the JRB-specific AP/Net rows
+    // just below render as bare "—" with no adjacent explanation otherwise.
+    html += alertBox('#fff8f0', '#e6a817', 'J.R. Boehlke AP Unavailable This Run',
+      `<p style="margin:0;font-size:13px;color:#533f03;">J.R. Boehlke's own AP lookup failed this run — its AP and Net figures below are not shown rather than guessed, even though another entity's AP did load (see AP by Entity below).</p>`);
   }
   html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:6px;">
     <tr>
-      <td style="padding:5px 6px;font-size:13px;color:#444444;">Total Open AR</td>
+      <td style="padding:5px 6px;font-size:13px;color:#444444;">Total Open AR (J.R. Boehlke)</td>
       <td style="padding:5px 6px;font-size:13px;font-weight:bold;color:#b35900;text-align:right;white-space:nowrap;">${arAvailable ? f$(arTotal) : '&mdash;'}</td>
     </tr>
     <tr>
-      <td style="padding:5px 6px;font-size:13px;color:#444444;">Total Open AP</td>
-      <td style="padding:5px 6px;font-size:13px;font-weight:bold;color:#b35900;text-align:right;white-space:nowrap;">${apAvailable ? f$(apTotal) : '&mdash;'}</td>
+      <td style="padding:5px 6px;font-size:13px;color:#444444;">Total Open AP (J.R. Boehlke)</td>
+      <td style="padding:5px 6px;font-size:13px;font-weight:bold;color:#b35900;text-align:right;white-space:nowrap;">${jrbApAvailable ? f$(jrbAp.total) : '&mdash;'}</td>
     </tr>
     <tr>
-      <td style="padding:6px 6px;font-size:13px;font-weight:bold;color:#1a1a2e;">Net (AR &minus; AP)</td>
+      <td style="padding:6px 6px;font-size:13px;font-weight:bold;color:#1a1a2e;">Net (AR &minus; AP), J.R. Boehlke only</td>
       <td style="padding:6px 6px;font-size:14px;font-weight:bold;color:${net === null ? '#888888' : net >= 0 ? '#1a6e1a' : '#c0392b'};text-align:right;white-space:nowrap;">${net !== null ? f$(net) : '&mdash;'}</td>
     </tr>
   </table>`;
   html += `<p style="margin:0 0 16px;font-size:12px;color:#555577;">${arFlaggedCount} account${arFlaggedCount === 1 ? '' : 's'} currently on the collection call queue (30+ days, $500+) — see Monday's AR/Collections report for the full list.</p>`;
+  if (apAvailable) {
+    html += `<p style="margin:0 0 6px;font-size:12px;font-weight:bold;color:#555577;">AP by Entity</p>`;
+    if (apPartial) {
+      const missing = apByCompany.filter(c => c.connected && c.error).map(c => c.label).join(', ');
+      html += `<p style="margin:0 0 6px;font-size:12px;color:#c0392b;">Combined total below is PARTIAL — missing ${missing} (lookup failed this run).</p>`;
+    }
+    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:8px;">`;
+    for (const c of apByCompany) {
+      if (!c.connected) continue;
+      if (c.error) {
+        html += `<tr><td style="padding:4px 6px;font-size:12px;color:#c0392b;" colspan="2">${c.label}: AP lookup failed (${c.error}).</td></tr>`;
+        continue;
+      }
+      html += `<tr>
+        <td style="padding:4px 6px;font-size:13px;color:#444444;">${c.label}</td>
+        <td style="padding:4px 6px;font-size:13px;font-weight:bold;color:#333333;text-align:right;white-space:nowrap;">${f$(c.total)}</td>
+      </tr>`;
+    }
+    html += `<tr><td style="padding:5px 6px;font-size:13px;font-weight:bold;color:#1a1a2e;">Combined Total AP</td><td style="padding:5px 6px;font-size:14px;font-weight:bold;color:#b35900;text-align:right;white-space:nowrap;">${f$(combinedAp)}</td></tr>`;
+    html += `</table>`;
+    html += `<p style="margin:0 0 16px;font-size:11px;color:#888888;">Full vendor-level detail (aging, due-soon, duplicate/discrepancy flags) is in Wednesday's Accounts Payable report.</p>`;
+  }
 
   // ── Section: Marketing & Sales KPIs This Week ────────────────────────────────
   html += sectionHeader('Marketing & Sales KPIs');
@@ -521,8 +620,7 @@ export async function generateAndSendWeeklyScorecardReport() {
   const isDelayedRun = new Date().getUTCDay() !== 5; // 5 = Friday (UTC)
 
   const results = await Promise.allSettled([
-    getCashBalance(),
-    getAPAgingReport(),
+    gatherCashAndApByCompany(),
     gatherSAARaging(),
     gatherSAFreshness({ staleHours: STALE_SA_HOURS }),
     gatherLatestMarketingSnapshot(),
@@ -531,10 +629,17 @@ export async function generateAndSendWeeklyScorecardReport() {
     gatherCrewCapacityNextWeek(nextMonday, nextSunday),
     gatherNextWeekCashForecast(weekStart),
   ]);
-  const [cashResult, apResult, arResult, freshnessResult, marketingResult, salesResult, estimatingResult, crewResult, nextWeekCashResult] = results;
+  const [cashAndApResult, arResult, freshnessResult, marketingResult, salesResult, estimatingResult, crewResult, nextWeekCashResult] = results;
 
-  const cash = unwrap(cashResult, { total: null, accounts: [], unavailable: true }, 'getCashBalance');
-  const apAging = unwrap(apResult, { total: null, buckets: {}, flagged: [], unavailable: true }, 'getAPAgingReport');
+  // Each gather already handles its own per-company errors internally (see
+  // gatherCashAndApByCompany) — this outer unwrap only catches the
+  // (unlikely) case the whole Promise.all itself rejects. buildEmail expects
+  // cash and AP as separate per-company arrays (cashByCompany's `.total`
+  // means cash total, apByCompany's `.total` means AP total) — reshaped here
+  // from the one combined fetch rather than fetching each company twice.
+  const cashAndApByCompany = unwrap(cashAndApResult, [], 'gatherCashAndApByCompany');
+  const cashByCompany = cashAndApByCompany.map(c => c.connected && !c.error ? { ...c, total: c.cashTotal } : c);
+  const apByCompany = cashAndApByCompany.map(c => c.connected && !c.error ? { ...c, total: c.apTotal } : c);
   const arAging = unwrap(arResult, { total: 0, buckets: { current: [], d30: [], d60: [], d90: [], d120plus: [] }, flagged: [], available: false }, 'gatherSAARaging');
   const freshness = unwrap(freshnessResult, { stale: true, ageHours: 999 }, 'gatherSAFreshness');
   const marketing = unwrap(marketingResult, null, 'gatherLatestMarketingSnapshot');
@@ -545,14 +650,28 @@ export async function generateAndSendWeeklyScorecardReport() {
 
   const arFlaggedCount = (arAging.flagged ?? []).length;
 
+  // Multi-entity cash/AP: combined = sum across every connected+successful
+  // entity; jrb-specific values are pulled out separately for the Net
+  // (AR-AP) figure, which only makes sense entity-matched — SA/AR is
+  // JRB-only, so blending it against the whole group's AP would be a
+  // fabricated number, not a real working-capital metric. Computed once here
+  // (not re-derived inside buildEmail) so the email body and the subject
+  // line/logged summary below can never silently disagree.
+  const arAvailable = arAging.available !== false;
+  const { ok: cashOk, combinedTotal: combinedCash, available: cashAvailable } = summarizeAcrossCompanies(cashByCompany, c => c.total);
+  const { ok: apOk, combinedTotal: combinedAp, available: apAvailable } = summarizeAcrossCompanies(apByCompany, c => c.total);
+  const jrbAp = apByCompany.find(c => c.company === 'jrb');
+  const jrbApAvailable = jrbAp?.connected && !jrbAp?.error && Number.isFinite(jrbAp?.total);
+  const net = (jrbApAvailable && arAvailable && Number.isFinite(arAging.total)) ? (arAging.total - jrbAp.total) : null;
+
   const body = buildEmail({
-    weekStart, nextMonday, nextSunday, cash, apAging, nextWeekCash,
-    arAging, arFlaggedCount, marketing, sales, estimating, crew, freshness, isDelayedRun,
+    weekStart, nextMonday, nextSunday, cashByCompany, apByCompany, cashOk, apOk,
+    combinedCash, cashAvailable, combinedAp, apAvailable, jrbAp, jrbApAvailable, net,
+    nextWeekCash, arAging, arFlaggedCount, marketing, sales, estimating, crew, freshness, isDelayedRun,
   });
 
-  const arAvailable = arAging.available !== false;
-  const cashLabel = cash.unavailable ? 'cash unavailable' : `${f$(cash.total)} cash`;
-  const netLabel = (!arAvailable || apAging.unavailable) ? 'net AR-AP unavailable' : `${f$(arAging.total - apAging.total)} net AR-AP`;
+  const cashLabel = cashAvailable ? `${f$(combinedCash)} cash` : 'cash unavailable';
+  const netLabel = net === null ? 'net AR-AP unavailable' : `${f$(net)} net AR-AP (JRB)`;
 
   await sendEmail({
     to: ['michael@jrboehlke.com'],
@@ -560,22 +679,27 @@ export async function generateAndSendWeeklyScorecardReport() {
     body,
   });
 
+  const perCompanyCash = Object.fromEntries(cashByCompany.map(c => [c.company, { connected: c.connected, error: c.error ?? null, total: c.total ?? null }]));
+  const perCompanyAp = Object.fromEntries(apByCompany.map(c => [c.company, { connected: c.connected, error: c.error ?? null, total: c.total ?? null }]));
+
   logger.info('weekly_scorecard_report: sent', {
     weekStart,
     isDelayedRun,
-    cashTotal: cash.unavailable ? null : cash.total,
+    combinedCashTotal: cashAvailable ? combinedCash : null,
     arTotal: arAvailable ? arAging.total : null,
-    apTotal: apAging.unavailable ? null : apAging.total,
+    combinedApTotal: apAvailable ? combinedAp : null,
     estimatingBacklogCount: estimating.count,
     crewScheduledCount: crew.scheduledTotalCount,
+    perCompanyCash,
+    perCompanyAp,
   });
 
   return {
     weekStart,
     isDelayedRun,
-    cashTotal: cash.unavailable ? null : cash.total,
+    cashTotal: cashAvailable ? combinedCash : null,
     arTotal: arAvailable ? arAging.total : null,
-    apTotal: apAging.unavailable ? null : apAging.total,
+    apTotal: apAvailable ? combinedAp : null,
     estimatingBacklogCount: estimating.count,
     crewScheduledCount: crew.scheduledTotalCount,
   };
