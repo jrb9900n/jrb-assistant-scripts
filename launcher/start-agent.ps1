@@ -103,6 +103,13 @@ if (-not $qbRealmId) { $qbRealmId = "9130357265584656" }
 $qbRefreshTokenTransport = Get-Secret "QB_REFRESH_TOKEN_TRANSPORT"
 $qbRealmIdTransport      = Get-Secret "QB_REALM_ID_TRANSPORT"
 
+# JRB Granville Propco — third QBO company, same pattern as Transport above
+# (same QB_CLIENT_ID/QB_CLIENT_SECRET app, no fallback hardcode). Stays unset
+# until Michael completes the one-time OAuth at /qb-reauth?company=propco,
+# signed into Intuit as michael@jrboehlke.com (Propco's login).
+$qbRefreshTokenPropco = Get-Secret "QB_REFRESH_TOKEN_PROPCO"
+$qbRealmIdPropco      = Get-Secret "QB_REALM_ID_PROPCO"
+
 $secrets = @{
     "ANTHROPIC_API_KEY"    = Get-Secret "ANTHROPIC_API_KEY"
     "SUPABASE_URL"         = "https://znpahinyplccdyoekfeo.supabase.co"
@@ -117,6 +124,8 @@ $secrets = @{
     "QB_REALM_ID"          = $qbRealmId
     "QB_REFRESH_TOKEN_TRANSPORT" = $qbRefreshTokenTransport
     "QB_REALM_ID_TRANSPORT"      = $qbRealmIdTransport
+    "QB_REFRESH_TOKEN_PROPCO" = $qbRefreshTokenPropco
+    "QB_REALM_ID_PROPCO"      = $qbRealmIdPropco
     "GITHUB_TOKEN"         = Get-Secret "GITHUB_TOKEN"
     "GITHUB_USERNAME" = "jrb9900n"
     "GITHUB_REPOS"    = "jrb-assistant-scripts,FleetOps,FieldOps,AuditMatchingEngine"
