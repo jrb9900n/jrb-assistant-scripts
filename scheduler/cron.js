@@ -1480,9 +1480,15 @@ const SCHEDULED_TASKS = [
             ? parsedStart.toLocaleString('en-US', { timeZone: 'America/Chicago', dateStyle: 'medium', timeStyle: 'short' })
             : 'unknown time';
           const acceptedNote = e.responseStatus === 'accepted' && !e.isOrganizer ? ' (just accepted)' : '';
+          // Defensive fallback -- root cause of a missing subject was Graph's
+          // delta endpoint omitting inherited fields on occurrence expansions
+          // (fixed in calendar-watch.js's bootstrapUrl $select), but this
+          // keeps a future gap in the same class from ever rendering the
+          // literal word "undefined" in a Teams message again.
+          const subjectText = e.subject || '(no title)';
           try {
             await sendProactiveMessage(
-              `📅 New calendar item detected${acceptedNote}: **${e.subject}** at ${when}. Automatic block displacement isn't built yet — review for schedule conflicts.`
+              `📅 New calendar item detected${acceptedNote}: **${subjectText}** at ${when}. Automatic block displacement isn't built yet — review for schedule conflicts.`
             );
             // Only mark as handled once the send actually succeeds -- marking
             // it beforehand would permanently drop this change if the send

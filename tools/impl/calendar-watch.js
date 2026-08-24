@@ -66,10 +66,38 @@ async function saveDeltaState(mailbox, deltaLink, windowEnd) {
   if (error) throw new Error(`calendar-watch: saveDeltaState failed for ${mailbox}: ${error.message}`, { cause: error });
 }
 
+// $select is required here, not optional -- confirmed live 2026-08-24 that
+// Graph's calendarView/delta returns a minimal payload for expanded
+// occurrences of a long-running recurring series (id/start/end/
+// lastModifiedDateTime only), omitting inherited fields like `subject` and
+// `categories` unless explicitly selected. Two real symptoms traced to this:
+// (1) notifications rendering "**undefined**" as the event title, and (2)
+// our own JRB-Block-Schedule-tagged events (e.g. the President Weekly Block
+// Schedule's "Operations Pulse" occurrences) slipping past the
+// categories.includes(BLOCK_CATEGORY) filter below and firing as if they
+// were new real-life changes, because `e.categories` came back undefined
+// and `(undefined || []).includes(...)` is always false. A plain
+// calendarView query with the same $select (m365.js's listCalendarEvents)
+// already returns these fields correctly for the same events -- this is a
+// delta-endpoint-specific default, not a data problem on the events
+// themselves. Selecting the fields the mapping below actually reads fixes
+// both at once. Applied only in bootstrapUrl -- Graph's deltaLink preserves
+// the $select scope from the request that created it, so a stored cursor
+// created before this fix keeps running the old (unselected) query until it
+// re-bootstraps -- which otherwise wouldn't happen for ~53 more days (the
+// 60-day window vs. the 7-day REBOOTSTRAP_MARGIN_MS). The michael@jrboehlke.com
+// row that was actively producing the undefined-subject spam was manually
+// deleted from calendar_delta_state as a one-off action when this bug was
+// diagnosed (2026-08-24), forcing an immediate re-bootstrap on this fix's
+// first post-deploy poll. That was a manual DB operation, not something this
+// code does -- if this same class of bug recurs on a different mailbox, or
+// this fix merges long after that manual clear, the row needs clearing again
+// (or wait out the natural re-bootstrap) before the fix actually takes effect.
 function bootstrapUrl(mailbox, lookAheadDays) {
   const start = new Date().toISOString();
   const end = new Date(Date.now() + lookAheadDays * 24 * 60 * 60 * 1000).toISOString();
-  return { url: `/users/${mailbox}/calendarView/delta?startDateTime=${start}&endDateTime=${end}`, windowEnd: end };
+  const select = 'id,subject,start,end,isOrganizer,organizer,responseStatus,isCancelled,categories,lastModifiedDateTime,seriesMasterId,type';
+  return { url: `/users/${mailbox}/calendarView/delta?startDateTime=${start}&endDateTime=${end}&$select=${select}`, windowEnd: end };
 }
 
 /**
