@@ -661,13 +661,16 @@ All functions accept optional `userEmail` param — omit for `assistant@`, pass 
 ### Supabase (jrb-assistant — znpahinyplccdyoekfeo)
 `email_catalog` table — idempotent upsert on `message_id`. Columns: mailbox, subject, from_address, category, action_taken, folder, thread_id, snippet, etc.
 
-### Azure app permissions (Application, admin-consented)
-`Mail.ReadWrite`, `Mail.Send`, `Calendars.ReadWrite`, `Files.ReadWrite.All`, `User.Read.All`, `Sites.Read.All`, `Contacts.ReadWrite`
+### Azure app permissions (Application)
+Documented elsewhere (e.g. this section, historically) as including `Sites.Read.All` and `User.Read.All`, but a live Graph call 2026-08-24 shows the token's actual granted permissions are only `Mail.ReadWrite`, `Files.ReadWrite.All`, `Calendars.ReadWrite` (`Mail.Send`/`Contacts.ReadWrite` not independently confirmed either way — not exercised by the failing call). **`Sites.Read.All` is not actually consented right now**, whatever this file said before — confirmed via a direct 403 from `searchSharePoint`/`listSharePointSites` naming the exact granted set. Fixing this requires an Azure AD admin (Entra admin center → App registrations → API permissions → grant + admin-consent `Sites.Read.All`) — not something fixable from this codebase.
+
+Confirmed working live 2026-08-24: reading `support@jrboehlke.com` via `listEmails({userEmail: 'support@jrboehlke.com'})` — no code change needed, any mailbox address works as long as it exists in the tenant (Mail.ReadWrite applies tenant-wide, no allow-list in code).
 
 ### SharePoint gotchas
 - Graph Search API requires `region: 'NAM'` when using Application permissions
 - Only `driveItem` entity type works with `Files.ReadWrite.All`; `listItem` needs `Sites.Read.All`
 - `listSharePointSites` (`GET /sites?search=*`) requires `Sites.Read.All` specifically
+- **Currently broken as of 2026-08-24**: `searchSharePoint` and `listSharePointSites` both 403 live — see "Azure app permissions" above. `listSharePointFolder` (driveItem-based, needs a known `site_id` already in hand) should still work since it only needs `Files.ReadWrite.All`, but wasn't separately re-tested this session.
 
 ---
 
