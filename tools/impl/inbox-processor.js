@@ -21,10 +21,14 @@ import {
   getEmail,
   moveEmail,
   listMailFolders,
+  listChildFolders,
   createMailFolder,
   renameMailFolder,
+  moveMailFolder,
   createReplyDraft,
   getSentEmailsTo,
+  getOldDrafts,
+  deleteEmail,
 } from './m365.js';
 import { sendProactiveMessage } from '../../teams/notify.js';
 
@@ -41,43 +45,61 @@ function supabase() {
 // ── Folder routing ───────────────────────────────────────────────────────────
 
 const FOLDER_MAP = {
-  quote_request:    'aaa Quotes & Estimates',
-  customer:         'aaa Customers',
-  vendor:           'aaa Vendors',
-  invoice:          'aaa Invoices',
-  crew:             'aaa Crew',
-  admin:            'aaa Admin',
-  legal:            'aaa Admin',        // legal goes into Admin; flag in triage
-  promotional:      'aaa Low Priority', // ads, newsletters, marketing, solicitations
-  marketing:        'aaa Low Priority', // alias — classifier sometimes uses this instead of promotional
-  other:            'aaa Low Priority', // unclassified → low priority, not inbox clutter
-  spam:             'Junk Email',       // true spam → Outlook's built-in junk
+  quote_request:    '_Quotes & Estimates',
+  customer:         '_Customers',
+  vendor:           '_Vendors',
+  invoice:          '_Invoices',
+  crew:             '_Crew',
+  admin:            '_Admin',
+  legal:            '_Admin',        // legal goes into Admin; flag in triage
+  promotional:      '_Low Priority', // ads, newsletters, marketing, solicitations
+  marketing:        '_Low Priority', // alias — classifier sometimes uses this instead of promotional
+  other:            '_Low Priority', // unclassified → low priority, not inbox clutter
+  spam:             'Junk Email',    // true spam → Outlook's built-in junk
 };
 
-// Old folder names (pre-aaa prefix) that need renaming on first run
+// Old folder names (bare, or the earlier "aaa "-prefix convention) that need
+// renaming to the current "_"-prefix convention on first run. Both prefixes
+// exist purely to sort these folders to the top of Michael's subfolder list —
+// "_" replaced "aaa " 2026-08-24 at Michael's request.
 const LEGACY_FOLDER_NAMES = {
-  'Quotes & Estimates': 'aaa Quotes & Estimates',
-  'Customers':          'aaa Customers',
-  'Vendors':            'aaa Vendors',
-  'Invoices':           'aaa Invoices',
-  'Crew':               'aaa Crew',
-  'Admin':              'aaa Admin',
-  'Low Priority':       'aaa Low Priority',
+  'Quotes & Estimates':     '_Quotes & Estimates',
+  'aaa Quotes & Estimates': '_Quotes & Estimates',
+  'Customers':              '_Customers',
+  'aaa Customers':          '_Customers',
+  'Vendors':                '_Vendors',
+  'aaa Vendors':            '_Vendors',
+  'Invoices':               '_Invoices',
+  'aaa Invoices':           '_Invoices',
+  'Crew':                   '_Crew',
+  'aaa Crew':               '_Crew',
+  'Admin':                  '_Admin',
+  'aaa Admin':              '_Admin',
+  'Low Priority':           '_Low Priority',
+  'aaa Low Priority':       '_Low Priority',
 };
 
-// Cache folder name → id for Michael's mailbox (reset on each run)
+// Cache folder name → id for Michael's mailbox (reset on each run). Merges
+// top-level folders with Inbox's own child folders — listMailFolders alone
+// only sees top-level, and these category folders live nested under Inbox
+// (moved there 2026-08-24 so they sort at the top of the subfolder list,
+// right under Inbox, instead of cluttering the top-level account folder list).
 let _folderCache = null;
 
 async function getFolderCache() {
   if (_folderCache) return _folderCache;
-  const folders = await listMailFolders({ userEmail: MICHAEL });
+  const [topLevel, inboxChildren] = await Promise.all([
+    listMailFolders({ userEmail: MICHAEL }),
+    listChildFolders({ userEmail: MICHAEL, parentFolderId: 'inbox' }),
+  ]);
   _folderCache = {};
-  for (const f of folders) _folderCache[f.name] = f.id;
+  for (const f of topLevel) _folderCache[f.name] = f.id;
+  for (const f of inboxChildren) _folderCache[f.name] = f.id; // nested wins on a name collision (shouldn't happen)
   return _folderCache;
 }
 
-// Rename any legacy (non-prefixed) folders to their aaa versions.
-// Called once per processInbox run before any moves.
+// Rename any legacy (non-prefixed or "aaa "-prefixed) folders to their current
+// "_"-prefixed names. Called once per processInbox run before any moves.
 async function migrateLegacyFolders() {
   const cache = await getFolderCache();
   const renamed = [];
@@ -97,11 +119,41 @@ async function migrateLegacyFolders() {
   return renamed;
 }
 
-// Ensure all target folders exist, creating any that are missing.
+// Moves any of the category folders that are still top-level (siblings of
+// Inbox) into Inbox as children, so they sort right at the top of the
+// subfolder list instead of the account's top-level folder list. Added
+// 2026-08-24 — Michael had already manually moved _Admin himself; this
+// catches the rest and keeps it self-healing if a future folder gets created
+// at the wrong level for any reason.
+async function migrateFolderLocations() {
+  const cache = await getFolderCache();
+  const inboxChildren = await listChildFolders({ userEmail: MICHAEL, parentFolderId: 'inbox' });
+  const alreadyNested = new Set(inboxChildren.map(f => f.name));
+  const targetNames = [...new Set(Object.values(FOLDER_MAP))].filter(n => n !== 'Junk Email');
+
+  const moved = [];
+  for (const name of targetNames) {
+    if (cache[name] && !alreadyNested.has(name)) {
+      try {
+        await moveMailFolder({ userEmail: MICHAEL, folder_id: cache[name], destinationParentId: 'inbox' });
+        moved.push(name);
+        logger.info(`inbox-processor: moved folder "${name}" into Inbox`);
+      } catch (err) {
+        logger.warn(`inbox-processor: could not move folder "${name}" into Inbox`, { err: err.message });
+      }
+    }
+  }
+  if (moved.length) _folderCache = null; // force a fresh cache next read — ids are unchanged but membership shifted
+  return moved;
+}
+
+// Ensure all target folders exist, creating any that are missing — created
+// directly as a child of Inbox (not top-level) so a brand-new category folder
+// never needs a separate move step.
 async function ensureFolder(name) {
   const cache = await getFolderCache();
   if (cache[name]) return cache[name];
-  const { folder_id } = await createMailFolder({ userEmail: MICHAEL, name });
+  const { folder_id } = await createMailFolder({ userEmail: MICHAEL, name, parentFolderId: 'inbox' });
   cache[name] = folder_id;
   logger.info(`inbox-processor: created folder "${name}"`, { folder_id });
   return folder_id;
@@ -439,6 +491,31 @@ export async function scanFollowups() {
   return { scanned: external.length, new_followups: newRows.length };
 }
 
+// ── Draft cleanup ────────────────────────────────────────────────────────────
+// Deletes drafts (auto-generated or manual — Graph doesn't distinguish) that
+// haven't been touched in olderThanDays. Uses lastModifiedDateTime, not
+// creation time, so a draft Michael is actively editing never gets swept just
+// for being old; only genuinely abandoned ones are removed. Permanent delete
+// (Graph message DELETE bypasses Deleted Items for drafts) — added 2026-08-24
+// as a companion to autonomous draft creation, which otherwise has no natural
+// cap and would let unused AI-generated drafts accumulate indefinitely.
+export async function cleanupOldDrafts({ olderThanDays = 30 } = {}) {
+  const stale = await getOldDrafts({ userEmail: MICHAEL, olderThanDays });
+  let deleted = 0;
+  const errors = [];
+  for (const draft of stale) {
+    try {
+      await deleteEmail({ userEmail: MICHAEL, email_id: draft.id });
+      deleted++;
+    } catch (err) {
+      logger.warn('inbox-processor: draft delete failed', { id: draft.id, subject: draft.subject, err: err.message });
+      errors.push(`${draft.subject ?? '(no subject)'}: ${err.message}`);
+    }
+  }
+  logger.info('inbox-processor: draft cleanup complete', { found: stale.length, deleted, errors: errors.length });
+  return { found: stale.length, deleted, errors: errors.length ? errors : undefined };
+}
+
 // ── Main: processInbox ───────────────────────────────────────────────────────
 
 export async function processInbox() {
@@ -446,13 +523,22 @@ export async function processInbox() {
   logger.info('inbox-processor: starting run');
   _folderCache = null; // reset folder cache each run
 
-  // 0. Rename any legacy folders (Admin → aaa Admin, etc.) so they sort to top
+  // 0. Rename any legacy folders (Admin → _Admin, etc.) and move any that are
+  // still top-level into Inbox, so they sort right under Inbox in the
+  // subfolder list.
   let renamedFolders = [];
+  let movedFolders = [];
   try {
     renamedFolders = await migrateLegacyFolders();
     if (renamedFolders.length) logger.info('inbox-processor: migrated folders', { renamedFolders });
   } catch (err) {
     logger.warn('inbox-processor: folder migration error (non-fatal)', { err: err.message });
+  }
+  try {
+    movedFolders = await migrateFolderLocations();
+    if (movedFolders.length) logger.info('inbox-processor: moved folders into Inbox', { movedFolders });
+  } catch (err) {
+    logger.warn('inbox-processor: folder relocation error (non-fatal)', { err: err.message });
   }
 
   // 1. Fetch unread emails from Michael's inbox (last 48h)
@@ -655,6 +741,7 @@ export async function processInbox() {
     drafted,
     alerted,
     folders_renamed:    renamedFolders.length,
+    folders_moved:      movedFolders.length,
     needs_reply_count:  triageRows.filter(r => r.bucket === 'needs_reply').length,
     fyi_count:          triageRows.filter(r => r.bucket === 'fyi').length,
     marketing_count:    triageRows.filter(r => r.bucket === 'marketing').length,

@@ -85,6 +85,46 @@ export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = f
   }));
 }
 
+// Lists drafts (well-known "drafts" folder) last modified before the given
+// cutoff — i.e. genuinely stale/abandoned, not just old-but-recently-edited.
+// Paginates via @odata.nextLink (same pattern as getCalendarViewWithCategories
+// above) -- confirmed live 2026-08-24 this mailbox has 400+ qualifying drafts
+// going back to 2023, well past a single $top page; an earlier unpaginated
+// version silently truncated at 200 and looked "done" after only clearing
+// the first page.
+export async function getOldDrafts({ userEmail, olderThanDays = 30, maxPages = 50 } = {}) {
+  const user = userEmail ?? USER();
+  const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
+  let url = `/users/${user}/mailFolders/drafts/messages?$filter=lastModifiedDateTime le ${cutoff}` +
+    `&$select=id,subject,lastModifiedDateTime,toRecipients&$top=200`;
+  const raw = [];
+  let pages = 0;
+  while (url && pages < maxPages) {
+    const data = await graph('GET', url);
+    raw.push(...(data.value ?? []));
+    url = data['@odata.nextLink'] || null;
+    pages++;
+  }
+  if (url) {
+    logger.warn('getOldDrafts: hit maxPages cap with more pages remaining', { user, olderThanDays, maxPages });
+  }
+  return raw.map(m => ({
+    id:                   m.id,
+    subject:              m.subject,
+    lastModifiedDateTime: m.lastModifiedDateTime,
+    to:                   (m.toRecipients ?? []).map(r => r.emailAddress?.address),
+  }));
+}
+
+// Permanently deletes a message (any folder, including drafts). No recovery —
+// Graph's message DELETE bypasses Deleted Items for drafts.
+export async function deleteEmail({ email_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  await graph('DELETE', `/users/${user}/messages/${encodeURIComponent(email_id)}`);
+  logger.info('Email deleted', { user, email_id });
+  return { deleted: true, email_id };
+}
+
 export async function getEmail({ email_id, userEmail } = {}) {
   const user = userEmail ?? USER();
   const data = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}?$select=id,subject,from,toRecipients,body,receivedDateTime,conversationId,hasAttachments`);
@@ -311,6 +351,32 @@ export async function createMailFolder({ userEmail, name, parentFolderId } = {})
   const data = await graph('POST', path, { displayName: name });
   logger.info('Mail folder created', { user, name, id: data.id });
   return { created: true, folder_id: data.id, name: data.displayName };
+}
+
+// Lists the direct child folders of a parent (e.g. Inbox) — listMailFolders
+// above only returns TOP-LEVEL folders, so a folder nested under Inbox (like
+// the inbox-processor's category folders, moved there 2026-08-24) never shows
+// up in that list at all.
+export async function listChildFolders({ userEmail, parentFolderId } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/mailFolders/${parentFolderId}/childFolders?$top=100&$select=id,displayName,totalItemCount,unreadItemCount`);
+  return (data.value ?? []).map(f => ({
+    id:     f.id,
+    name:   f.displayName,
+    total:  f.totalItemCount,
+    unread: f.unreadItemCount,
+  }));
+}
+
+// Moves an existing mail folder to become a child of destinationParentId
+// (e.g. Inbox) — Graph's mailFolders/{id}/move, the folder-level analog of
+// moveEmail. The folder keeps its id, so anything already referencing it
+// (a cached folder id, an open Outlook window) stays valid.
+export async function moveMailFolder({ userEmail, folder_id, destinationParentId } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('POST', `/users/${user}/mailFolders/${folder_id}/move`, { destinationId: destinationParentId });
+  logger.info('Mail folder moved', { user, folder_id, destinationParentId });
+  return { moved: true, folder_id: data.id, name: data.displayName };
 }
 
 export async function moveEmail({ userEmail, email_id, destination_folder_id } = {}) {
