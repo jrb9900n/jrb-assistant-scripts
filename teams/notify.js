@@ -171,8 +171,44 @@ export function saveConversationRef(activity) {
   }
 }
 
+// Per-employee conversation refs, keyed by aadObjectId — separate from the
+// single Michael ref above. Added 2026-08-24 alongside the privacy/approval
+// system: fulfillApprovedRequest (tools/impl/privacy-gate.js) needs to message
+// a SPECIFIC employee back once Michael approves their request, and this also
+// fixes a real latent bug — before this existed, saveConversationRef(activity)
+// was called unconditionally on every incoming message, so an employee's very
+// first message would silently overwrite Michael's own stored ref and break
+// every proactive alert to him until he re-messaged the bot. teams/bot.js now
+// calls this one instead of saveConversationRef for non-Michael senders.
+export const EMPLOYEE_REFS_PATH = path.join(__dirname, 'employee-conversation-refs.json');
+
+export function saveEmployeeConversationRef(aadId, activity) {
+  if (!aadId) return; // no stable key to file this under — nothing to persist
+  try {
+    let refs = {};
+    try { refs = JSON.parse(readFileSync(EMPLOYEE_REFS_PATH, 'utf8')); } catch {}
+    refs[aadId] = {
+      serviceUrl:     activity.serviceUrl,
+      conversationId: activity.conversation.id,
+      savedAt:        new Date().toISOString(),
+    };
+    writeFileAtomic(EMPLOYEE_REFS_PATH, JSON.stringify(refs, null, 2));
+  } catch (err) {
+    logger.warn('Could not save employee conversation ref', { aadId, err: err.message });
+  }
+}
+
+function readEmployeeRef(aadId) {
+  let refs;
+  try { refs = JSON.parse(readFileSync(EMPLOYEE_REFS_PATH, 'utf8')); }
+  catch { throw new Error(`No conversation reference stored for employee ${aadId} — they need to message the bot first.`); }
+  const ref = refs[aadId];
+  if (!ref) throw new Error(`No conversation reference stored for employee ${aadId} — they need to message the bot first.`);
+  return ref;
+}
+
 /**
- * Send a proactive message to the Teams conversation.
+ * Send a proactive message to a Teams conversation.
  *
  * @param {string} message                    - Message text to send.
  * @param {object} [options]                  - Optional settings.
@@ -181,11 +217,17 @@ export function saveConversationRef(activity) {
  *   ERROR_SIGNAL_RE. Set this to true when sending the agent's own remediation
  *   summary from cron's self_heal_watcher to prevent the status report from
  *   triggering another self-heal run (infinite loop guard).
+ * @param {string} [options.target='michael']
+ *   'michael' (default, unchanged behavior — every existing call site in this
+ *   codebase omits this param) or an employee's aadObjectId to message them
+ *   back specifically (see saveEmployeeConversationRef above). Added 2026-08-24
+ *   for the privacy/approval system's fulfillApprovedRequest.
  */
-export async function sendProactiveMessage(message, { suppressSelfHeal = false } = {}) {
-  let ref;
-  try { ref = JSON.parse(readFileSync(CONV_REF_PATH, 'utf8')); }
-  catch { throw new Error('No conversation reference stored. Send a message to the JRB bot in Teams first.'); }
+export async function sendProactiveMessage(message, { suppressSelfHeal = false, target = 'michael' } = {}) {
+  const ref = target === 'michael' ? (() => {
+    try { return JSON.parse(readFileSync(CONV_REF_PATH, 'utf8')); }
+    catch { throw new Error('No conversation reference stored. Send a message to the JRB bot in Teams first.'); }
+  })() : readEmployeeRef(target);
 
   const token = await getBotToken();
   const url = `${ref.serviceUrl.replace(/\/$/, '')}/v3/conversations/${ref.conversationId}/activities`;
@@ -198,7 +240,7 @@ export async function sendProactiveMessage(message, { suppressSelfHeal = false }
     const body = await res.text();
     throw new Error(`Teams proactive message failed: ${res.status} ${body}`);
   }
-  logger.info('Proactive Teams message sent', { preview: message.slice(0, 60), suppressSelfHeal });
+  logger.info('Proactive Teams message sent', { preview: message.slice(0, 60), suppressSelfHeal, target });
 
   // Record this as an assistant turn in the same conversation-memory store
   // bot.js's own reactive request/response handler uses (see teams/bot.js,

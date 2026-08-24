@@ -100,7 +100,15 @@ ${memoryContext}${rulesAndPatterns}`.trim();
 export async function runAgent({
     task, taskType = 'general', model: forceModel,
     systemPromptOverride, extraMessages = [], saveContext = true, images = [],
+    context = null,
 }) {
+    // `context` (added 2026-08-24) is a TRUSTED side-channel passed straight
+    // through to every dispatchTool() call this run makes — never exposed to
+    // the LLM as a tool parameter, never derived from tool_use input. Exists
+    // specifically so a tool handler can know things like "who is actually
+    // asking" (see teams/identity.js's resolveSender + tools/impl/
+    // privacy-gate.js's requestEmployeeApproval) without that identity ever
+    // being something the model could spoof by producing convenient JSON.
     const runId = randomUUID();
     // Model routing/logging/observation all key off the text prompt alone --
     // routeModel does word-count + keyword regexes, neither of which knows
@@ -152,7 +160,7 @@ export async function runAgent({
             const toolResults = await Promise.all(toolUseBlocks.map(async (toolUse) => {
                 logger.info('Tool call', { tool: toolUse.name, runId });
                 let result;
-                try { result = await dispatchTool(toolUse.name, toolUse.input); }
+                try { result = await dispatchTool(toolUse.name, toolUse.input, context); }
                 catch (err) { logger.error('Tool error', { tool: toolUse.name, err: err.message }); result = { error: err.message }; }
                 return { type: 'tool_result', tool_use_id: toolUse.id, content: typeof result === 'string' ? result : JSON.stringify(result) };
             }));

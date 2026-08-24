@@ -25,6 +25,7 @@ import * as fleetsharp  from './impl/fleetsharp.js';
 import * as carddav     from './impl/carddav.js';
 import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
+import { requestEmployeeApproval } from './impl/privacy-gate.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 import { createClient } from '@supabase/supabase-js';
 
@@ -196,19 +197,33 @@ const HANDLERS = {
   get_schedule_draft:   (i) => scheduling.getScheduleDraft(i),
   record_decision:      (i) => scheduling.recordDecision(i),
   sync_pavement_sizes:  (i) => scheduling.syncPavementSizes(i),
+
+  // Employee privacy-gate — deliberately takes NOTHING from LLM-produced tool
+  // input (registry.js's schema has an empty properties object). Sender/
+  // activity/the original request text all come from the trusted `context`
+  // object threaded through runAgent() -> dispatchTool(), never from
+  // anything the model could fill in itself. See tools/impl/privacy-gate.js.
+  request_employee_approval: (i, context) => requestEmployeeApproval({
+    sender: context?.sender, activity: context?.activity, requestText: context?.requestText,
+  }),
 };
 
 /**
  * Dispatch a tool call to its implementation.
  * @param {string} toolName
  * @param {object} input
+ * @param {object|null} [context] - Trusted, non-LLM-controlled side-channel
+ *   (e.g. resolved Teams sender identity) — see core/agent.js's runAgent()
+ *   for where this originates. Most handlers ignore it; only ones that need
+ *   to know something the model must never be trusted to state itself
+ *   (like "who is actually asking") accept it.
  * @returns {Promise<any>}
  */
-export async function dispatchTool(toolName, input) {
+export async function dispatchTool(toolName, input, context = null) {
   const handler = HANDLERS[toolName];
   if (!handler) {
     throw new Error(`Unknown tool: ${toolName}`);
   }
   logger.debug('Dispatching tool', { toolName, input });
-  return handler(input);
+  return handler(input, context);
 }

@@ -79,6 +79,27 @@ export function isOpsAlertLike(text) {
   return typeof text === 'string' && /⚠️/.test(text);
 }
 
+// Loosely matches a yes/no/"remember this" decision — deliberately only meant
+// to be invoked once the caller already knows there's exactly one pending
+// employee_requests row (see tools/impl/privacy-gate.js's
+// resolvePendingApprovalReply), so it doesn't need to be bulletproof against
+// Michael's ordinary messages coincidentally containing "yes"/"no" — those
+// never reach this function unless a request is genuinely pending.
+export function isApprovalReply(text) {
+  const t = normalise(text);
+  if (t === null) return { decision: null };
+  if (/^(yes|yep|yeah|approve|approved|ok|okay|sure)\b.*\b(remember|standing|going forward|from now on|every time)\b/.test(t)) {
+    return { decision: 'approved_standing' };
+  }
+  if (/^(yes|yep|yeah|approve|approved|ok|okay|sure|go ahead|that'?s fine|fine)\b/.test(t)) {
+    return { decision: 'approved_once' };
+  }
+  if (/^(no|nope|deny|denied|don'?t|do not|decline|declined)\b/.test(t)) {
+    return { decision: 'denied' };
+  }
+  return { decision: null };
+}
+
 /**
  * Classify a message into one of: ops_alert | scheduling | crm | dev | dev_ambiguous | report | general
  * Used by both the Teams bot and the email poller.
