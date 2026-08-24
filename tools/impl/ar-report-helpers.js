@@ -151,6 +151,14 @@ export function masterCustomer(name) {
   return idx > 0 ? name.slice(0, idx).trim() : name;
 }
 
+// Visually separates one legal entity's block within a multi-company report
+// (cash forecast, weekly scorecard) — bolder/darker than sectionHeader()
+// since it's a higher-level grouping (entity) than a section within one
+// entity's data.
+export function entityDivider(label) {
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:32px 0 4px 0;"><tr><td style="padding:8px 12px;background-color:#1a1a2e;border-radius:4px;"><p style="margin:0;font-size:13px;font-weight:bold;color:#ffffff;letter-spacing:0.4px;">${label}</p></td></tr></table>`;
+}
+
 export function sectionHeader(title) {
   return `<p style="margin:28px 0 10px 0;font-size:13px;font-weight:bold;text-transform:uppercase;letter-spacing:0.8px;color:#888888;border-bottom:1px solid #e8e8e8;padding-bottom:6px;">${title}</p>`;
 }
