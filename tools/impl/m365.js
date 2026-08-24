@@ -685,6 +685,32 @@ export async function listSentEmails({ userEmail, limit = 30, afterDate } = {}) 
   }));
 }
 
+// Full past sent emails to ONE specific recipient, body included — used to learn
+// Michael's actual writing style/tone toward that person before drafting a new
+// reply. Distinct from listSentEmails (no recipient filter, snippet only).
+export async function getSentEmailsTo({ userEmail, recipientAddress, limit = 5 } = {}) {
+  const user = userEmail ?? USER();
+  // Confirmed live 2026-08-24: Graph's $filter does NOT support toRecipients/any()
+  // for mail messages at all ("ErrorInvalidUrlQueryFilter" — ordinary syntax, just
+  // an unsupported property for $filter, unlike from/receivedDateTime/etc). Use
+  // $search with the "to:" scoped operator instead, same convention searchEmails
+  // already uses above. $search can't be combined with $orderby (a real Graph
+  // limitation, matching why the $search branch above never appends one either) —
+  // results come back in relevance order, which is fine here since this is just
+  // sampling a few real past examples, not a precise recency requirement.
+  const data = await graph(
+    'GET',
+    `/users/${user}/mailFolders/SentItems/messages?$search="to:${encodeURIComponent(recipientAddress)}"` +
+    `&$top=${limit}&$select=id,subject,sentDateTime,body`
+  );
+  return (data.value ?? []).map(m => ({
+    id:      m.id,
+    subject: m.subject,
+    date:    m.sentDateTime,
+    body:    m.body?.content ?? '',
+  }));
+}
+
 export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {}) {
   const user = userEmail ?? USER();
   const data = await graph(

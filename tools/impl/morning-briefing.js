@@ -52,23 +52,23 @@ async function getEmailStats() {
 
   const { data, error } = await db
     .from('email_triage')
-    .select('priority, category, intent, subject, from_address, from_name, hot_trigger, meeting_detected, draft_id, action_items')
+    .select('bucket, category, intent, subject, from_address, from_name, hot_trigger, meeting_detected, draft_id, action_items')
     .eq('mailbox', MICHAEL)
     .gte('processed_at', since)
-    .order('priority', { ascending: true });
+    .order('bucket', { ascending: true });
 
   if (error) {
     logger.warn('morning-briefing: email_triage query failed', { error: error.message });
-    return { total: 0, p1: [], p2: [], p3: [], meetings: [] };
+    return { total: 0, needsReply: [], fyi: [], marketing: [], meetings: [] };
   }
 
   const rows = data ?? [];
   return {
-    total:    rows.length,
-    p1:       rows.filter(r => r.priority === 'p1'),
-    p2:       rows.filter(r => r.priority === 'p2'),
-    p3:       rows.filter(r => r.priority === 'p3'),
-    meetings: rows.filter(r => r.meeting_detected),
+    total:      rows.length,
+    needsReply: rows.filter(r => r.bucket === 'needs_reply'),
+    fyi:        rows.filter(r => r.bucket === 'fyi'),
+    marketing:  rows.filter(r => r.bucket === 'marketing'),
+    meetings:   rows.filter(r => r.meeting_detected),
   };
 }
 
@@ -133,6 +133,7 @@ const S = {
   pillRed:     'display:inline-block;background-color:#fee2e2;color:#aa0000;border-radius:10px;padding:2px 9px;font-size:11px;font-weight:600;white-space:nowrap;',
   pillOrange:  'display:inline-block;background-color:#fff3cd;color:#856404;border-radius:10px;padding:2px 9px;font-size:11px;font-weight:600;white-space:nowrap;',
   pillGreen:   'display:inline-block;background-color:#d1fae5;color:#065f46;border-radius:10px;padding:2px 9px;font-size:11px;font-weight:600;white-space:nowrap;',
+  pillGray:    'display:inline-block;background-color:#eeeeee;color:#666666;border-radius:10px;padding:2px 9px;font-size:11px;font-weight:600;white-space:nowrap;',
   empty:       'margin:6px 0 0 0;color:#888888;font-size:13px;',
   footer:      'background-color:#f8f9fa;padding:12px 28px;border-top:1px solid #eeeeee;',
   footerText:  'margin:0;font-size:11px;color:#888888;text-align:center;line-height:1.6;',
@@ -141,13 +142,13 @@ const S = {
 
 // ── HTML builders (fully inline styles — no class refs) ────────────────────────
 
-function priorityPill(priority) {
+function bucketPill(bucket) {
   const map = {
-    p1: [S.pillRed,    'Respond Today'],
-    p2: [S.pillOrange, 'This Week'],
-    p3: [S.pillGreen,  'Filed/FYI'],
+    needs_reply: [S.pillRed,   'Needs a Reply'],
+    fyi:         [S.pillGreen, 'FYI'],
+    marketing:   [S.pillGray,  'Marketing'],
   };
-  const [style, label] = map[priority] ?? [S.pillGreen, priority];
+  const [style, label] = map[bucket] ?? [S.pillGreen, bucket];
   return `<span style="${style}">${label}</span>`;
 }
 
@@ -164,7 +165,7 @@ function emailTriageTable(rows) {
       r.meeting_detected ? `<span style="font-size:12px;">📅</span>` : '',
     ].join('');
     return `<tr>
-      <td style="${tdStyle}">${priorityPill(r.priority)}</td>
+      <td style="${tdStyle}">${bucketPill(r.bucket)}</td>
       <td style="${tdStyle}white-space:nowrap;">${fromHtml}</td>
       <td style="${tdStyle}">${r.subject ?? '—'}</td>
       <td style="${tdStyle}color:#555555;font-size:12px;">${r.intent ?? ''}</td>
@@ -173,7 +174,7 @@ function emailTriageTable(rows) {
   }).join('');
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="${S.table}">
     <thead><tr>
-      <th style="${S.thNowrap}">Priority</th>
+      <th style="${S.thNowrap}">Type</th>
       <th style="${S.th}">From</th>
       <th style="${S.th}">Subject</th>
       <th style="${S.th}">Intent</th>
@@ -233,21 +234,21 @@ function buildTeamsMessage(stats, calendar, followups) {
 
   // Email summary
   lines.push(`📧 Inbox (last 24h): ${stats.total} emails`);
-  if (stats.p1.length) lines.push(`   🔴 Respond Today: ${stats.p1.length}`);
-  if (stats.p2.length) lines.push(`   🟡 This Week: ${stats.p2.length}`);
-  if (stats.p3.length) lines.push(`   🟢 Filed/FYI: ${stats.p3.length}`);
+  if (stats.needsReply.length) lines.push(`   🔴 Needs a Reply: ${stats.needsReply.length}`);
+  if (stats.fyi.length)        lines.push(`   🟢 FYI: ${stats.fyi.length}`);
+  if (stats.marketing.length)  lines.push(`   ⚪ Marketing: ${stats.marketing.length}`);
 
-  // P1 detail (first 5)
-  if (stats.p1.length) {
+  // Needs-a-reply detail (first 5)
+  if (stats.needsReply.length) {
     lines.push('');
-    lines.push('🔴 Respond Today:');
-    for (const e of stats.p1.slice(0, 5)) {
+    lines.push('🔴 Needs a Reply:');
+    for (const e of stats.needsReply.slice(0, 5)) {
       const name = e.from_name || e.from_address || '?';
       const draft = e.draft_id ? ' ✍️' : '';
       lines.push(`  • [${name}] ${e.subject ?? '(no subject)'}${draft}`);
       if (e.intent) lines.push(`    → ${e.intent}`);
     }
-    if (stats.p1.length > 5) lines.push(`  … and ${stats.p1.length - 5} more`);
+    if (stats.needsReply.length > 5) lines.push(`  … and ${stats.needsReply.length - 5} more`);
   }
 
   // Calendar
@@ -271,8 +272,8 @@ function buildTeamsMessage(stats, calendar, followups) {
     }
   }
 
-  // Action items from P1 emails
-  const actionItems = stats.p1
+  // Action items from needs-a-reply emails
+  const actionItems = stats.needsReply
     .flatMap(e => e.action_items ?? [])
     .slice(0, 5);
   if (actionItems.length) {
@@ -292,14 +293,14 @@ function buildTeamsMessage(stats, calendar, followups) {
 
 function buildEmailBody(stats, calendar, followups) {
   const dateStr   = formatDateLong();
-  const allEmails = [...stats.p1, ...stats.p2, ...stats.p3];
-  const actionItems = stats.p1.flatMap(e => e.action_items ?? []);
+  const allEmails = [...stats.needsReply, ...stats.fyi, ...stats.marketing];
+  const actionItems = stats.needsReply.flatMap(e => e.action_items ?? []);
   const timestamp = new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' });
 
   // Section: Inbox
   const inboxBadges = [
     `<span style="${S.badge}">${stats.total}</span>`,
-    stats.p1.length ? `<span style="${S.badgeRed}">${stats.p1.length} need reply today</span>` : '',
+    stats.needsReply.length ? `<span style="${S.badgeRed}">${stats.needsReply.length} need a reply</span>` : '',
   ].join('');
   const inboxSection = `<td style="${S.section}">
     <p style="${S.sTitle}display:inline;">📧 Inbox — Last 24 Hours</p>${inboxBadges}
@@ -386,7 +387,7 @@ export async function generateMorningBriefing() {
     getOverdueFollowups(),
   ]);
 
-  const stats    = statsResult.status    === 'fulfilled' ? statsResult.value    : { total: 0, p1: [], p2: [], p3: [], meetings: [] };
+  const stats    = statsResult.status    === 'fulfilled' ? statsResult.value    : { total: 0, needsReply: [], fyi: [], marketing: [], meetings: [] };
   const calendar = calendarResult.status === 'fulfilled' ? calendarResult.value : [];
   const followups = followupsResult.status === 'fulfilled' ? followupsResult.value : [];
 
@@ -397,10 +398,10 @@ export async function generateMorningBriefing() {
   const teamsMessage = buildTeamsMessage(stats, calendar, followups);
   const emailBody    = buildEmailBody(stats, calendar, followups);
   const dateStr      = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-  const emailSubject = `Morning Brief — ${dateStr} | ${stats.p1.length} to respond, ${calendar.length} events`;
+  const emailSubject = `Morning Brief — ${dateStr} | ${stats.needsReply.length} to respond, ${calendar.length} events`;
 
   logger.info('morning-briefing: complete', {
-    p1: stats.p1.length, p2: stats.p2.length, p3: stats.p3.length,
+    needsReply: stats.needsReply.length, fyi: stats.fyi.length, marketing: stats.marketing.length,
     calendar: calendar.length, followups: followups.length,
   });
 

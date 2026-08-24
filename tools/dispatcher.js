@@ -44,7 +44,7 @@ function getSupabaseClient() {
 
 // ── Input validation helpers ──────────────────────────────────────────────────
 
-const VALID_PRIORITIES = new Set(['p1', 'p2', 'p3']);
+const VALID_BUCKETS = new Set(['needs_reply', 'fyi', 'marketing']);
 
 /**
  * Clamp hours to a finite, positive integer in [1, 8760] (max 1 year).
@@ -78,23 +78,23 @@ const HANDLERS = {
     const { processInbox } = await import('./impl/inbox-processor.js');
     return processInbox();
   },
-  get_email_triage: async ({ hours = 24, priority } = {}) => {
+  get_email_triage: async ({ hours = 24, bucket } = {}) => {
     // Validate and sanitize inputs before use
     const safeHours = sanitizeHours(hours);
-    if (priority !== undefined && !VALID_PRIORITIES.has(priority)) {
-      throw new Error(`Invalid priority value: "${priority}". Must be one of: p1, p2, p3.`);
+    if (bucket !== undefined && !VALID_BUCKETS.has(bucket)) {
+      throw new Error(`Invalid bucket value: "${bucket}". Must be one of: needs_reply, fyi, marketing.`);
     }
 
     const db = getSupabaseClient();
     const since = new Date(Date.now() - safeHours * 60 * 60 * 1000).toISOString();
     let q = db.from('email_triage')
-      .select('from_name,from_address,subject,priority,category,intent,folder_moved_to,draft_id,hot_trigger,meeting_detected,action_items,processed_at')
+      .select('from_name,from_address,subject,bucket,category,intent,folder_moved_to,draft_id,hot_trigger,meeting_detected,action_items,processed_at')
       .eq('mailbox', MICHAEL)
       .gte('processed_at', since)
-      .order('priority', { ascending: true })
+      .order('bucket', { ascending: true })
       .order('processed_at', { ascending: false })
       .limit(50);
-    if (priority) q = q.eq('priority', priority);
+    if (bucket) q = q.eq('bucket', bucket);
     const { data, error } = await q;
     if (error) throw new Error(`email_triage query failed: ${error.message}`);
     return data ?? [];
