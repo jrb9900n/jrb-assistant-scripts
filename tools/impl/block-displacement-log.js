@@ -20,6 +20,13 @@ function supabase() {
  * under-cap — there's no stable key to count against, so failing open here
  * (rather than blocking every displacement) matches this codebase's general
  * "don't let a missing signal become a false negative" posture elsewhere.
+ *
+ * IMPORTANT: A DB error is NOT treated as "under cap". If the count cannot
+ * be determined, this function throws so that the caller
+ * (checkAndResolveDisplacement) can decline the displacement rather than
+ * silently bypass the rolling-window cap. The cap is the only enforcement
+ * mechanism for the "occasional, not routine" rule; making it fail open
+ * during any outage would render it meaningless.
  */
 export async function countRecentDisplacements({ seriesMasterId, windowDays }) {
   if (!seriesMasterId) return 0;
@@ -31,8 +38,11 @@ export async function countRecentDisplacements({ seriesMasterId, windowDays }) {
     .gte('created_at', since);
 
   if (error) {
-    logger.warn('block-displacement-log: count query failed', { seriesMasterId, err: error.message });
-    return 0; // fail open, same reasoning as the missing-seriesMasterId case above
+    logger.error('block-displacement-log: count query failed — failing closed to protect cap', { seriesMasterId, err: error.message });
+    // Throw so callers treat this as a hard error and decline the displacement.
+    // Failing open here would make the rolling-window cap unenforceable during
+    // any Supabase outage — an unacceptable integrity gap.
+    throw new Error(`block-displacement-log: count query failed: ${error.message}`);
   }
   return count ?? 0;
 }
