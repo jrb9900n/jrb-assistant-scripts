@@ -6,14 +6,15 @@
 -- a going-forward relabeling of the taxonomy, not a backfill of old rows).
 alter table public.email_triage rename column priority to bucket;
 
--- The rename alone isn't sufficient -- the existing check constraint still
--- enforces the OLD p1/p2/p3 values under its old name, so every write would
--- otherwise start failing immediately. Just drop it rather than replacing
--- with a new needs_reply/fyi/marketing-only constraint: real historical rows
--- still hold the old p1/p2/p3 values (left as-is, not backfilled -- see
--- above), so a strict new-values-only constraint would itself be violated by
--- existing data. Going-forward values are already constrained at the
--- application layer (inbox-processor.js's classifier prompt/fallbacks only
--- ever emit the 3 new values; dispatcher.js's VALID_BUCKETS validates the
--- get_email_triage query param) -- no DB-level enum needed.
+-- Replace the old p1/p2/p3-only check constraint with one that accepts both
+-- the legacy values (still present in historical rows that were not backfilled)
+-- and the new needs_reply/fyi/marketing values emitted going forward.
+-- Dropping the old constraint and adding a new one rather than using ALTER
+-- CONSTRAINT because Postgres requires a full DROP+ADD to change the expression.
+-- The new constraint keeps DB-level rejection of truly unexpected values (e.g.
+-- a typo, a buggy direct INSERT, or a future code regression) while remaining
+-- compatible with existing data.
 alter table public.email_triage drop constraint email_triage_priority_check;
+alter table public.email_triage
+  add constraint email_triage_bucket_check
+  check (bucket in ('p1', 'p2', 'p3', 'needs_reply', 'fyi', 'marketing'));
