@@ -144,7 +144,14 @@ const HANDLERS = {
   send_teams_message:   ({ message }) => sendProactiveMessage(message).then(() => 'Teams message sent.'),
 
   // Service Autopilot
-  sa_search_clients:       (i) => sa.searchClients(i),
+  // maxScan raised well above searchClients' own conservative default (30) --
+  // SA's server-side name filter is a confirmed no-op (see searchClients'
+  // own comment), so a real conversational search needs to page through a
+  // meaningful chunk of the actual account population to have any real
+  // chance of finding an account that isn't in SA's "recent clients" list.
+  // Fixed here rather than exposed in the tool schema so every LLM-driven
+  // search gets this without depending on the model remembering to ask for it.
+  sa_search_clients:       (i) => sa.searchClients({ ...i, maxScan: 3000 }),
   sa_create_client:        (i) => sa.createClient(i),
   sa_add_note:             (i) => sa.addNote(i),
   sa_search_service_types: (i) => sa.searchServiceTypes(i),

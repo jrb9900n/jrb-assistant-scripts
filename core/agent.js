@@ -45,7 +45,16 @@ function routeModel(taskPrompt, forceModel, taskType) {
         // Analysis or multi-step reasoning
         /\b(analys|strateg|compar|synthesiz|report|forecast|explain why|plan|review)\b/i.test(taskPrompt) ||
         // Anything touching external systems with side effects
-        /\b(invoice|payment|schedule|invoice|estimate|quickbooks|hubspot)\b/i.test(taskPrompt);
+        /\b(invoice|payment|schedule|invoice|quickbooks|hubspot|calendar|block|conflict)\b/i.test(taskPrompt) ||
+        // Prefix match (no trailing \b) -- "Estimating" (this system's actual
+        // block-schedule name) doesn't contain the complete word "estimate",
+        // so a \b-wrapped "estimate" alternative never matched it. Confirmed
+        // live 2026-08-24: "Estimating 9am; then HR" routed to Haiku instead
+        // of Sonnet for a real calendar-modifying request (creating two
+        // events plus checking for conflicts), which the cheap model got
+        // wrong -- it never actually read Michael's calendar before claiming
+        // "completely clear."
+        /\bestimat/i.test(taskPrompt);
     return isComplex ? SONNET : HAIKU;
 }
 

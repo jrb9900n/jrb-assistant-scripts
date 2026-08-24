@@ -709,42 +709,66 @@ export async function getPaymentData({ paymentId }) {
 /**
  * Search SA clients by name.
  * Returns [{ clientId, name, address, type }]
+ *
+ * maxScan bounds how many total accounts get paged through client-side before
+ * giving up. Defaults small (matches this function's old effective behavior)
+ * so low-stakes/high-frequency callers like the connectivity-check ping stay
+ * cheap; a real name search should pass a much higher maxScan (see
+ * scheduling-visits.js and the sa_search_clients tool, which both do).
  */
-export async function searchClients({ name, limit = 10 }) {
+export async function searchClients({ name, limit = 10, maxScan = 30 }) {
   // QuerySelection:3 returns Clients + Leads + Closed Leads (0 = Clients only, misses newly created Leads).
   // FieldColumn:"28"/ContainOperator:"7" enables all-statuses filter required for QS:3.
+  //
+  // Confirmed live 2026-08-24 (Michael's "Village Estates"/"Doedens" accounts
+  // came back as zero results across every name variant tried, even though
+  // both genuinely exist in SA): FieldColumn:'1' (name) is a server-side
+  // no-op regardless of ContainOperator -- SA always returns the same
+  // "recent clients" list no matter what name is filtered on. There is no
+  // real server-side name search to call, so this pages through the actual
+  // account population itself (same pattern as getClientsByTag) and matches
+  // client-side, instead of trusting a filter that doesn't filter.
   const filterData = JSON.stringify({
     FilterData: [
-      { FieldColumn: '1', ContainOperator: '1', FieldItems: [name], Order: 0, SCFilterID: EMPTY_GUID },
       { FieldColumn: '28', ContainOperator: '7', FieldItems: [], Order: 0, SCFilterID: EMPTY_GUID },
     ],
     CustomFields: [],
     QuerySelection: 3,
   });
 
-  const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
-    QueryInput: {
-      Settings: { FilterData: filterData },
-      StartRow: 1,
-      Max: limit * 3,
-      SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
-    },
-  }, 'Clients.aspx');
-
-  const accounts = (res.data?.d || res.data)?.Accounts || [];
   const term = name.toLowerCase();
-  // SA returns its "recent clients" list when no filter matches — filter client-side
-  // to ensure only genuinely matching records are returned.
-  return accounts
-    .filter(a => (a.ClientName || '').toLowerCase().includes(term))
-    .slice(0, limit)
-    .map(a => ({
-      clientId: a.ClientID,
-      name:     a.ClientName,
-      address:  a.Location || a.Address1 || '',
-      type:     a.Type || '',
-      isLead:   a.Type === 'Lead',
-    }));
+  const matches = [];
+  let startRow = 1;
+  let scanned = 0;
+  const pageSize = 500;
+  while (matches.length < limit && scanned < maxScan) {
+    const res = await post('/CRMBFF/AccountList/V2AccountList_Query', {
+      QueryInput: {
+        Settings: { FilterData: filterData },
+        StartRow: startRow,
+        Max: Math.min(pageSize, maxScan - scanned),
+        SortedColumns: [{ FieldName: '', Direction: 2, ColumnEnum: 0 }],
+      },
+    }, 'Clients.aspx');
+    const accounts = (res.data?.d || res.data)?.Accounts || [];
+    if (accounts.length === 0) break;
+    scanned += accounts.length;
+    for (const a of accounts) {
+      if ((a.ClientName || '').toLowerCase().includes(term)) {
+        matches.push({
+          clientId: a.ClientID,
+          name:     a.ClientName,
+          address:  a.Location || a.Address1 || '',
+          type:     a.Type || '',
+          isLead:   a.Type === 'Lead',
+        });
+        if (matches.length >= limit) break;
+      }
+    }
+    if (accounts.length < pageSize) break;
+    startRow += pageSize;
+  }
+  return matches;
 }
 
 /**
