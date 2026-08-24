@@ -1038,6 +1038,21 @@ const FLEETSHARP_TOOLS = [
   },
 ];
 
+// Tools available to a non-Michael Teams requester (taskType 'employee',
+// added 2026-08-24 — see tools/impl/privacy-gate.js). This list is the HARD
+// structural half of the privacy design: it must never include anything that
+// can read Michael's mailbox, calendar, SA/QB data, files, or code — no
+// prompt could talk the model into fetching that data if the tool to do so
+// simply isn't in its vocabulary. Kept deliberately minimal (not even
+// SEARCH_TOOLS) rather than guessing what else might be safe.
+const EMPLOYEE_TOOLS = [
+  {
+    name: 'request_employee_approval',
+    description: 'Call this whenever the requester asks for ANYTHING beyond genuinely generic, public information (e.g. company hours, phone number) — Michael\'s schedule, inbox, business data, or any judgment call. Takes no parameters. This declines the request to the requester (without confirming any private data exists) and asks Michael for approval. Do not attempt to answer a non-generic question yourself; always call this instead of guessing or refusing in your own words.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+];
+
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
   crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS],
@@ -1049,6 +1064,13 @@ const TOOL_MAP = {
   // sending arbitrary Teams messages from an unsupervised run. Without this
   // entry, getTools() falls through to 'general', which grants both.
   auto_fix:   [...CODE_TOOLS.filter(t => t.name !== 'github_merge_pr'), ...FILE_TOOLS],
+  // Non-Michael Teams requester (see EMPLOYEE_TOOLS above and
+  // tools/impl/privacy-gate.js) — without this explicit entry, getTools()
+  // would silently fall through to TOOL_MAP.general below, which grants
+  // email/QB/SA/files/code/everything. This entry existing at all is the
+  // actual privacy boundary; do not remove it or broaden its tool list
+  // without re-reading why it's this narrow.
+  employee:   [...EMPLOYEE_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
   scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],

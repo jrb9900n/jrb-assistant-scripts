@@ -12,7 +12,8 @@ import { listSkills } from '../skills/library.js';
 import { logger } from '../core/logger.js';
 import { buildContextBlock } from '../tools/impl/feedback.js';
 import { loadRecentTurns, saveTurn } from '../memory/conversation.js';
-import { saveConversationRef, sendProactiveMessage, sanitizeForPrompt, buildAutoFixPrompt } from './notify.js';
+import { saveConversationRef, saveEmployeeConversationRef, sendProactiveMessage, sanitizeForPrompt, buildAutoFixPrompt } from './notify.js';
+import { resolveSender } from './identity.js';
 import { handleCardDAV } from '../tools/impl/carddav.js';
 import {
   handleOAuthAuthorize,
@@ -345,6 +346,20 @@ async function processTeamsMessage(activity, sessionId) {
     : '');
   if (!userText) return;
 
+  // Resolve WHO is messaging before anything else. Added 2026-08-24 —
+  // Michael's inbox/personal/business data must only ever be shared with
+  // him; a non-Michael sender gets routed to a completely separate,
+  // structurally-restricted path (see handleEmployeeMessage below and
+  // tools/registry.js's TOOL_MAP.employee) instead of the normal pipeline.
+  // resolveSender fails open (treats every sender as Michael) until
+  // TEAMS_MICHAEL_AAD_ID is configured, so this is a zero-behavior-change
+  // no-op today.
+  const sender = await resolveSender(activity);
+  if (!sender.isMichael) {
+    await handleEmployeeMessage(activity, sender, sessionId, userText);
+    return;
+  }
+
   // Persist conversation reference so we can send proactive messages later
   saveConversationRef(activity);
 
@@ -386,6 +401,24 @@ async function processTeamsMessage(activity, sessionId) {
     await saveTurn(sessionId, 'assistant', text).catch(err =>
       logger.warn('Teams: saveTurn (assistant) failed', { err: err.message })
     );
+  }
+
+  // Check whether this message from Michael is a reply to a pending employee
+  // approval request (see tools/impl/privacy-gate.js) BEFORE normal intent
+  // routing — a fast no-op (one Supabase count query) when nothing is
+  // pending, which is the overwhelming majority of his messages. Only
+  // short-circuits when there's a real pending request AND the message reads
+  // as a yes/no/"remember this" decision; anything else falls through to the
+  // normal flow below unchanged.
+  try {
+    const { resolvePendingApprovalReply } = await import('../tools/impl/privacy-gate.js');
+    const approvalResult = await resolvePendingApprovalReply(userText);
+    if (approvalResult) {
+      await remember(approvalResult.replyToMichael);
+      return;
+    }
+  } catch (err) {
+    logger.warn('Teams: resolvePendingApprovalReply check failed (non-fatal)', { err: err.message });
   }
 
   const intent = classifyIntent(userText);
@@ -518,6 +551,92 @@ Message: "${userText}"
   } catch (err) {
     logger.error('Teams handler error', { err: err.message });
     await remember(`Error: ${err.message}`);
+  }
+}
+
+// The default system prompt (core/agent.js's buildSystemPrompt) frames the
+// agent as Michael's own assistant with no notion it might be talking to
+// someone else — confirmed live 2026-08-24 that leaving it in place here
+// would rely ENTIRELY on request_employee_approval's own tool description to
+// keep the model from just answering a private question out of its own
+// general/contextual knowledge. That's not a reliable enough boundary on its
+// own (the hard boundary is EMPLOYEE_TOOLS' absence of any real data tool —
+// this prompt is the soft layer telling the model what to do given that
+// constraint, not a substitute for it).
+function buildEmployeeSystemPrompt(senderName) {
+  // Confirmed live 2026-08-24: an earlier version of this prompt omitted real
+  // company facts entirely (systemPromptOverride REPLACES the default prompt,
+  // it doesn't add to it) — asked "what services does JRB offer," the model
+  // hallucinated "real estate services" out of nowhere rather than admit it
+  // didn't know. Include the same real facts core/agent.js's default prompt
+  // already has, so a genuinely-generic answer is actually correct instead of
+  // confidently wrong.
+  return `You are the AI assistant for J.R. Boehlke, LLC, an asphalt, concrete, landscape, and snow contractor in southeast Wisconsin and metro Milwaukee. Main phone: 262-242-9924.
+
+You are currently messaged by ${senderName || 'an employee'} — NOT Michael Reardon, the business owner. This is a different conversation than your normal one with Michael.
+
+Michael's explicit standing rule: his inbox, calendar, personal information, and business data are only ever shared with him directly. You must never answer, guess at, or reveal any of that to anyone else, including this requester.
+
+- If the request is genuinely generic/public information you actually know (e.g. company hours, phone number, what services JRB offers) — answer it directly and briefly, using only real facts, never a guess.
+- If it's generic but you don't actually know the answer (e.g. a specific policy detail) — say so plainly rather than guessing.
+- For ANYTHING else — Michael's schedule or availability, his inbox, financials, client/business specifics, or any judgment call — call request_employee_approval instead. Do not explain why in your own words, do not apologize at length, do not try to be helpful by guessing at an answer. Just call the tool.
+- Never confirm or deny that specific private information exists, even indirectly.
+
+Current date/time: ${new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' })}`;
+}
+
+// ── Non-Michael Teams requester path ─────────────────────────────────────────
+// Added 2026-08-24. Completely separate from processTeamsMessage above — no
+// scheduling/crm/dev/report intent routing, no SA-backoff retry queue, no
+// extraMessages from Michael's own conversation history. Structurally
+// restricted to taskType 'employee' (see tools/registry.js's TOOL_MAP), which
+// simply doesn't include any tool capable of returning Michael's mailbox,
+// calendar, SA/QB, file, or code data — the model in this path cannot fetch
+// that data no matter what it's asked, only tools/impl/privacy-gate.js's
+// request_employee_approval (or, once Phase B lands, book_time_with_michael)
+// are available.
+async function handleEmployeeMessage(activity, sender, sessionId, userText) {
+  saveEmployeeConversationRef(sender.aadId, activity);
+
+  await saveTurn(sessionId, 'user', userText).catch(err =>
+    logger.warn('Teams (employee): saveTurn (user) failed', { err: err.message })
+  );
+
+  async function reply(text) {
+    await replyToTeams(activity, text);
+    await saveTurn(sessionId, 'assistant', text).catch(err =>
+      logger.warn('Teams (employee): saveTurn (assistant) failed', { err: err.message })
+    );
+  }
+
+  try {
+    const { checkStandingException } = await import('../tools/impl/privacy-gate.js');
+    const exception = await checkStandingException(sender.aadId, userText).catch(err => {
+      logger.warn('Teams (employee): checkStandingException failed (non-fatal)', { err: err.message });
+      return null;
+    });
+
+    if (exception) {
+      // Michael already pre-approved this KIND of request going forward —
+      // answer it directly with full tools, same authorization logic as a
+      // fresh one-time approval, just without pinging him again first.
+      logger.info('Teams (employee): standing exception matched', { requester: sender.name, exceptionId: exception.id });
+      const { result } = await runAgent({ task: userText, taskType: 'general', saveContext: false });
+      await reply(result);
+      return;
+    }
+
+    const { result } = await runAgent({
+      task: userText,
+      taskType: 'employee',
+      systemPromptOverride: buildEmployeeSystemPrompt(sender.name),
+      saveContext: false,
+      context: { sender, activity, requestText: userText },
+    });
+    await reply(result);
+  } catch (err) {
+    logger.error('Teams (employee) handler error', { requester: sender.name, err: err.message });
+    await reply("Sorry, something went wrong on my end — I've flagged it. Please try again in a bit.");
   }
 }
 
