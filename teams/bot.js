@@ -517,6 +517,22 @@ async function processTeamsMessage(activity, sessionId) {
     logger.warn('Teams: resolvePendingApprovalReply check failed (non-fatal)', { err: err.message });
   }
 
+  // Same shape as the privacy-gate check above, for a different pending
+  // state machine: a yes/no reply to a Claude Code escalation Michael was
+  // asked to approve (see tools/impl/claude-code-escalation.js, triggered by
+  // the escalate_to_claude_code tool). Checked second since both are cheap
+  // no-ops in the overwhelmingly common case of neither being pending.
+  try {
+    const { resolvePendingEscalationReply } = await import('../tools/impl/claude-code-escalation.js');
+    const escalationResult = await resolvePendingEscalationReply(userText);
+    if (escalationResult) {
+      await remember(escalationResult.replyToMichael);
+      return;
+    }
+  } catch (err) {
+    logger.warn('Teams: resolvePendingEscalationReply check failed (non-fatal)', { err: err.message });
+  }
+
   const intent = classifyIntent(userText);
   logger.info('Teams message', { intent, text: userText.slice(0, 80) });
 
@@ -556,7 +572,7 @@ async function processTeamsMessage(activity, sessionId) {
       // above. Mixing in raw cross-intent turns (e.g. an earlier CRM or dev
       // exchange in the same Teams conversation) would just add noise the
       // model could mistake for scheduling-relevant instructions.
-      ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true, images }));
+      ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else if (intent === 'crm') {
       const crmTask = `You received a Teams message from Michael. Execute the action he is requesting using your SA, CRM, and CardDAV tools.
@@ -572,7 +588,7 @@ Message: "${userText}"
 - If Michael asks to schedule/book an estimate visit with a client: use schedule_estimate_visit. If it comes back needs_clarification, ask him which client he means instead of guessing.
 - Always confirm what you did: client name, SA IDs, actions taken.`;
       retryTask = crmTask; retryTaskType = 'crm';
-      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false, images }));
+      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else if (intent === 'ops_alert') {
       // A system/watchdog alert was posted or pasted into live chat (see
@@ -601,17 +617,17 @@ Message: "${userText}"
     } else if (intent === 'dev') {
       const devTask = `Michael sent this Teams message:\n\n"${userText}"\n\nFollow the github-dev skill workflow. Reply with a scope proposal:\n- Restate the goal in 2-3 sentences\n- List the files that will be created or changed\n- Identify which repo this belongs in\n- State any assumptions\n- Ask Michael to confirm before you proceed\n\nDo not write any code yet. Return only the reply text.`;
       retryTask = devTask; retryTaskType = 'code';
-      ({ result } = await runAgent({ task: devTask, taskType: 'code', extraMessages, saveContext: false, images }));
+      ({ result } = await runAgent({ task: devTask, taskType: 'code', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else if (intent === 'dev_ambiguous') {
       result = `Want to make sure I handle this correctly — are you asking me to build or write code, or looking for information/advice? Reply "yes, build it" and I'll put together a scope plan.`;
 
     } else if (intent === 'report') {
       retryTaskType = 'report';
-      ({ result } = await runAgent({ task: userText, taskType: 'report', extraMessages, saveContext: false, images }));
+      ({ result } = await runAgent({ task: userText, taskType: 'report', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else {
-      ({ result } = await runAgent({ task: userText, taskType: 'general', extraMessages, images }));
+      ({ result } = await runAgent({ task: userText, taskType: 'general', extraMessages, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
     }
 
     // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.

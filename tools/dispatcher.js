@@ -27,6 +27,7 @@ import * as carddav     from './impl/carddav.js';
 import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { requestEmployeeApproval } from './impl/privacy-gate.js';
+import { requestEscalation } from './impl/claude-code-escalation.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 import { createClient } from '@supabase/supabase-js';
 
@@ -229,6 +230,19 @@ const HANDLERS = {
   // anything the model could fill in itself. See tools/impl/privacy-gate.js.
   request_employee_approval: (i, context) => requestEmployeeApproval({
     sender: context?.sender, activity: context?.activity, requestText: context?.requestText,
+  }),
+
+  // Claude Code escalation — activity/sessionId/taskType come from the
+  // trusted context object (see core/agent.js's runAgent, teams/bot.js's
+  // Michael-message branches); reason/task_to_escalate are the model's own
+  // tool input, fine to trust since they only shape a follow-up prompt, not
+  // any identity/authorization decision. See tools/impl/claude-code-escalation.js.
+  escalate_to_claude_code: (i, context) => requestEscalation({
+    activity: context?.activity,
+    sessionId: context?.sessionId,
+    taskType: context?.taskType ?? 'general',
+    task: i.task_to_escalate,
+    reason: i.reason,
   }),
 };
 
