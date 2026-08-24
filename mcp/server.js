@@ -11,6 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'crypto';
 import { runAgent } from '../core/agent.js';
 import { sendProactiveMessage } from '../teams/notify.js';
+import { saveToRules } from '../tools/impl/feedback-capture.js';
 import { logger } from '../core/logger.js';
 import { z } from 'zod';
 
@@ -65,6 +66,32 @@ function buildMcpServer() {
         return { content: [{ type: 'text', text: 'Teams message sent.' }] };
       } catch (err) {
         logger.error('MCP send_teams_message error', { err: err.message });
+        return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
+      }
+    }
+  );
+
+  // Tool: save_standing_rule — added 2026-08-25 for the Claude Code escalation
+  // path (see tools/impl/claude-code-escalation.js). Deliberately narrow: an
+  // escalated headless Claude Code session (see runEscalatedClaudeCode) is
+  // scoped to exactly this tool plus run_task/get_status, never a generic
+  // Supabase/SQL tool, so it can persist a standing rule the same way
+  // feedback-capture.js's own pipeline does but can't touch anything else in
+  // the database.
+  server.tool(
+    'save_standing_rule',
+    "Save a standing rule to the JRB Agent's rules table so it's applied to all future agent interactions (injected into every system prompt). Use this when you've worked out a durable fix or procedure Michael should not have to re-explain next time — e.g. after resolving an escalated task that revealed a gap in the normal agent's tools or behavior.",
+    {
+      rule: z.string().describe('The standing rule, written as a complete, self-contained instruction.'),
+      agent: z.enum(['general', 'email', 'crm', 'scheduling', 'reporting']).optional().describe("Which part of the system this applies to. Defaults to 'general'."),
+    },
+    async ({ rule, agent }) => {
+      logger.info('MCP save_standing_rule', { agent: agent || 'general', rule: rule.slice(0, 80) });
+      try {
+        await saveToRules(rule, agent || 'general', 'claude_code_escalation');
+        return { content: [{ type: 'text', text: 'Rule saved.' }] };
+      } catch (err) {
+        logger.error('MCP save_standing_rule error', { err: err.message });
         return { content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true };
       }
     }

@@ -1091,11 +1091,33 @@ const EMPLOYEE_TOOLS = [
   },
 ];
 
+// Escalation path to a full headless Claude Code session, gated on Michael's
+// yes/no (built 2026-08-25 -- see tools/impl/claude-code-escalation.js).
+// Given to every Michael-initiated taskType EXCEPT employee (privacy
+// boundary -- a non-Michael requester must never be able to trigger this)
+// and auto_fix (unattended; escalation needs a live Teams round-trip for
+// Michael's approval, which self_heal_watcher's cron-triggered runs don't
+// have).
+const ESCALATION_TOOLS = [
+  {
+    name: 'escalate_to_claude_code',
+    description: "Call this when you genuinely lack a tool to complete Michael's request -- e.g. no tool exists for an action he asked for, or the task needs broader investigation/tool orchestration than your current tool set supports. Do NOT call this for something you simply haven't tried yet, or that a clarifying question to Michael would resolve. This asks Michael for permission before anything runs; if he says no, nothing happens. Do not also explain in your own reply that you can't do this -- this tool's own response IS that explanation, sent to him verbatim.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'Specifically what tool or capability is missing, in one or two sentences.' },
+        task_to_escalate: { type: 'string', description: "A clear, self-contained restatement of the task to hand off if Michael approves -- can be more precise than Michael's original wording, but must not drop or invent scope." },
+      },
+      required: ['reason', 'task_to_escalate'],
+    },
+  },
+];
+
 const TOOL_MAP = {
-  email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
-  crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS],
-  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
-  code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
+  email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...ESCALATION_TOOLS],
+  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
+  code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   // Unattended investigate-and-fix pass (self_heal_watcher) -- same tools as
   // 'code' minus github_merge_pr, so it can open a PR for Michael but can
   // never merge one itself, and no TEAMS_TOOLS since nothing should be
@@ -1112,10 +1134,10 @@ const TOOL_MAP = {
   // availability and book real time with him, nothing else.
   employee:   [...EMPLOYEE_TOOLS, ...BOOKING_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...BOOKING_TOOLS, ...TEAMS_TOOLS],
-  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...TEAMS_TOOLS],
-  sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...BOOKING_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
 };
 
 export function getTools(taskType) {
