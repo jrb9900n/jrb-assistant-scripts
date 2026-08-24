@@ -17,6 +17,11 @@ function supabase() {
 
 const MICHAEL_EMAIL = 'michael@jrboehlke.com';
 
+// Emit a loud startup warning the first time resolveSender is called without
+// TEAMS_MICHAEL_AAD_ID configured.  A module-level flag ensures we only log
+// once per process rather than once per message.
+let _warnedMissingAadId = false;
+
 /**
  * Resolves the sender of a Teams activity.
  *
@@ -24,14 +29,15 @@ const MICHAEL_EMAIL = 'michael@jrboehlke.com';
  * @returns {Promise<{isMichael: boolean, aadId: string|null, name: string|null, email: string|null, employeeId: string|null}>}
  *
  * Michael is identified by comparing `activity.from.aadObjectId` against the
- * TEAMS_MICHAEL_AAD_ID env var. **Deliberately fails open (treats the sender
- * as Michael) whenever that env var isn't set** — this is what lets the
- * whole privacy system ship with zero behavior change today (only Michael
- * uses the bot) and get activated later by simply setting one credential,
- * rather than needing a second deploy. Once set, this is the hard identity
- * boundary the rest of the system (teams/bot.js's employee-vs-Michael
- * branch, tools/dispatcher.js's trusted context) relies on — get this env
- * var right before relying on any of the rest.
+ * TEAMS_MICHAEL_AAD_ID env var.
+ *
+ * SECURITY: When TEAMS_MICHAEL_AAD_ID is not set this function FAILS CLOSED —
+ * every sender is treated as a non-Michael employee, not as Michael.  The
+ * original fail-open behaviour (treating every sender as Michael when the env
+ * var was absent) silently eliminated the entire access-control boundary under
+ * a common misconfiguration condition.  Set TEAMS_MICHAEL_AAD_ID before
+ * deploying; the warning logged below will fire on every incoming message
+ * until it is configured.
  */
 export async function resolveSender(activity) {
   const aadId = activity.from?.aadObjectId ?? null;
@@ -39,9 +45,21 @@ export async function resolveSender(activity) {
   const michaelAadId = process.env.TEAMS_MICHAEL_AAD_ID;
 
   if (!michaelAadId) {
-    // Not yet configured — ship safe by treating every sender as Michael,
-    // exactly like the pre-existing behavior before this file existed.
-    return { isMichael: true, aadId, name, email: MICHAEL_EMAIL, employeeId: null };
+    // Fail CLOSED: without a configured Michael AAD ID we cannot verify
+    // identity, so we must not grant elevated access to anyone.
+    if (!_warnedMissingAadId) {
+      _warnedMissingAadId = true;
+      logger.error(
+        '[SECURITY] TEAMS_MICHAEL_AAD_ID is not set. ' +
+        'resolveSender cannot verify Michael\'s identity and will treat ALL ' +
+        'senders as non-Michael employees until this env var is configured. ' +
+        'Set TEAMS_MICHAEL_AAD_ID to Michael\'s Azure AD object ID and restart ' +
+        'the bot before relying on any privacy or access-control features.'
+      );
+    }
+    // Treat as a non-Michael employee — fail closed.
+    const employee = await getOrSyncEmployee(aadId, name);
+    return { isMichael: false, aadId, name, email: employee?.email ?? null, employeeId: employee?.id ?? null };
   }
 
   if (aadId && aadId === michaelAadId) {
