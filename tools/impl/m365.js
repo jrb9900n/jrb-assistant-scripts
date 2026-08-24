@@ -528,6 +528,17 @@ export async function deleteCalendarEvent({ userEmail, event_id } = {}) {
   return { deleted: true, event_id };
 }
 
+// Used by the block-schedule reconciler to auto-accept trusted recurring
+// invites (e.g. Breakthrough Academy) that would otherwise sit unresponded
+// while still displacing block time. Graph's accept endpoint sends the
+// organizer a real acceptance response by default (sendResponse defaults
+// true) -- matches what clicking "Accept" in Outlook would actually do.
+export async function acceptCalendarEvent({ userEmail, event_id, comment = '' } = {}) {
+  const user = userEmail ?? MICHAEL_CALENDAR;
+  await graph('POST', `/users/${user}/events/${event_id}/accept`, { comment, sendResponse: true });
+  return { accepted: true, event_id };
+}
+
 /**
  * Fetch a single event's full body content (listCalendarEvents/calendarView only
  * return a 300-char-truncated bodyPreview, never the real body). Used by the
@@ -619,7 +630,7 @@ export async function getCalendarViewWithCategories({ userEmail, startDateTime, 
   }));
 }
 
-function toLocalNaiveFromUtc(dateTimeStr) {
+export function toLocalNaiveFromUtc(dateTimeStr) {
   if (!dateTimeStr) return dateTimeStr;
   const d = new Date(dateTimeStr.endsWith('Z') ? dateTimeStr : `${dateTimeStr}Z`);
   const pad2 = n => String(n).padStart(2, '0');
