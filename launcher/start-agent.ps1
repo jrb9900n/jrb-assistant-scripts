@@ -131,6 +131,7 @@ $secrets = @{
     "GITHUB_REPOS"    = "jrb-assistant-scripts,FleetOps,FieldOps,AuditMatchingEngine"
     "TEAMS_BOT_APP_ID"     = Get-Secret "M365_CLIENT_ID"
     "TEAMS_BOT_APP_SECRET" = Get-Secret "TEAMS_BOT_APP_SECRET"
+    "TEAMS_MICHAEL_AAD_ID" = Get-Secret "TEAMS_MICHAEL_AAD_ID"
     "TEAMS_PORT"           = "3978"
     "TEAMS_PUBLIC_URL"    = "https://agent.jrboehlke.com"
     "BRAVE_SEARCH_API_KEY" = Get-Secret "BRAVE_SEARCH_API_KEY"
