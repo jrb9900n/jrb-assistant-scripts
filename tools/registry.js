@@ -1007,6 +1007,44 @@ const SCHEDULING_TOOLS = [
   },
 ];
 
+// Built 2026-08-24 as part of Phase B (calendar tiering + employee booking) —
+// shared by Michael's own conversations (general/crm/scheduling) and the
+// EMPLOYEE_TOOLS allow-list below. `isEmployeeRequester`/`requesterIdentity`
+// are deliberately absent from book_time_with_michael's schema: dispatcher.js
+// fills those in from the trusted `context.sender` object, never from
+// LLM-produced JSON, so a requester can't type their way into a different
+// identity or a "not an employee" claim.
+const BOOKING_TOOLS = [
+  {
+    name: 'check_michael_availability',
+    description: 'Check open windows on Michael\'s calendar for a given date and meeting length. Shows genuinely free time plus time covered by displaceable block-schedule entries as available too -- the real conflict/cap check happens at actual booking time via book_time_with_michael, not here. Never reveals subjects, tiers, or reasons for busy time, only start/end windows.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        date:            { type: 'string', description: 'Date to check, YYYY-MM-DD' },
+        durationMinutes: { type: 'number', description: 'Meeting length in minutes', default: 30 },
+      },
+      required: ['date'],
+    },
+  },
+  {
+    name: 'book_time_with_michael',
+    description: 'Book a real meeting on Michael\'s calendar, sending a genuine Outlook invite to the requester. Re-checks for conflicts at the actual moment of booking -- a slot that looked open in check_michael_availability can still be declined here (e.g. an occasional block\'s displacement cap used up by another booking in between). On a decline, only ever say the time doesn\'t work and suggest trying another -- never state the real reason, subject, or block tier.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        requesterName:   { type: 'string', description: 'Name of the person meeting with Michael' },
+        requesterEmail:  { type: 'string', description: 'Email of the person meeting with Michael -- they will receive a real Outlook invite' },
+        date:            { type: 'string', description: 'Meeting date, YYYY-MM-DD' },
+        startTime:       { type: 'string', description: 'Meeting start time, 24h HH:MM, e.g. "14:00"' },
+        durationMinutes: { type: 'number', description: 'Meeting length in minutes', default: 30 },
+        subject:         { type: 'string', description: 'Optional meeting subject/title. Defaults to "Meeting with <requesterName>"' },
+      },
+      required: ['requesterName', 'requesterEmail', 'date', 'startTime'],
+    },
+  },
+];
+
 const FLEETSHARP_TOOLS = [
   {
     name: 'fleetsharp_get_vehicle_list',
@@ -1055,7 +1093,7 @@ const EMPLOYEE_TOOLS = [
 
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
-  crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   // Unattended investigate-and-fix pass (self_heal_watcher) -- same tools as
@@ -1069,13 +1107,15 @@ const TOOL_MAP = {
   // would silently fall through to TOOL_MAP.general below, which grants
   // email/QB/SA/files/code/everything. This entry existing at all is the
   // actual privacy boundary; do not remove it or broaden its tool list
-  // without re-reading why it's this narrow.
-  employee:   [...EMPLOYEE_TOOLS],
+  // without re-reading why it's this narrow. BOOKING_TOOLS is the one
+  // explicit carve-out Michael confirmed: an employee may check his
+  // availability and book real time with him, nothing else.
+  employee:   [...EMPLOYEE_TOOLS, ...BOOKING_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...TEAMS_TOOLS],
-  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...TEAMS_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...BOOKING_TOOLS, ...TEAMS_TOOLS],
+  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...TEAMS_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
 };
 
 export function getTools(taskType) {

@@ -206,7 +206,18 @@ export async function checkAndResolveDisplacement({ mailbox, date, visitStart, v
   const dayEnd = `${addDaysToDateStr(date, 1)}T23:59:59`;
   const dayEvents = await getCalendarViewWithCategories({ userEmail: mailbox, startDateTime: dayStart, endDateTime: dayEnd });
 
-  const overlapping = dayEvents.filter(e => e.categories.includes(BLOCK_CATEGORY) && overlaps(visitStart, visitEnd, e.start, e.end));
+  // De-duped by id -- confirmed live 2026-08-24 that calendarView can return
+  // the same occurrence twice in one query (observed right after modifying a
+  // recurring instance, likely an expansion-cache/replication-lag artifact).
+  // Processing the same occurrence twice in one pass would double-log an
+  // OCCASIONAL displacement against its cap, and a second delete/shrink call
+  // against an occurrence the first call already deleted would throw instead
+  // of resolving cleanly.
+  const overlapping = [...new Map(
+    dayEvents
+      .filter(e => e.categories.includes(BLOCK_CATEGORY) && overlaps(visitStart, visitEnd, e.start, e.end))
+      .map(e => [e.id, e])
+  ).values()];
 
   if (overlapping.length === 0) {
     return { status: 'no_conflicts', resolvedActions: [], conflicts: [] };
