@@ -10,6 +10,7 @@ import {
   getClientsByTag, getAllSAAccounts, addTagToClient, saveClientFields,
 } from './serviceautopilot.js';
 import { HISTORY_SERVICE_CODE_MAP, getHistoryServiceMap, matchHistoryAccountsToCurrent, mergeHistoryIntoServiceMap } from './sa-history-match.js';
+import { normalizeAddress, normalizeEmail } from './fuzzy-match.js';
 
 const fleetops = createClient(
   process.env.FLEETOPS_SUPABASE_URL,
@@ -177,6 +178,57 @@ export async function getHoaTaggedClientIds() {
 }
 
 /**
+ * Key used to match "same underlying property/contact" across two separate
+ * SA client records — normalized address + city + zip + email. Address alone
+ * is NOT enough: found live 2026-08-24 that individual condo unit owners
+ * routinely share their whole building's street address with the complex's
+ * own HOA/association master record (a multi-unit building only has one
+ * street address), and are genuinely distinct residential clients with their
+ * own separate email — reclassifying them as HOA off address alone produced
+ * real false positives (e.g. "Janet Thompson" at the same address as
+ * "Claremont Village Condos" but a completely different email — she's a
+ * real individual owner, not a duplicate of the association's own record).
+ * Requiring the email to ALSO match is what correctly separates the genuine
+ * duplicate-record cases (same person/board-member's contact info reused
+ * across two differently-named SA client records for the same property —
+ * "Village Estates"/"Village Estate Condos", "Bill Bauer"/"Ancient Oaks HOA",
+ * "David Charney"/"Hidden River Condos", "Millard Johnson"/"Lake Park Forest
+ * Condominiums", all confirmed live with an exact email match) from the
+ * false positives above (confirmed live with a different email each).
+ * Returns null (never matches) if either address or email is missing.
+ */
+function addressKey(account) {
+  const addr = normalizeAddress(account.address || '');
+  const email = normalizeEmail(account.email || '');
+  if (!addr || !email) return null;
+  return `${addr}|${(account.city || '').toLowerCase()}|${(account.zip || '').toLowerCase()}|${email}`;
+}
+
+/**
+ * Found live 2026-08-24 ("Village Estates" vs. the already-correctly-tagged
+ * "Village Estate Condos" — same address, same contact email, two separate
+ * SA client records for the same physical HOA property). HOA_RE only catches
+ * names that literally contain "HOA"/"condo"/"association"/"homeowners" — a
+ * duplicate/renamed record for the same property that drops the qualifying
+ * word falls straight through to the Residential default with zero signal
+ * that anything's wrong. Builds Set<addressKey> (address+email combined —
+ * see addressKey) for every account whose clientId is already in `hoaSet`,
+ * so `classifyAccountType` can catch "this is the same underlying contact as
+ * a known HOA, just a different-named duplicate record" even when the name
+ * itself gives no textual hint. Cheap — reuses accounts/hoaSet already
+ * fetched by the caller, no extra SA round trip.
+ */
+function buildHoaAddressSet(accounts, hoaSet) {
+  const keys = new Set();
+  for (const account of accounts) {
+    if (!hoaSet.has(account.clientId)) continue;
+    const key = addressKey(account);
+    if (key) keys.add(key);
+  }
+  return keys;
+}
+
+/**
  * Classify one account's segment from name/address signals plus the
  * bulk-discovered GC/HOA tag maps. Returns { segment, confidence, reason }.
  * confidence: 'high' | 'medium' | 'low' (low = flagged for manual review,
@@ -208,7 +260,7 @@ function nameSegments(rawName) {
 // rather than have it swept into a real segment by the regex fallback.
 const TEST_ACCOUNT_CLIENT_ID = 'e2a7420a-930c-4908-90aa-67ba158e0921';
 
-export function classifyAccountType(account, { gcMap, hoaSet }) {
+export function classifyAccountType(account, { gcMap, hoaSet, hoaAddresses }) {
   if (account.clientId === TEST_ACCOUNT_CLIENT_ID) {
     return { segment: null, confidence: 'low', reason: 'SA test account (APIProbe, JRBTest) — excluded from classification' };
   }
@@ -220,8 +272,21 @@ export function classifyAccountType(account, { gcMap, hoaSet }) {
   if (gcMap.has(account.clientId)) {
     return { segment: 'GC Subcontract', confidence: 'high', reason: `existing tag: GC: ${gcMap.get(account.clientId)}` };
   }
-  if (hoaSet.has(account.clientId) || HOA_RE.test(fullText)) {
-    return { segment: 'Commercial - HOA', confidence: 'high', reason: hoaSet.has(account.clientId) ? 'existing tag: Commercial - HOA' : 'name/address matches HOA/condo pattern' };
+  if (hoaSet.has(account.clientId)) {
+    return { segment: 'Commercial - HOA', confidence: 'high', reason: 'existing tag: Commercial - HOA' };
+  }
+  if (HOA_RE.test(fullText)) {
+    return { segment: 'Commercial - HOA', confidence: 'high', reason: 'name/address matches HOA/condo pattern' };
+  }
+  // Same underlying contact (address AND email both match) as a client already
+  // tagged Commercial - HOA — a separate/duplicate SA record for the same
+  // property whose name happens to drop the qualifying word (e.g. "Village
+  // Estates" vs. the correctly-tagged "Village Estate Condos", same email) —
+  // found live 2026-08-24, see buildHoaAddressSet/addressKey. Address alone is
+  // deliberately NOT enough here — individual condo unit owners legitimately
+  // share their building's address with the complex's own HOA record.
+  if (hoaAddresses && hoaAddresses.has(addressKey(account))) {
+    return { segment: 'Commercial - HOA', confidence: 'high', reason: 'shares an address AND contact email with an existing Commercial - HOA account (duplicate client record for the same property)' };
   }
   // Check every colon-separated segment against municipal/military patterns — the
   // matching segment isn't always the first one (e.g. "Belgium Village Office
@@ -348,8 +413,9 @@ export async function runClassificationDryRun({ max = 12000, includeHistory = tr
     logger.info('SA classification: history enrichment applied', stats);
   }
 
+  const hoaAddresses = buildHoaAddressSet(accounts, hoaSet);
   const rows = accounts.map(account => {
-    const accountType = classifyAccountType(account, { gcMap, hoaSet });
+    const accountType = classifyAccountType(account, { gcMap, hoaSet, hoaAddresses });
     const services = classifyServiceLines(account.clientId, serviceHistoryMap);
     return { clientId: account.clientId, name: account.name, isLead: account.isLead, accountType, services };
   });
@@ -548,8 +614,12 @@ export async function runIncrementalClassification({ max = 300 } = {}) {
     return { classified: 0, tagged: 0, skipped: 0, failed: [] };
   }
 
+  // Built from the FULL account list (not just newAccounts) — a brand-new
+  // duplicate record needs to match against every existing HOA property's
+  // address, not just other new ones.
+  const hoaAddresses = buildHoaAddressSet(accounts, hoaSet);
   const rows = newAccounts.map(account => {
-    const accountType = classifyAccountType(account, { gcMap, hoaSet });
+    const accountType = classifyAccountType(account, { gcMap, hoaSet, hoaAddresses });
     const services = classifyServiceLines(account.clientId, serviceHistoryMap);
     return { clientId: account.clientId, name: account.name, isLead: account.isLead, accountType, services };
   });
