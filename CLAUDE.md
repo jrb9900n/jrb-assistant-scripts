@@ -466,6 +466,25 @@ General auto-displacement, but for the opposite trigger direction from Phase 2: 
 - **Known Graph quirk, not a bug**: patching one occurrence of a recurring series can cause Graph's delta feed to redeliver *neighboring* occurrences of that same series as "changed," sometimes with no subject/start populated at all — confirmed live immediately after this shipped. `calendar_change_watch` skips any change with a missing subject/start rather than reconciling against garbage.
 - **Retagging which of Michael's real blocks (beyond the one named exemption) might need their own exemption is a manual, ongoing judgment call** — this list is deliberately short and explicit rather than a heuristic, since guessing wrong either direction (displacing an intentional co-location, or leaving a genuine conflict unresolved) is worse than asking.
 
+> **Gap found 2026-08-21, fixed 2026-08-24 (PR #320)**: `GOOGLE_MAPS_API_KEY` was stored in Credential Manager but was never actually injected by `launcher/start-agent.ps1` — it was simply missing from that file's `$secrets` hashtable. The live drive-time feature had therefore likely been silently returning `status: 'unavailable'` in production, even after the Routes API was enabled. Now injected; requires a JRB Teams Bot restart to take effect if one hasn't happened since PR #320 merged.
+
+---
+
+## Teams Voice Messages (built 2026-08-21)
+
+Michael asked for two things: the bot transcribing a voice memo he sends in Teams, and the bot being able to reply with a spoken voice message "like OpenAI can do." Chose **OpenAI for both directions** (Whisper for transcription, OpenAI's TTS API for spoken replies) over Azure Speech after initially considering Azure — one vendor, one credential, and it directly matches the ChatGPT-voice-mode comparison Michael drew.
+
+### How it works
+- `tools/impl/openai-voice.js` (new): `transcribeAudio({audioBuffer, mimeType, filename})` via `POST /v1/audio/transcriptions` (Whisper), `synthesizeSpeech(text)` via `POST /v1/audio/speech` (TTS, `tts-1`/`alloy`, capped at 4000 input chars — OpenAI's TTS endpoint rejects longer input). Both degrade to `null` on any failure (no key, bad audio, network error) rather than throwing.
+- `teams/bot.js`'s `extractAndTranscribeVoiceMemo()` downloads a voice memo's `audio/*` attachment via the bot's own existing `getBotToken()` (same auth Teams requires for image attachments), caps at 25MB, transcribes it. Called **before** the `if (!userText) return` bail, since a voice memo typically carries no `activity.text` at all — bailing first would silently drop the whole message.
+- **Voice replies are on-request only** (Michael's explicit choice, not "mirror how you sent it") — `WANTS_VOICE_REPLY_RE` matches phrases like "reply with voice"/"say that out loud" in the (possibly-transcribed) message text. When it matches, `remember()` synthesizes speech and sends it as an `audio/mp3` **data URI** attachment (no new storage dependency — input is already capped at 4000 chars, so payload size stays reasonable) instead of a plain text reply, falling back to text if synthesis fails for any reason.
+
+### Setup step (done 2026-08-24)
+`OPENAI_API_KEY` was created at platform.openai.com and saved via `launcher/save-openai-secrets.ps1`, and `launcher/start-agent.ps1`'s `$secrets` hashtable now injects it (PR #320).
+
+### Not yet verified live
+Built and syntax-checked, but merged without testing against a real Teams voice memo or a real OpenAI API call (Michael's explicit call — skipped the originally-planned live-test-before-merge step). Requires a JRB Teams Bot restart to pick up `OPENAI_API_KEY` before any of this can work at all. Unverified assumptions worth confirming once live: (1) Teams' actual `contentType` for a voice memo attachment matches the `audio/*` pattern assumed here, (2) Teams renders/plays a bot-sent `data:audio/mp3;base64,...` attachment correctly (no live confirmation this works the way image attachments do).
+
 ---
 
 ## FleetSharp GPS/Telematics Read Tools (built 2026-08-19)
@@ -574,7 +593,7 @@ Confirmed directly by Michael 2026-08-17: "Anytime 'SA' is mentioned you may ass
 ## Credentials
 All stored in Windows Credential Manager as `JRBAgent:KEY_NAME`. Never hardcode. Access via `start-agent.ps1` which injects them as environment variables.
 
-Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `QB_REFRESH_TOKEN_TRANSPORT`, `QB_REALM_ID_TRANSPORT` (9130357740125736 — JRB Transport LLC, live 2026-08-21), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`, `FLEETSHARP_URL`, `FLEETSHARP_EMAIL`, `FLEETSHARP_PASSWORD`, `GOOGLE_MAPS_API_KEY` (Routes API, drive-time calc for the estimate-visit scheduling feature — see Autonomous Schedule Manager section; set via `launcher/save-googlemaps-secrets.ps1`)
+Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TENANT_ID`, `M365_CLIENT_ID`, `M365_CLIENT_SECRET` (expires Jan 2027), `QB_CLIENT_ID`, `QB_CLIENT_SECRET`, `QB_REFRESH_TOKEN` (expires ~Aug 28 2026 — calendar reminder set), `QB_REALM_ID` (9130357265584656 — also hardcoded in launcher), `QB_REFRESH_TOKEN_TRANSPORT`, `QB_REALM_ID_TRANSPORT` (9130357740125736 — JRB Transport LLC, live 2026-08-21), `GITHUB_TOKEN` (expires May 3 2027 — calendar reminder set), `BRAVE_SEARCH_API_KEY`, `SA_EMAIL`, `SA_PASSWORD`, `TEAMS_BOT_APP_SECRET`, `FLEETOPS_SUPABASE_SERVICE_KEY`, `QB_WEBHOOK_VERIFIER_TOKEN`, `CLAUDE_EXECUTE_SECRET`, `FLEETSHARP_URL`, `FLEETSHARP_EMAIL`, `FLEETSHARP_PASSWORD`, `GOOGLE_MAPS_API_KEY` (Routes API, drive-time calc for the estimate-visit scheduling feature — see Autonomous Schedule Manager section; set via `launcher/save-googlemaps-secrets.ps1`; actually injected by `start-agent.ps1` as of PR #320, 2026-08-24), `OPENAI_API_KEY` (Whisper transcription + TTS voice replies — see Teams Voice Messages section; set via `launcher/save-openai-secrets.ps1`; injected by `start-agent.ps1` as of PR #320, 2026-08-24)
 
 Pending (see Multi-Company QuickBooks Support section): `QB_REFRESH_TOKEN_PROPCO`, `QB_REALM_ID_PROPCO` — for JRB Granville Propco's QBO connection, reusing the same `QB_CLIENT_ID`/`QB_CLIENT_SECRET` app. Not yet added to `start-agent.ps1`'s env injection (requires Michael's go-ahead per the launcher-edit autonomy rule) or populated in Credential Manager (populated automatically by the `/qb-reauth?company=propco` OAuth flow, signed in as `michael@jrboehlke.com`, once the launcher change lands).
 
