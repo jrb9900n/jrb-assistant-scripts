@@ -55,16 +55,33 @@ async function gracefulShutdown(signal) {
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
+// Was check-then-write (existsSync then writeFileSync) -- a genuine TOCTOU race
+// when two scheduler processes are alive at once (a documented recurring risk on
+// this machine, e.g. the 2026-08-19 incident where the scheduler ran under a
+// stray RDP session outside Task Scheduler's supervision): both could see no
+// lock present in the same instant and both proceed, causing duplicate sends
+// for tasks like email_poller. `flag: 'wx'` makes the create atomic at the OS
+// level -- exactly one concurrent caller wins. The stale-lock-recovery path
+// (existing lock past its ttl) still has a narrow window on the retry, but
+// that's an unavoidable cold-path tradeoff, not the common case this fixes.
 function acquireRunLock(taskName, ttlMs = 60_000) {
   const lockFile = join(tmpdir(), `jrb-scheduler-${taskName}.lock`);
-  try {
-    if (existsSync(lockFile)) {
-      const ts = Number(readFileSync(lockFile, 'utf8'));
-      if (Date.now() - ts < ttlMs) return false;
+  const tryCreate = () => {
+    try {
+      writeFileSync(lockFile, String(Date.now()), { flag: 'wx' });
+      return true;
+    } catch (err) {
+      if (err.code === 'EEXIST') return false;
+      return true; // unexpected FS error -- don't block a task run on a lock we can't reason about
     }
-    writeFileSync(lockFile, String(Date.now()), 'utf8');
-    return true;
-  } catch { return true; }
+  };
+  if (tryCreate()) return true;
+  try {
+    const ts = Number(readFileSync(lockFile, 'utf8'));
+    if (Date.now() - ts < ttlMs) return false; // held and still fresh
+    unlinkSync(lockFile); // stale -- clear it and retry once
+  } catch { return false; }
+  return tryCreate();
 }
 
 function releaseRunLock(taskName) {
@@ -140,6 +157,50 @@ if (branchWasDrifted) {
 // causing at most one earlier-than-usual repeat note.
 let lastDirtyNoteAt = 0;
 let lastFailureNoteAt = 0;
+
+// Every email_poller reply is composed almost verbatim from runAgent()'s raw
+// text -- most call sites just do `result.replace(/\n/g, '<br>')`, no markdown
+// rendering step. Without an explicit instruction the model defaults to its
+// natural Claude-Code register (## headers, **bold**, pipe tables, emoji
+// bullets/checkmarks, code fences), which then renders as literal characters
+// in Michael's inbox instead of formatted text. Confirmed live 2026-08-24
+// against real sent replies. Appended to every reply-generating task prompt
+// below rather than passed as a systemPromptOverride, since that param fully
+// replaces buildSystemPrompt()'s output (losing the standing-rules/company
+// context injection) instead of layering on top of it.
+const EA_REPLY_STYLE = `
+Format this reply the way a competent human executive assistant would write an email -- not as a
+chat/status report. Follow these rules exactly:
+- Output clean HTML only: <p>, <ul>/<li>, <table> only if genuinely needed. Never use markdown
+  syntax (no "##", "**", backtick code fences, "|---|" style tables, or emoji used as bullets or
+  headers) -- it will show up as literal characters in the recipient's inbox, not formatting.
+- Warm but efficient: no "I hope this finds you well," no restating the question back, no
+  meta-commentary about how you're approaching the task.
+- If part of the request can't be completed because no tool exists for it yet, say so in one plain
+  sentence and stop there. Never propose or offer to run raw SQL, a direct database write, or any
+  other unreviewed command as a workaround in the reply -- that decision belongs to Michael, not
+  something to float over email.
+- Do not add a "Sent by JRB Executive Assistant" signature yourself -- the caller appends that.
+`.trim();
+
+// Defense-in-depth for EA_REPLY_STYLE's "HTML only" instruction -- the model
+// complying isn't guaranteed. If the result already contains HTML tags, trust
+// it as-is; otherwise treat it as plain text and convert it ourselves (blank
+// line = new paragraph, single newline = <br>) so a non-compliant plain-text
+// response still renders as readable email instead of one run-on paragraph
+// (dropping the old blanket `.replace(/\n/g,'<br>')` would do that, since HTML
+// collapses bare whitespace).
+function asHtmlBody(text) {
+  const s = (text ?? '').trim();
+  if (!s) return '';
+  if (/<[a-z][^>]*>/i.test(s)) return s;
+  return s.split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
+}
+
+// Matches core/agent.js's SONNET constant -- used to force Sonnet on the
+// email_poller general-fallback call below rather than relying on routeModel's
+// keyword heuristic (that taskType isn't in SONNET_TASK_TYPES).
+const FORCE_SONNET_MODEL = 'claude-sonnet-4-6';
 
 const SCHEDULED_TASKS = [
   {
@@ -1645,7 +1706,7 @@ const SCHEDULED_TASKS = [
         return;
       }
       try {
-      const { listEmails, getEmail, sendEmail, markEmailRead, listEmailAttachments, getEmailAttachmentBytes } = await import('../tools/impl/m365.js');
+      const { listEmails, getEmail, sendEmail, markEmailRead, listEmailAttachments, getEmailAttachmentBytes, getThreadEmails } = await import('../tools/impl/m365.js');
       const { processEmailedReceipt, processChaseAlert } = await import('../tools/impl/expense.js');
       const emails = await listEmails({ folder: 'Inbox', limit: 10, unread_only: true });
 
@@ -1769,15 +1830,17 @@ Follow the github-dev skill workflow. Reply with a scope proposal:
 - State any assumptions
 - Ask Michael to confirm before you proceed
 
-Do not write any code yet. Return only the reply text.`;
+Do not write any code yet. Return only the reply text.
+
+${EA_REPLY_STYLE}`;
 
           const agentResult = await runAgent({ task, taskType: 'code', saveContext: false });
-          const result = agentResult?.result ?? 'Got it â€” I\'ll scope this out and reply shortly.';
+          const result = asHtmlBody(agentResult?.result) || '<p>Got it — I\'ll scope this out and reply shortly.</p>';
 
           await sendEmail({
             to: [email.from],
             subject: `Re: ${email.subject}`,
-            body: `<p>${result.replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
+            body: `<div style="font-family:Arial,sans-serif;max-width:640px;">${result}</div><hr style="margin:20px 0;"><p style="color:#888;font-size:12px;"><em>Sent by JRB Executive Assistant</em></p>`,
           });
           await markEmailRead({ email_id: email.id });
           logger.info(`Email poller: sent scope proposal to ${email.from}`);
@@ -1927,7 +1990,9 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
 
 ━━━ OTHER SA ACTIONS ━━━
 - If Michael asks to create a ticket, estimate, job, or other SA record: do it now using your tools, then reply with a brief HTML summary.
-- If Michael asks to look up a client, invoice, or balance: do it and return the result in a readable format.`;
+- If Michael asks to look up a client, invoice, or balance: do it and return the result in a readable format.
+
+${EA_REPLY_STYLE}`;
 
           const crmReplyTo = isFromMichael ? 'michael@jrboehlke.com' : email.from;
           const crmSubject = isFromMichael ? `SA: ${email.subject}` : `Re: ${email.subject}`;
@@ -1957,7 +2022,7 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
             continue;
           }
 
-          const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
+          const crmReply = asHtmlBody(crmResult?.result) || '<p>Done — check SA for the new record.</p>';
           const isTicketFailure = /warning.*ticket not verified|ticket not verified|not verified|sa.*unreachable|sa.*fail|could not create|ticket.*fail/i.test(crmReply);
           if (isTicketFailure && crmReplyTo !== 'michael@jrboehlke.com') {
             try {
@@ -1982,26 +2047,65 @@ Return a well-formatted HTML summary for Michael's reference. This is NOT sent t
         }
 
         // ── General AI routing (fallback for all unclassified emails from Michael) ──
+        // Pull recent thread history so a reply to an ongoing back-and-forth isn't
+        // blind to what was already said (e.g. Michael replying "approve all" to a
+        // digest the bot itself sent earlier that day). Best-effort -- a lookup
+        // failure just falls back to no thread context rather than dropping the email.
+        let threadContext = '';
+        try {
+          const priorMsgs = (await getThreadEmails({ thread_id: full.thread_id, limit: 6 }))
+            .filter(m => m.id !== email.id)
+            .sort((a, b) => new Date(a.date) - new Date(b.date))
+            .slice(-4);
+          const lines = (await Promise.all(priorMsgs.map(async m => {
+            try {
+              const msg = await getEmail({ email_id: m.id });
+              const text = (msg.body ?? '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500);
+              return `[${m.date}] ${m.from}: ${text}`;
+            } catch { return null; }
+          }))).filter(Boolean);
+          if (lines.length) {
+            threadContext = `\n\nPrior messages in this thread (oldest to newest, for context only -- don't re-answer them, just don't contradict or forget them):\n${lines.join('\n\n')}`;
+          }
+        } catch (err) {
+          logger.warn('Email poller: thread context lookup failed (non-fatal)', { err: err.message });
+        }
+
         const task = `You received an email from Michael Reardon (michael@jrboehlke.com).
 
 Subject: “${email.subject}”
 Body:
-${body}
+${body}${threadContext}
 
 Classify the email and respond appropriately:
 - Question or info request → answer directly and concisely
-- Task completable without code or CRM tools → complete it and report back
+- Task completable with your tools → do it now and report back what actually happened
 - FYI / forwarded notification with no action needed → acknowledge in 1-2 sentences
 - Financial/bank/vendor notification → note the key details (amount, merchant, account) and ask if any action is needed
 
-Return ONLY the reply text. No preamble, no analysis section, no “Here is my reply:” header. Just the reply itself.`;
-        const agentResult = await runAgent({ task, taskType: 'email', saveContext: false });
-        const result = agentResult?.result ?? 'I received your email and will follow up shortly.';
+Return ONLY the reply text. No preamble, no analysis section, no “Here is my reply:” header. Just the reply itself.
+
+${EA_REPLY_STYLE}`;
+        // taskType 'general' (not 'email') -- this is Michael's own request via his
+        // own email channel, past the from-address check above, so it should have
+        // the same tool access the Teams bot already grants him for the identical
+        // "not dev, not CRM" fallback case (teams/bot.js's own general routing uses
+        // 'general' too). The narrower 'email' taskType (EMAIL_TOOLS + TEAMS_TOOLS
+        // only) was leaving genuinely completable requests -- e.g. anything needing
+        // a QuickBooks/SA lookup -- unable to do anything but describe the gap.
+        // 'general' isn't in SONNET_TASK_TYPES, so routeModel would otherwise fall
+        // back to its keyword heuristic for model choice -- forcing Sonnet here
+        // rather than relying on this prompt template happening to contain a
+        // matching keyword (it does today, but that's exactly the kind of silent
+        // wording-drift trap already documented elsewhere in this file for the
+        // "Estimating" vs "estimate" routing miss).
+        const agentResult = await runAgent({ task, taskType: 'general', model: FORCE_SONNET_MODEL, saveContext: false });
+        const result = asHtmlBody(agentResult?.result) || '<p>I received your email and will follow up shortly.</p>';
 
         await sendEmail({
           to: [email.from],
           subject: `Re: ${email.subject}`,
-          body: `<p>${result.replace(/\n/g, '<br>')}</p><hr><p><em>Sent by JRB Executive Assistant</em></p>`,
+          body: `<div style="font-family:Arial,sans-serif;max-width:640px;">${result}</div><hr style="margin:20px 0;"><p style="color:#888;font-size:12px;"><em>Sent by JRB Executive Assistant</em></p>`,
         });
         logger.info(`Email poller: replied to ${email.from}`);
       }
