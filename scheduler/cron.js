@@ -183,6 +183,25 @@ chat/status report. Follow these rules exactly:
 - Do not add a "Sent by JRB Executive Assistant" signature yourself -- the caller appends that.
 `.trim();
 
+// Defense-in-depth for EA_REPLY_STYLE's "HTML only" instruction -- the model
+// complying isn't guaranteed. If the result already contains HTML tags, trust
+// it as-is; otherwise treat it as plain text and convert it ourselves (blank
+// line = new paragraph, single newline = <br>) so a non-compliant plain-text
+// response still renders as readable email instead of one run-on paragraph
+// (dropping the old blanket `.replace(/\n/g,'<br>')` would do that, since HTML
+// collapses bare whitespace).
+function asHtmlBody(text) {
+  const s = (text ?? '').trim();
+  if (!s) return '';
+  if (/<[a-z][^>]*>/i.test(s)) return s;
+  return s.split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
+}
+
+// Matches core/agent.js's SONNET constant -- used to force Sonnet on the
+// email_poller general-fallback call below rather than relying on routeModel's
+// keyword heuristic (that taskType isn't in SONNET_TASK_TYPES).
+const FORCE_SONNET_MODEL = 'claude-sonnet-4-6';
+
 const SCHEDULED_TASKS = [
   {
     // Daily 8 AM — send follow-up SMS to employees with incomplete expense reports
@@ -1816,7 +1835,7 @@ Do not write any code yet. Return only the reply text.
 ${EA_REPLY_STYLE}`;
 
           const agentResult = await runAgent({ task, taskType: 'code', saveContext: false });
-          const result = agentResult?.result ?? '<p>Got it — I\'ll scope this out and reply shortly.</p>';
+          const result = asHtmlBody(agentResult?.result) || '<p>Got it — I\'ll scope this out and reply shortly.</p>';
 
           await sendEmail({
             to: [email.from],
@@ -2003,7 +2022,7 @@ ${EA_REPLY_STYLE}`;
             continue;
           }
 
-          const crmReply = crmResult?.result ?? 'Done — check SA for the new record.';
+          const crmReply = asHtmlBody(crmResult?.result) || '<p>Done — check SA for the new record.</p>';
           const isTicketFailure = /warning.*ticket not verified|ticket not verified|not verified|sa.*unreachable|sa.*fail|could not create|ticket.*fail/i.test(crmReply);
           if (isTicketFailure && crmReplyTo !== 'michael@jrboehlke.com') {
             try {
@@ -2074,8 +2093,14 @@ ${EA_REPLY_STYLE}`;
         // 'general' too). The narrower 'email' taskType (EMAIL_TOOLS + TEAMS_TOOLS
         // only) was leaving genuinely completable requests -- e.g. anything needing
         // a QuickBooks/SA lookup -- unable to do anything but describe the gap.
-        const agentResult = await runAgent({ task, taskType: 'general', saveContext: false });
-        const result = agentResult?.result ?? '<p>I received your email and will follow up shortly.</p>';
+        // 'general' isn't in SONNET_TASK_TYPES, so routeModel would otherwise fall
+        // back to its keyword heuristic for model choice -- forcing Sonnet here
+        // rather than relying on this prompt template happening to contain a
+        // matching keyword (it does today, but that's exactly the kind of silent
+        // wording-drift trap already documented elsewhere in this file for the
+        // "Estimating" vs "estimate" routing miss).
+        const agentResult = await runAgent({ task, taskType: 'general', model: FORCE_SONNET_MODEL, saveContext: false });
+        const result = asHtmlBody(agentResult?.result) || '<p>I received your email and will follow up shortly.</p>';
 
         await sendEmail({
           to: [email.from],
