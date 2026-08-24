@@ -43,6 +43,16 @@ import { f$, fD, sectionHeader, alertBox } from './ar-report-helpers.js';
 
 const WRITE_OFF_THRESHOLD_DAYS = 365;
 
+// Added 2026-08-21, same day as the fix above: rather than showing the
+// entire 2023-08-20 conversion dump (and everything else that old) inside
+// the "Over 12 Months" write-off section every month, Michael's follow-up
+// decision was to fully drop anything dated on or before that exact date
+// from the report altogether — it's not real, reviewable business activity,
+// so there's nothing for a monthly write-off review to act on by seeing it
+// repeated. Genuinely old-but-real debt from after that date (e.g. the
+// Sealmaster bills) still shows up normally in the write-off section.
+const IGNORE_ON_OR_BEFORE = '2023-08-20';
+
 // Every configured QBO company gets an AP section — derived from
 // qb-token.js's own company registry rather than hardcoded here, so a third
 // company added in the future is picked up automatically instead of
@@ -83,8 +93,8 @@ function realTotal(buckets) {
 
 async function fetchAR(asOfDate) {
   try {
-    const aging = await getAgedReportAsOf({ reportName: 'AgedReceivableDetail', asOfDate, company: 'jrb', writeOffThresholdDays: WRITE_OFF_THRESHOLD_DAYS });
-    return { ok: true, buckets: aging.buckets };
+    const aging = await getAgedReportAsOf({ reportName: 'AgedReceivableDetail', asOfDate, company: 'jrb', writeOffThresholdDays: WRITE_OFF_THRESHOLD_DAYS, ignoreOnOrBefore: IGNORE_ON_OR_BEFORE });
+    return { ok: true, buckets: aging.buckets, ignoredCount: aging.ignoredCount, ignoredTotal: aging.ignoredTotal };
   } catch (err) {
     logger.warn('bank_monthly_report: AR fetch failed', { err: err.message });
     return { ok: false, error: err.message };
@@ -100,7 +110,7 @@ async function fetchAPEntity({ company, label }, asOfDate) {
   if (!getQBRealmId(company)) return { ok: false, company, label, notConnected: true };
 
   try {
-    const raw = await getAgedReportAsOf({ reportName: 'AgedPayableDetail', asOfDate, company, writeOffThresholdDays: WRITE_OFF_THRESHOLD_DAYS });
+    const raw = await getAgedReportAsOf({ reportName: 'AgedPayableDetail', asOfDate, company, writeOffThresholdDays: WRITE_OFF_THRESHOLD_DAYS, ignoreOnOrBefore: IGNORE_ON_OR_BEFORE });
     const excluded = EXCLUDED_INTERCOMPANY_VENDORS[company] ?? new Set();
     const buckets = {};
     for (const [key, rows] of Object.entries(raw.buckets)) {
@@ -108,7 +118,7 @@ async function fetchAPEntity({ company, label }, asOfDate) {
         .filter(r => !excluded.has(normalizeVendorName(r.name)))
         .map(r => ({ ...r, entity: label }));
     }
-    return { ok: true, company, label, buckets };
+    return { ok: true, company, label, buckets, ignoredCount: raw.ignoredCount, ignoredTotal: raw.ignoredTotal };
   } catch (err) {
     logger.warn('bank_monthly_report: AP entity fetch failed', { company, err: err.message });
     return { ok: false, company, label, error: err.message };
@@ -136,7 +146,9 @@ function mergeAPEntities(results) {
   // below should list — otherwise a company added to QB_COMPANIES but not
   // yet OAuth-authorized (e.g. Propco as of this writing) would be claimed
   // as consolidated in the header while contributing zero real data.
-  return { buckets, ok: ok.length > 0, includedLabels: ok.map(r => r.label), failedLabels: failed.map(r => r.label) };
+  const ignoredCount = ok.reduce((s, r) => s + (r.ignoredCount ?? 0), 0);
+  const ignoredTotal = ok.reduce((s, r) => s + (r.ignoredTotal ?? 0), 0);
+  return { buckets, ok: ok.length > 0, includedLabels: ok.map(r => r.label), failedLabels: failed.map(r => r.label), ignoredCount, ignoredTotal };
 }
 
 function buildAgingTable(buckets) {
@@ -157,12 +169,23 @@ function buildAgingTable(buckets) {
 
 const WRITE_OFF_MAX_ROWS = 10;
 
+// Write-off rows can span years (that's the whole point of this section) —
+// ar-report-helpers.js's shared fD() deliberately omits the year (every
+// other report's dates are all within the current year, where that's the
+// right call), so a local formatter is used here instead of changing that
+// shared convention for every other report.
+function fDWithYear(dateStr) {
+  if (!dateStr) return '—';
+  const d = new Date(dateStr.length === 10 ? dateStr + 'T12:00:00Z' : dateStr);
+  return d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', year: 'numeric' });
+}
+
 function buildWriteOffBox(rows, title, itemNoun) {
   if (!rows.length) return '';
   const total = rows.reduce((s, r) => s + r.balance, 0);
   const shown = rows.slice(0, WRITE_OFF_MAX_ROWS);
   const tableRows = shown.map(r =>
-    `<tr><td style="padding:3px 0;font-size:12px;color:#7a1f1f;">${r.name}${r.entity ? ` (${r.entity})` : ''} <span style="color:#999999;">${fD(r.dueDate || r.txnDate)}</span></td><td style="padding:3px 0;font-size:12px;font-weight:bold;color:#7a1f1f;text-align:right;">${f$(r.balance)}</td></tr>`
+    `<tr><td style="padding:3px 0;font-size:12px;color:#7a1f1f;">${r.name}${r.entity ? ` (${r.entity})` : ''} <span style="color:#999999;">${fDWithYear(r.dueDate || r.txnDate)}</span></td><td style="padding:3px 0;font-size:12px;font-weight:bold;color:#7a1f1f;text-align:right;">${f$(r.balance)}</td></tr>`
   ).join('');
   const moreNote = rows.length > shown.length
     ? `<p style="margin:6px 0 0;font-size:11px;color:#888888;">+ ${rows.length - shown.length} more ${itemNoun}, not itemized here — see QuickBooks for the full list.</p>`
@@ -281,6 +304,17 @@ export async function generateAndSendBankMonthlyReport({ asOfDate: asOfOverride 
     body,
   });
 
-  logger.info('bank_monthly_report: sent', { asOfDate, arReal, apReal, arOk: arResult.ok, apOk: apMerged.ok, apFailedLabels: apMerged.failedLabels });
+  // ignoredCount/ignoredTotal (from the IGNORE_ON_OR_BEFORE cutoff) are
+  // logged here, not shown in the bank-facing email itself — Michael wants
+  // the pre-2023-08-20 conversion dump fully excluded from what the bank
+  // sees, not called out on the document. This log line is the only trace
+  // of how much was dropped, so a future regression in the cutoff logic
+  // (or someone accidentally removing it) is still visible in the app log
+  // even though it will never appear in the email.
+  logger.info('bank_monthly_report: sent', {
+    asOfDate, arReal, apReal, arOk: arResult.ok, apOk: apMerged.ok, apFailedLabels: apMerged.failedLabels,
+    arIgnoredCount: arResult.ignoredCount ?? 0, arIgnoredTotal: arResult.ignoredTotal ?? 0,
+    apIgnoredCount: apMerged.ignoredCount ?? 0, apIgnoredTotal: apMerged.ignoredTotal ?? 0,
+  });
   return { asOfDate, arReal, apReal, arOk: arResult.ok, apOk: apMerged.ok, apFailedLabels: apMerged.failedLabels };
 }
