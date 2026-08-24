@@ -4,10 +4,13 @@
 //
 // What it does per run:
 //   1. Fetch unread emails from Michael's inbox (last 48h, unprocessed only)
-//   2. Batch-classify all of them with one Haiku call (category, priority, intent)
+//   2. Batch-classify all of them with one Haiku call (category, bucket, intent)
+//      — bucket is Fyxer.ai-style: "needs_reply" | "fyi" | "marketing"
 //   3. Move each to the matching folder in Michael's mailbox
-//   4. For P1 / hot-trigger emails: send immediate Teams alert
-//   5. For draft-needed P1s: generate a Sonnet reply draft, save to his Drafts
+//   4. For needs_reply / hot-trigger emails: send immediate Teams alert
+//   5. For draft-needed needs_reply emails: generate a Sonnet reply draft
+//      (tone-matched to Michael's own past emails to that recipient, when
+//      history exists), save to his Drafts
 //   6. Upsert all results to email_triage in Supabase
 
 import Anthropic from '@anthropic-ai/sdk';
@@ -18,9 +21,14 @@ import {
   getEmail,
   moveEmail,
   listMailFolders,
+  listChildFolders,
   createMailFolder,
   renameMailFolder,
+  moveMailFolder,
   createReplyDraft,
+  getSentEmailsTo,
+  getOldDrafts,
+  deleteEmail,
 } from './m365.js';
 import { sendProactiveMessage } from '../../teams/notify.js';
 
@@ -37,43 +45,61 @@ function supabase() {
 // ── Folder routing ───────────────────────────────────────────────────────────
 
 const FOLDER_MAP = {
-  quote_request:    'aaa Quotes & Estimates',
-  customer:         'aaa Customers',
-  vendor:           'aaa Vendors',
-  invoice:          'aaa Invoices',
-  crew:             'aaa Crew',
-  admin:            'aaa Admin',
-  legal:            'aaa Admin',        // legal goes into Admin; flag in triage
-  promotional:      'aaa Low Priority', // ads, newsletters, marketing, solicitations
-  marketing:        'aaa Low Priority', // alias — classifier sometimes uses this instead of promotional
-  other:            'aaa Low Priority', // unclassified → low priority, not inbox clutter
-  spam:             'Junk Email',       // true spam → Outlook's built-in junk
+  quote_request:    '_Quotes & Estimates',
+  customer:         '_Customers',
+  vendor:           '_Vendors',
+  invoice:          '_Invoices',
+  crew:             '_Crew',
+  admin:            '_Admin',
+  legal:            '_Admin',        // legal goes into Admin; flag in triage
+  promotional:      '_Low Priority', // ads, newsletters, marketing, solicitations
+  marketing:        '_Low Priority', // alias — classifier sometimes uses this instead of promotional
+  other:            '_Low Priority', // unclassified → low priority, not inbox clutter
+  spam:             'Junk Email',    // true spam → Outlook's built-in junk
 };
 
-// Old folder names (pre-aaa prefix) that need renaming on first run
+// Old folder names (bare, or the earlier "aaa "-prefix convention) that need
+// renaming to the current "_"-prefix convention on first run. Both prefixes
+// exist purely to sort these folders to the top of Michael's subfolder list —
+// "_" replaced "aaa " 2026-08-24 at Michael's request.
 const LEGACY_FOLDER_NAMES = {
-  'Quotes & Estimates': 'aaa Quotes & Estimates',
-  'Customers':          'aaa Customers',
-  'Vendors':            'aaa Vendors',
-  'Invoices':           'aaa Invoices',
-  'Crew':               'aaa Crew',
-  'Admin':              'aaa Admin',
-  'Low Priority':       'aaa Low Priority',
+  'Quotes & Estimates':     '_Quotes & Estimates',
+  'aaa Quotes & Estimates': '_Quotes & Estimates',
+  'Customers':              '_Customers',
+  'aaa Customers':          '_Customers',
+  'Vendors':                '_Vendors',
+  'aaa Vendors':            '_Vendors',
+  'Invoices':               '_Invoices',
+  'aaa Invoices':           '_Invoices',
+  'Crew':                   '_Crew',
+  'aaa Crew':               '_Crew',
+  'Admin':                  '_Admin',
+  'aaa Admin':              '_Admin',
+  'Low Priority':           '_Low Priority',
+  'aaa Low Priority':       '_Low Priority',
 };
 
-// Cache folder name → id for Michael's mailbox (reset on each run)
+// Cache folder name → id for Michael's mailbox (reset on each run). Merges
+// top-level folders with Inbox's own child folders — listMailFolders alone
+// only sees top-level, and these category folders live nested under Inbox
+// (moved there 2026-08-24 so they sort at the top of the subfolder list,
+// right under Inbox, instead of cluttering the top-level account folder list).
 let _folderCache = null;
 
 async function getFolderCache() {
   if (_folderCache) return _folderCache;
-  const folders = await listMailFolders({ userEmail: MICHAEL });
+  const [topLevel, inboxChildren] = await Promise.all([
+    listMailFolders({ userEmail: MICHAEL }),
+    listChildFolders({ userEmail: MICHAEL, parentFolderId: 'inbox' }),
+  ]);
   _folderCache = {};
-  for (const f of folders) _folderCache[f.name] = f.id;
+  for (const f of topLevel) _folderCache[f.name] = f.id;
+  for (const f of inboxChildren) _folderCache[f.name] = f.id; // nested wins on a name collision (shouldn't happen)
   return _folderCache;
 }
 
-// Rename any legacy (non-prefixed) folders to their aaa versions.
-// Called once per processInbox run before any moves.
+// Rename any legacy (non-prefixed or "aaa "-prefixed) folders to their current
+// "_"-prefixed names. Called once per processInbox run before any moves.
 async function migrateLegacyFolders() {
   const cache = await getFolderCache();
   const renamed = [];
@@ -93,11 +119,41 @@ async function migrateLegacyFolders() {
   return renamed;
 }
 
-// Ensure all target folders exist, creating any that are missing.
+// Moves any of the category folders that are still top-level (siblings of
+// Inbox) into Inbox as children, so they sort right at the top of the
+// subfolder list instead of the account's top-level folder list. Added
+// 2026-08-24 — Michael had already manually moved _Admin himself; this
+// catches the rest and keeps it self-healing if a future folder gets created
+// at the wrong level for any reason.
+async function migrateFolderLocations() {
+  const cache = await getFolderCache();
+  const inboxChildren = await listChildFolders({ userEmail: MICHAEL, parentFolderId: 'inbox' });
+  const alreadyNested = new Set(inboxChildren.map(f => f.name));
+  const targetNames = [...new Set(Object.values(FOLDER_MAP))].filter(n => n !== 'Junk Email');
+
+  const moved = [];
+  for (const name of targetNames) {
+    if (cache[name] && !alreadyNested.has(name)) {
+      try {
+        await moveMailFolder({ userEmail: MICHAEL, folder_id: cache[name], destinationParentId: 'inbox' });
+        moved.push(name);
+        logger.info(`inbox-processor: moved folder "${name}" into Inbox`);
+      } catch (err) {
+        logger.warn(`inbox-processor: could not move folder "${name}" into Inbox`, { err: err.message });
+      }
+    }
+  }
+  if (moved.length) _folderCache = null; // force a fresh cache next read — ids are unchanged but membership shifted
+  return moved;
+}
+
+// Ensure all target folders exist, creating any that are missing — created
+// directly as a child of Inbox (not top-level) so a brand-new category folder
+// never needs a separate move step.
 async function ensureFolder(name) {
   const cache = await getFolderCache();
   if (cache[name]) return cache[name];
-  const { folder_id } = await createMailFolder({ userEmail: MICHAEL, name });
+  const { folder_id } = await createMailFolder({ userEmail: MICHAEL, name, parentFolderId: 'inbox' });
   cache[name] = folder_id;
   logger.info(`inbox-processor: created folder "${name}"`, { folder_id });
   return folder_id;
@@ -159,13 +215,18 @@ async function getProcessedIds(messageIds) {
 
 // ── Batch LLM classification ─────────────────────────────────────────────────
 
+// Fyxer-style 3-bucket model (replaces the old p1/p2/p3 priority scheme,
+// 2026-08-24 — Michael explicitly preferred Fyxer.ai's simpler "Needs a
+// Reply / FYI / Marketing" taxonomy over a numeric priority tier). `category`
+// is a separate, orthogonal axis kept unchanged — it drives folder filing
+// (FOLDER_MAP below), while `bucket` drives attention/alerting/drafting.
 const CLASSIFY_SYSTEM = `You classify emails arriving in the inbox of Michael Reardon, owner of J.R. Boehlke LLC — an asphalt, concrete, landscape, and snow contractor in SE Wisconsin / metro Milwaukee.
 
 Return a JSON object: { "classifications": [...] }
 
 For each email include:
   message_id    — echo back unchanged
-  priority      — "p1" | "p2" | "p3"
+  bucket        — "needs_reply" | "fyi" | "marketing"
   category      — "quote_request" | "customer" | "vendor" | "invoice" | "crew" | "admin" | "legal" | "promotional" | "spam" | "other"
   intent        — one sentence: what the sender wants or is communicating
   meeting_request — boolean
@@ -186,13 +247,16 @@ Category definitions:
   spam           — unsolicited junk with no relevance, phishing attempts, obvious bulk spam
   other          — doesn't fit any above category
 
-Priority rules:
-  p1: new quote/lead requests; active customer with job question; legal/insurance notices with deadlines;
-      bank issues (fraud, large overdraft); meeting requests; emails mentioning a date/deadline ≤ 7 days out
-  p2: vendor follow-ups; general customer inquiries; routine billing/invoices; estimate follow-ups
-  p3: newsletters; automated notifications; payment receipts; marketing; promotional emails; general FYI
+Bucket rules:
+  needs_reply: new quote/lead requests; active customer with a job question; legal/insurance notices with
+      deadlines; bank issues (fraud, large overdraft); meeting requests; vendor questions that need an
+      answer; anything a reasonable person would feel obligated to respond to
+  fyi          : automated notifications, payment receipts/confirmations, routine billing statements with
+      nothing to decide, informational updates, system emails — worth knowing about, nothing to act on
+  marketing    : newsletters, advertisements, sales pitches, promotional/marketing emails, solicitations,
+      subscription digests — noise, not signal
 
-Hot trigger rules (immediate Teams alert regardless of time):
+Hot trigger rules (immediate Teams alert regardless of time — always implies bucket "needs_reply"):
   • A DIRECT email from a prospective customer asking for a quote or service
   • Legal notice, lien, lawsuit, or permit issue
   • Bank fraud alert or account issue
@@ -204,14 +268,20 @@ NEVER hot trigger (even if content mentions a lead or customer):
   • Automated notification emails (CallRail call alerts, Google alerts, form submission notifications)
   • Any email from a no-reply address — these are system-generated, not from a human
   • CRM or call tracking software notifications about activity
-  • These should always be p3 / admin
+  • These should always be bucket "fyi", category "admin"
 
-Draft-needed: true when the email is a p1 that clearly warrants a reply — must be from a real human, not an automated system.`;
+Draft-needed: true when the email is "needs_reply" and clearly warrants a reply — must be from a real human, not an automated system.`;
 
-async function batchClassify(emails) {
-  if (!emails.length) return [];
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+// Max emails per Haiku call. Confirmed live 2026-08-24: a 39-email batch at
+// max_tokens 4096 got cut off mid-array ("Expected ',' or ']' ... at position
+// 8602"), silently dropping classification for the ENTIRE batch — not just
+// the emails past the cutoff, since the whole response failed to parse as
+// JSON. Chunking keeps each call comfortably under the token budget instead
+// of just raising max_tokens once, since an inbox that's been quiet for a
+// while (larger unprocessed batch) could exceed any fixed ceiling.
+const CLASSIFY_CHUNK_SIZE = 15;
 
+async function classifyChunk(anthropic, emails) {
   const emailsPayload = emails.map(e => ({
     message_id: e.id,
     from:       e.from,
@@ -242,9 +312,24 @@ async function batchClassify(emails) {
     const parsed = JSON.parse(jsonMatch[0]);
     return parsed.classifications ?? [];
   } catch (err) {
-    logger.warn('inbox-processor: JSON parse error', { err: err.message });
+    logger.warn('inbox-processor: JSON parse error', { err: err.message, chunkSize: emails.length });
     return [];
   }
+}
+
+async function batchClassify(emails) {
+  if (!emails.length) return [];
+  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+  const results = [];
+  for (let i = 0; i < emails.length; i += CLASSIFY_CHUNK_SIZE) {
+    const chunk = emails.slice(i, i + CLASSIFY_CHUNK_SIZE);
+    // Sequential, not parallel — this runs every 15 min, not latency-sensitive,
+    // and avoids bursting concurrent Haiku calls against rate limits.
+    const chunkResults = await classifyChunk(anthropic, chunk);
+    results.push(...chunkResults);
+  }
+  return results;
 }
 
 // ── Draft reply generation ───────────────────────────────────────────────────
@@ -261,15 +346,39 @@ Rules:
 - For meeting requests: express willingness, say you'll follow up to confirm a time
 - For customer job inquiries: acknowledge and say you'll look into it
 - Keep replies to 3-5 sentences maximum
-- Plain, friendly, professional tone — not formal/stiff
 - Output ONLY the HTML email body (no subject line, no "From:", no markdown). Use <p> tags.`;
+
+// Fyxer-style tone-matching (2026-08-24): before drafting, look at how Michael
+// has actually written to THIS person before, and have Sonnet match that style
+// instead of always falling back to the same generic instruction. Best-effort —
+// a lookup failure or a first-time sender just falls through to the generic tone.
+async function getToneExamples(recipientAddress) {
+  if (!recipientAddress) return [];
+  try {
+    const past = await getSentEmailsTo({ userEmail: MICHAEL, recipientAddress, limit: 3 });
+    return past.filter(p => p.body?.trim()).map(p => ({ subject: p.subject, body: p.body }));
+  } catch (err) {
+    logger.warn('inbox-processor: tone-example lookup failed (non-fatal)', { recipientAddress, err: err.message });
+    return [];
+  }
+}
 
 async function generateDraftBody(email, classification) {
   const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+  const toneExamples = await getToneExamples(email.from);
+
+  let toneBlock = '- Plain, friendly, professional tone — not formal/stiff';
+  if (toneExamples.length) {
+    const examples = toneExamples
+      .map((ex, i) => `Example ${i + 1} (subject: "${ex.subject}"):\n${ex.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500)}`)
+      .join('\n\n');
+    toneBlock = `- Match the tone/style Michael has actually used with this specific person before — formality level, sign-off, sentence length. Real past examples of Michael writing to this person:\n\n${examples}`;
+  }
+
   const resp = await anthropic.messages.create({
     model:      SONNET,
     max_tokens: 512,
-    system:     DRAFT_SYSTEM,
+    system:     `${DRAFT_SYSTEM}\n\n${toneBlock}`,
     messages: [{
       role:    'user',
       content: `Write a reply to this email.\n\nFrom: ${email.from_name ?? email.from}\nSubject: ${email.subject}\nMessage: ${email.snippet?.slice(0, 600)}\n\nIntent: ${classification.intent}`,
@@ -291,9 +400,9 @@ async function upsertTriage(rows) {
 // ── Teams alert formatter ────────────────────────────────────────────────────
 
 function buildTeamsAlert(email, classification, draftSaved) {
-  const priorityLabel = { p1: '🔴 P1', p2: '🟡 P2', p3: '🟢 P3' }[classification.priority] ?? classification.priority;
+  const bucketLabel = { needs_reply: '🔴 Needs a Reply', fyi: '🟢 FYI', marketing: '⚪ Marketing' }[classification.bucket] ?? classification.bucket;
   const lines = [
-    `${priorityLabel} — ${classification.hot_trigger ? '⚡ HOT TRIGGER' : 'New Email'}`,
+    `${bucketLabel} — ${classification.hot_trigger ? '⚡ HOT TRIGGER' : 'New Email'}`,
     `From: ${email.from_name ? `${email.from_name} <${email.from}>` : email.from}`,
     `Subject: ${email.subject}`,
     `Category: ${classification.category.replace('_', ' ')}`,
@@ -382,6 +491,31 @@ export async function scanFollowups() {
   return { scanned: external.length, new_followups: newRows.length };
 }
 
+// ── Draft cleanup ────────────────────────────────────────────────────────────
+// Deletes drafts (auto-generated or manual — Graph doesn't distinguish) that
+// haven't been touched in olderThanDays. Uses lastModifiedDateTime, not
+// creation time, so a draft Michael is actively editing never gets swept just
+// for being old; only genuinely abandoned ones are removed. Permanent delete
+// (Graph message DELETE bypasses Deleted Items for drafts) — added 2026-08-24
+// as a companion to autonomous draft creation, which otherwise has no natural
+// cap and would let unused AI-generated drafts accumulate indefinitely.
+export async function cleanupOldDrafts({ olderThanDays = 30 } = {}) {
+  const stale = await getOldDrafts({ userEmail: MICHAEL, olderThanDays });
+  let deleted = 0;
+  const errors = [];
+  for (const draft of stale) {
+    try {
+      await deleteEmail({ userEmail: MICHAEL, email_id: draft.id });
+      deleted++;
+    } catch (err) {
+      logger.warn('inbox-processor: draft delete failed', { id: draft.id, subject: draft.subject, err: err.message });
+      errors.push(`${draft.subject ?? '(no subject)'}: ${err.message}`);
+    }
+  }
+  logger.info('inbox-processor: draft cleanup complete', { found: stale.length, deleted, errors: errors.length });
+  return { found: stale.length, deleted, errors: errors.length ? errors : undefined };
+}
+
 // ── Main: processInbox ───────────────────────────────────────────────────────
 
 export async function processInbox() {
@@ -389,13 +523,22 @@ export async function processInbox() {
   logger.info('inbox-processor: starting run');
   _folderCache = null; // reset folder cache each run
 
-  // 0. Rename any legacy folders (Admin → aaa Admin, etc.) so they sort to top
+  // 0. Rename any legacy folders (Admin → _Admin, etc.) and move any that are
+  // still top-level into Inbox, so they sort right under Inbox in the
+  // subfolder list.
   let renamedFolders = [];
+  let movedFolders = [];
   try {
     renamedFolders = await migrateLegacyFolders();
     if (renamedFolders.length) logger.info('inbox-processor: migrated folders', { renamedFolders });
   } catch (err) {
     logger.warn('inbox-processor: folder migration error (non-fatal)', { err: err.message });
+  }
+  try {
+    movedFolders = await migrateFolderLocations();
+    if (movedFolders.length) logger.info('inbox-processor: moved folders into Inbox', { movedFolders });
+  } catch (err) {
+    logger.warn('inbox-processor: folder relocation error (non-fatal)', { err: err.message });
   }
 
   // 1. Fetch unread emails from Michael's inbox (last 48h)
@@ -431,14 +574,14 @@ export async function processInbox() {
     return { processed: 0, duration_ms: Date.now() - start };
   }
 
-  // 2b. Pre-classify known notification senders as P3/admin — skip LLM for these
+  // 2b. Pre-classify known notification senders as fyi/admin — skip LLM for these
   const preClassified = [];
   const needsClassification = [];
   for (const email of toProcess) {
     if (isKnownNotificationSender(email.from)) {
       preClassified.push({
         message_id:      email.id,
-        priority:        'p3',
+        bucket:          'fyi',
         category:        'admin',
         intent:          'Automated notification — no action required.',
         meeting_request: false,
@@ -491,7 +634,7 @@ export async function processInbox() {
         from_name:    email.from_name,
         subject:      email.subject,
         received_at:  email.date,
-        priority:     'p3',
+        bucket:       'fyi',
         category:     'other',
         intent:       'unclassified',
         action_items: [],
@@ -505,7 +648,27 @@ export async function processInbox() {
     let draft_id        = null;
     let teams_alerted   = false;
 
-    // 4a. Move to folder
+    // 4a. Draft reply for needs_reply draft-needed emails — MUST run before the
+    // folder move below. Confirmed live 2026-08-24: moving a message changes
+    // its Graph id in this tenant (non-immutable IDs), so createReply against
+    // the post-move id 404s ("specified object was not found in the store")
+    // every single time. Drafting against the still-valid pre-move id first
+    // fixes this — this was a real, pre-existing 100%-failure-rate bug, not
+    // just a theoretical ordering concern.
+    if ((cls.bucket === 'needs_reply' || cls.hot_trigger) && cls.draft_needed) {
+      try {
+        const body = await generateDraftBody(email, cls);
+        if (body) {
+          const { draft_id: did } = await createReplyDraft({ userEmail: MICHAEL, email_id: email.id, body });
+          draft_id = did;
+          drafted++;
+        }
+      } catch (err) {
+        logger.warn('inbox-processor: draft generation failed', { id: email.id, err: err.message });
+      }
+    }
+
+    // 4b. Move to folder
     const targetFolder = FOLDER_MAP[cls.category];
     if (targetFolder) {
       try {
@@ -525,22 +688,8 @@ export async function processInbox() {
       }
     }
 
-    // 4b. Draft reply for P1 draft-needed emails
-    if ((cls.priority === 'p1' || cls.hot_trigger) && cls.draft_needed) {
-      try {
-        const body = await generateDraftBody(email, cls);
-        if (body) {
-          const { draft_id: did } = await createReplyDraft({ userEmail: MICHAEL, email_id: email.id, body });
-          draft_id = did;
-          drafted++;
-        }
-      } catch (err) {
-        logger.warn('inbox-processor: draft generation failed', { id: email.id, err: err.message });
-      }
-    }
-
-    // 4c. Immediate Teams alert for P1 and hot triggers
-    if (cls.priority === 'p1' || cls.hot_trigger) {
+    // 4c. Immediate Teams alert for needs_reply and hot triggers
+    if (cls.bucket === 'needs_reply' || cls.hot_trigger) {
       try {
         const msg = buildTeamsAlert(email, cls, !!draft_id);
         teamsAlerts.push(msg);
@@ -558,7 +707,7 @@ export async function processInbox() {
       from_name:       email.from_name,
       subject:         email.subject,
       received_at:     email.date,
-      priority:        cls.priority,
+      bucket:          cls.bucket,
       category:        cls.category,
       intent:          cls.intent,
       folder_moved_to,
@@ -579,7 +728,7 @@ export async function processInbox() {
     try {
       const header = teamsAlerts.length === 1
         ? ''
-        : `📬 ${teamsAlerts.length} priority emails — action needed\n${'─'.repeat(40)}\n\n`;
+        : `📬 ${teamsAlerts.length} emails need a reply\n${'─'.repeat(40)}\n\n`;
       await sendProactiveMessage(header + teamsAlerts.join('\n\n' + '─'.repeat(40) + '\n\n'));
     } catch (err) {
       logger.warn('inbox-processor: Teams send failed', { err: err.message });
@@ -587,16 +736,17 @@ export async function processInbox() {
   }
 
   const summary = {
-    processed:       toProcess.length,
+    processed:          toProcess.length,
     moved,
     drafted,
     alerted,
-    folders_renamed: renamedFolders.length,
-    p1_count:        triageRows.filter(r => r.priority === 'p1').length,
-    p2_count:        triageRows.filter(r => r.priority === 'p2').length,
-    p3_count:        triageRows.filter(r => r.priority === 'p3').length,
-    move_errors:     moveErrors.length ? moveErrors : undefined,
-    duration_ms:     Date.now() - start,
+    folders_renamed:    renamedFolders.length,
+    folders_moved:      movedFolders.length,
+    needs_reply_count:  triageRows.filter(r => r.bucket === 'needs_reply').length,
+    fyi_count:          triageRows.filter(r => r.bucket === 'fyi').length,
+    marketing_count:    triageRows.filter(r => r.bucket === 'marketing').length,
+    move_errors:        moveErrors.length ? moveErrors : undefined,
+    duration_ms:        Date.now() - start,
   };
 
   logger.info('inbox-processor: run complete', summary);

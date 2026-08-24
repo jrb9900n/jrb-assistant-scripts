@@ -1146,23 +1146,99 @@ const SCHEDULED_TASKS = [
       logger.info('chase_session_reminder: sent');
     },
   },
-  // DISABLED — inbox processor, followup scanner, morning briefing
-  // Re-enable when inbox processing behavior is ready.
-  // {
-  //   schedule: '*/15 * * * *',
-  //   name: 'michael_inbox_processor',
-  //   ...
-  // },
-  // {
-  //   schedule: '0 7 * * *',
-  //   name: 'followup_scanner',
-  //   ...
-  // },
-  // {
-  //   schedule: '30 7 * * *',
-  //   name: 'morning_briefing',
-  //   ...
-  // },
+  {
+    // Every 15 minutes — autonomous triage of michael@jrboehlke.com inbox.
+    // Re-enabled 2026-08-24 (was disabled 2026-06-05 pending a behavior redesign —
+    // see tools/impl/inbox-processor.js's header comment): rebuilt on Fyxer.ai's
+    // 3-bucket model (needs_reply/fyi/marketing) instead of the old P1/P2/P3
+    // scheme, plus tone-matched draft replies. acquireRunLock added here — the
+    // original disabled version never had one, and a run can take long enough
+    // (Haiku classify + Sonnet drafts + folder moves) to risk overlapping the
+    // next 15-min tick.
+    schedule: '*/15 * * * *',
+    name: 'michael_inbox_processor',
+    run: async () => {
+      if (!acquireRunLock('michael_inbox_processor', 14 * 60_000)) {
+        logger.debug('michael_inbox_processor: skipped (another instance running)');
+        return;
+      }
+      try {
+        const { processInbox } = await import('../tools/impl/inbox-processor.js');
+        const result = await processInbox();
+        logger.info('michael_inbox_processor: complete', result);
+      } catch (err) {
+        logger.error('michael_inbox_processor: FAILED', { err: err.message });
+        try {
+          await sendProactiveMessage(`Inbox processor FAILED. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('michael_inbox_processor: Teams alert also failed', { err: notifyErr.message });
+        }
+      } finally {
+        releaseRunLock('michael_inbox_processor');
+      }
+    },
+  },
+  {
+    // 7:00 AM daily — scan Michael's sent folder for unanswered emails.
+    // Re-enabled 2026-08-24 (see michael_inbox_processor above) — scanFollowups()
+    // itself is unchanged, Michael explicitly wanted this feature kept as-is.
+    schedule: '0 7 * * *',
+    name: 'followup_scanner',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { scanFollowups } = await import('../tools/impl/inbox-processor.js');
+        const result = await scanFollowups();
+        logger.info('followup_scanner: complete', result);
+      } catch (err) {
+        logger.error('followup_scanner: FAILED', { err: err.message });
+        try {
+          await sendProactiveMessage(`Follow-up scanner FAILED. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('followup_scanner: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
+    // 7:30 AM daily — morning briefing Teams message + email to Michael.
+    // Re-enabled 2026-08-24 (see michael_inbox_processor above) — briefing content
+    // updated to the new needs_reply/fyi/marketing bucket stats.
+    schedule: '30 7 * * *',
+    name: 'morning_briefing',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { generateMorningBriefing } = await import('../tools/impl/morning-briefing.js');
+        const { sendEmail }               = await import('../tools/impl/m365.js');
+
+        const briefing = await generateMorningBriefing();
+
+        // Teams message first — fast, Michael may be on his phone
+        try {
+          await sendProactiveMessage(briefing.teamsMessage);
+          logger.info('morning_briefing: Teams message sent');
+        } catch (err) {
+          logger.warn('morning_briefing: Teams send failed', { err: err.message });
+        }
+
+        // Full HTML email
+        await sendEmail({
+          to:      ['michael@jrboehlke.com'],
+          subject: briefing.emailSubject,
+          body:    briefing.emailBody,
+        });
+        logger.info('morning_briefing: email sent', { subject: briefing.emailSubject });
+      } catch (err) {
+        logger.error('morning_briefing: FAILED', { err: err.message });
+        try {
+          await sendProactiveMessage(`Morning briefing FAILED to generate/send. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('morning_briefing: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
   {
     // 1:30 AM nightly — refresh sa_waiting_list from SA and prune completed/invoiced jobs
     schedule: '30 1 * * *',

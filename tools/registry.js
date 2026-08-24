@@ -154,17 +154,17 @@ const EMAIL_TOOLS = [
   },
   {
     name: 'run_inbox_processor',
-    description: 'Run the autonomous inbox processor now on michael@jrboehlke.com. Fetches unread emails, classifies priority, moves to folders, creates draft replies for P1 emails, and sends Teams alerts for hot items. Use when Michael asks to "process inbox", "check my email", "triage inbox", or "run the inbox processor".',
+    description: 'Run the autonomous inbox processor now on michael@jrboehlke.com. Fetches unread emails, classifies each as needs_reply/fyi/marketing, moves to folders, creates draft replies for needs_reply emails, and sends Teams alerts for hot items. Use when Michael asks to "process inbox", "check my email", "triage inbox", or "run the inbox processor".',
     input_schema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'get_email_triage',
-    description: 'Query the email_triage table — shows already-processed emails from michael@jrboehlke.com with priority, category, intent, and draft status. Use to answer "what did I get today", "any P1 emails", "what needs a response".',
+    description: 'Query the email_triage table — shows already-processed emails from michael@jrboehlke.com with bucket (needs_reply/fyi/marketing), category, intent, and draft status. Use to answer "what did I get today", "anything I need to reply to", "what needs a response".',
     input_schema: {
       type: 'object',
       properties: {
         hours: { type: 'number', description: 'How many hours back to look (default: 24)', default: 24 },
-        priority: { type: 'string', description: 'Filter to p1, p2, or p3' },
+        bucket: { type: 'string', description: 'Filter to needs_reply, fyi, or marketing' },
       },
       required: [],
     },
