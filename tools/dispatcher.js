@@ -21,6 +21,7 @@ import * as vercel      from './impl/vercel.js';
 import * as scheduling  from './impl/scheduling.js';
 import * as sa          from './impl/serviceautopilot.js';
 import { scheduleEstimateVisit } from './impl/scheduling-visits.js';
+import { checkMichaelAvailability, bookTimeWithMichael } from './impl/scheduling-booking.js';
 import * as fleetsharp  from './impl/fleetsharp.js';
 import * as carddav     from './impl/carddav.js';
 import * as fuzzyMatch  from './impl/fuzzy-match.js';
@@ -176,6 +177,29 @@ const HANDLERS = {
   sa_get_audit_trail:      (i) => sa.getAuditTrail(i),
   sa_get_invoice_status:   (i) => sa.getInvoiceStatuses(i),
   schedule_estimate_visit: (i) => scheduleEstimateVisit(i),
+
+  // Read-only, safe for anyone -- only ever surfaces free/busy windows, never
+  // subjects/tiers/reasons.
+  check_michael_availability: (i) => checkMichaelAvailability(i),
+  // Same trusted-context pattern as request_employee_approval above:
+  // isEmployeeRequester/requesterIdentity come from context.sender (resolved
+  // server-side by teams/identity.js), never from LLM-produced JSON, so an
+  // employee requester can't type their way into a different name/email or
+  // into skipping the "never reveal the real reason" decline behavior.
+  // context is null for non-Teams callers (CLI/MCP) -- those fall back to
+  // whatever requesterName/requesterEmail the caller/LLM supplied directly,
+  // same as every other tool that doesn't get a context.
+  book_time_with_michael: (i, context) => {
+    const sender = context?.sender;
+    const isEmployee = !!sender && !sender.isMichael;
+    return bookTimeWithMichael({
+      ...i,
+      requesterName:  isEmployee ? (sender.name ?? i.requesterName) : i.requesterName,
+      requesterEmail: isEmployee ? (sender.email ?? i.requesterEmail) : i.requesterEmail,
+      isEmployeeRequester: isEmployee,
+      requesterIdentity: isEmployee ? (sender.email ?? sender.aadId ?? null) : null,
+    });
+  },
 
   // FleetSharp
   fleetsharp_get_vehicle_list:    () => fleetsharp.getVehicleList(),

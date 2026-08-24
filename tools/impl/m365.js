@@ -294,7 +294,7 @@ export async function getEmailAttachmentBytes({ email_id, attachment_id, userEma
   return Buffer.from(data.contentBytes, 'base64');
 }
 
-export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate, categories, location } = {}) {
+export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate, categories, location, attendees } = {}) {
   const user = userEmail ?? MICHAEL_CALENDAR;
   const event = {
     subject,
@@ -313,6 +313,15 @@ export async function createCalendarEvent({ subject, start, end, body = '', time
   // an empty-string location has no distinct meaning from "not provided," so
   // there's no equivalent case to preserve.
   if (location) event.location = { displayName: location };
+  // Added for employee-booking invites (scheduling-booking.js) -- every
+  // existing call site omits this entirely, so it's a pure opt-in with zero
+  // behavior change for estimate-visit blocks or the block-schedule scaffold.
+  if (attendees?.length) {
+    event.attendees = attendees.map(a => ({
+      emailAddress: { address: a.email, name: a.name || a.email },
+      type: 'required',
+    }));
+  }
   if (recurrenceDaysOfWeek?.length) {
     // tools/dispatcher.js does no schema validation before dispatch --
     // registry.js's `required: ['subject','start','end']` is advisory to the
@@ -607,6 +616,46 @@ export async function getCalendarViewWithCategories({ userEmail, startDateTime, 
     categories:     e.categories ?? [],
     seriesMasterId: e.seriesMasterId ?? null,
     type:           e.type ?? null, // 'singleInstance' | 'occurrence' | 'exception' | 'seriesMaster'
+  }));
+}
+
+function toLocalNaiveFromUtc(dateTimeStr) {
+  if (!dateTimeStr) return dateTimeStr;
+  const d = new Date(dateTimeStr.endsWith('Z') ? dateTimeStr : `${dateTimeStr}Z`);
+  const pad2 = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+// getSchedule's response can include real subjects/locations -- this app
+// holds full Calendars.ReadWrite on this mailbox, not a normal cross-user
+// free/busy grant, so nothing stops Graph from returning event detail here.
+// Stripping down to status/start/end below is the actual security boundary
+// an employee-facing availability check relies on, not whatever detail
+// level Graph happens to default to.
+export async function getFreeBusy({ userEmail, startDateTime, endDateTime, intervalMinutes = 30, timezone = 'America/Chicago' } = {}) {
+  const user = userEmail ?? USER();
+  const body = {
+    schedules: [user],
+    startTime: { dateTime: startDateTime, timeZone: timezone },
+    endTime: { dateTime: endDateTime, timeZone: timezone },
+    availabilityViewInterval: intervalMinutes,
+  };
+  const data = await graph('POST', `/users/${user}/calendar/getSchedule`, body);
+  const items = data?.value?.[0]?.scheduleItems ?? [];
+  // Confirmed live 2026-08-24: unlike calendarView (which honors the
+  // Prefer: outlook.timezone header), getSchedule's scheduleItems come back
+  // in UTC regardless of the `timeZone` given above -- a requested
+  // 08:00-17:00 America/Chicago window came back with busy items spanning
+  // 13:00-22:00 (a straight 5-hour UTC offset during CDT). Every naive
+  // "YYYY-MM-DDTHH:MM:SS" timestamp elsewhere in this codebase (see
+  // scheduling-visits.js's own comment on this) is local-wall-clock on the
+  // assumption the Node process itself runs in America/Chicago -- so treat
+  // Graph's string as UTC explicitly, then re-emit through the same
+  // local-getter convention rather than leaving it mislabeled as local.
+  return items.map(i => ({
+    status: i.status, // 'free' | 'tentative' | 'busy' | 'oof' | 'workingElsewhere'
+    start:  toLocalNaiveFromUtc(i.start?.dateTime),
+    end:    toLocalNaiveFromUtc(i.end?.dateTime),
   }));
 }
 

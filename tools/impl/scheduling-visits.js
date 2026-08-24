@@ -27,7 +27,15 @@ import {
 } from './m365.js';
 import { BLOCK_CATEGORY } from './calendar-watch.js';
 import { getDriveTimeMinutes } from './google-maps.js';
+import { countRecentDisplacements, logBlockDisplacement } from './block-displacement-log.js';
 import { logger } from '../../core/logger.js';
+
+// CONFIRMED WITH MICHAEL 2026-08-24: an [OCCASIONAL] block may be auto-
+// displaced at most this many times in this rolling window before falling
+// back to the same "never auto-touched, needs manual review" behavior as
+// PROTECTED. Not a guess -- these two numbers were explicitly chosen by him.
+export const OCCASIONAL_CAP_MAX = 2;
+export const OCCASIONAL_CAP_WINDOW_DAYS = 30;
 
 const ESTIMATING_BLOCK_SUBJECT = 'Estimating / Proposal Production [PROTECTED DEEP WORK]';
 
@@ -93,6 +101,14 @@ function overlaps(aStart, aEnd, bStart, bEnd) {
 export function classifyBlockTier(subject = '') {
   if (subject.includes('PROTECTED DEEP WORK')) return 'DEEP_WORK';
   if (subject.includes('[PROTECTED]') || subject.includes('[FIXED WEEKLY BLOCK]')) return 'PROTECTED';
+  // Added 2026-08-24 — a middle tier between STANDARD (freely displaceable)
+  // and PROTECTED/DEEP_WORK (never touched): can be displaced, but only
+  // OCCASIONAL_CAP_MAX times per OCCASIONAL_CAP_WINDOW_DAYS (see the cap
+  // check in checkAndResolveDisplacement below). Purely additive — no
+  // existing block's classification changes, since none currently contain
+  // this marker; retagging specific real blocks is a manual follow-up for
+  // Michael, not part of this change.
+  if (subject.includes('[OCCASIONAL]')) return 'OCCASIONAL';
   return 'STANDARD';
 }
 
@@ -119,7 +135,64 @@ function appendNoteToBody({ content, contentType }, note) {
 
 // ── Step 3: displacement check against the block schedule ──────────────────
 
-export async function checkAndResolveDisplacement({ mailbox, date, visitStart, visitEnd }) {
+// Shared delete/shrink-start/shrink-end/middle-conflict resolution -- used by
+// both STANDARD (no cap) and cap-cleared OCCASIONAL blocks. Extracted 2026-08-24
+// (was inlined, STANDARD-only) so the OCCASIONAL cap-check branch below can
+// reuse the exact same mechanics rather than duplicating them.
+async function resolveDisplaceableBlock({ block, tier, visitStart, visitEnd, mailbox }) {
+  const vs = toMs(visitStart), ve = toMs(visitEnd), bs = toMs(block.start), be = toMs(block.end);
+
+  if (vs <= bs && ve >= be) {
+    // Visit fully contains the occurrence -- skip/delete just this one.
+    await deleteCalendarEvent({ userEmail: mailbox, event_id: block.id });
+    return { resolved: true, resolvedAction: {
+      eventId: block.id, subject: block.subject, tier, action: 'deleted_occurrence',
+      before: { start: block.start, end: block.end },
+    } };
+  }
+  if (vs <= bs && ve < be) {
+    // Visit overlaps only the block's start edge -- shrink start forward to
+    // the visit's end, leaving the remainder of the block intact.
+    await updateCalendarEvent({ userEmail: mailbox, event_id: block.id, start: visitEnd });
+    return { resolved: true, resolvedAction: {
+      eventId: block.id, subject: block.subject, tier, action: 'shrunk_start',
+      before: { start: block.start, end: block.end },
+      after:  { start: visitEnd, end: block.end },
+    } };
+  }
+  if (vs > bs && ve >= be) {
+    // Visit overlaps only the block's end edge -- shrink end backward to the
+    // visit's start.
+    await updateCalendarEvent({ userEmail: mailbox, event_id: block.id, end: visitStart });
+    return { resolved: true, resolvedAction: {
+      eventId: block.id, subject: block.subject, tier, action: 'shrunk_end',
+      before: { start: block.start, end: block.end },
+      after:  { start: block.start, end: visitStart },
+    } };
+  }
+  // Visit falls strictly inside the middle of the block -- resolving this
+  // automatically would require splitting the occurrence into two separate
+  // pieces (a pre-visit remainder and a post-visit remainder). ACCEPTED V1
+  // SCOPE LIMIT: no automatic split. Flag for manual review instead, same as
+  // a PROTECTED/DEEP_WORK conflict.
+  return { resolved: false, conflict: {
+    eventId: block.id, subject: block.subject, tier,
+    start: block.start, end: block.end,
+    reason: `visit falls inside the middle of this ${tier} block -- would require splitting it into two pieces, not supported in v1`,
+  } };
+}
+
+/**
+ * @param {object} opts
+ * @param {string} [opts.callerTag] - Which feature triggered this displacement
+ *   (e.g. 'schedule_estimate_visit', 'book_time_with_michael') -- attribution
+ *   only, recorded in block_displacement_log for OCCASIONAL-tier resolutions.
+ *   Optional and defaults to a safe value so scheduleEstimateVisit's existing
+ *   call site needs zero changes.
+ * @param {string|null} [opts.requesterIdentity] - Employee email/name when a
+ *   non-Michael booking triggered this, null for Michael's own flows.
+ */
+export async function checkAndResolveDisplacement({ mailbox, date, visitStart, visitEnd, callerTag = 'unspecified', requesterIdentity = null }) {
   // Padded by a day on each side -- confirmed LIVE 2026-08-20 that Graph's
   // calendarView startDateTime/endDateTime query params are NOT reliably
   // reinterpreted into the Prefer: outlook.timezone zone the way the
@@ -133,7 +206,18 @@ export async function checkAndResolveDisplacement({ mailbox, date, visitStart, v
   const dayEnd = `${addDaysToDateStr(date, 1)}T23:59:59`;
   const dayEvents = await getCalendarViewWithCategories({ userEmail: mailbox, startDateTime: dayStart, endDateTime: dayEnd });
 
-  const overlapping = dayEvents.filter(e => e.categories.includes(BLOCK_CATEGORY) && overlaps(visitStart, visitEnd, e.start, e.end));
+  // De-duped by id -- confirmed live 2026-08-24 that calendarView can return
+  // the same occurrence twice in one query (observed right after modifying a
+  // recurring instance, likely an expansion-cache/replication-lag artifact).
+  // Processing the same occurrence twice in one pass would double-log an
+  // OCCASIONAL displacement against its cap, and a second delete/shrink call
+  // against an occurrence the first call already deleted would throw instead
+  // of resolving cleanly.
+  const overlapping = [...new Map(
+    dayEvents
+      .filter(e => e.categories.includes(BLOCK_CATEGORY) && overlaps(visitStart, visitEnd, e.start, e.end))
+      .map(e => [e.id, e])
+  ).values()];
 
   if (overlapping.length === 0) {
     return { status: 'no_conflicts', resolvedActions: [], conflicts: [] };
@@ -157,48 +241,35 @@ export async function checkAndResolveDisplacement({ mailbox, date, visitStart, v
       continue;
     }
 
-    // STANDARD tier only, and only THIS occurrence (block.id here is the
-    // calendarView-expanded occurrence id, distinct from the series
-    // master's id -- PATCHing/DELETEing it creates a Graph exception for
-    // just this date, confirmed live working in Phase 1).
-    const vs = toMs(visitStart), ve = toMs(visitEnd), bs = toMs(block.start), be = toMs(block.end);
+    if (tier === 'OCCASIONAL') {
+      const usedCount = await countRecentDisplacements({ seriesMasterId: block.seriesMasterId, windowDays: OCCASIONAL_CAP_WINDOW_DAYS });
+      if (usedCount >= OCCASIONAL_CAP_MAX) {
+        conflicts.push({
+          eventId: block.id, subject: block.subject, tier,
+          start: block.start, end: block.end,
+          reason: `OCCASIONAL block -- already displaced ${usedCount}/${OCCASIONAL_CAP_MAX} times in the last ${OCCASIONAL_CAP_WINDOW_DAYS} days, needs manual review`,
+        });
+        continue;
+      }
+    }
 
-    if (vs <= bs && ve >= be) {
-      // Visit fully contains the occurrence -- skip/delete just this one.
-      await deleteCalendarEvent({ userEmail: mailbox, event_id: block.id });
-      resolvedActions.push({
-        eventId: block.id, subject: block.subject, tier, action: 'deleted_occurrence',
-        before: { start: block.start, end: block.end },
-      });
-    } else if (vs <= bs && ve < be) {
-      // Visit overlaps only the block's start edge -- shrink start forward
-      // to the visit's end, leaving the remainder of the block intact.
-      await updateCalendarEvent({ userEmail: mailbox, event_id: block.id, start: visitEnd });
-      resolvedActions.push({
-        eventId: block.id, subject: block.subject, tier, action: 'shrunk_start',
-        before: { start: block.start, end: block.end },
-        after:  { start: visitEnd, end: block.end },
-      });
-    } else if (vs > bs && ve >= be) {
-      // Visit overlaps only the block's end edge -- shrink end backward to
-      // the visit's start.
-      await updateCalendarEvent({ userEmail: mailbox, event_id: block.id, end: visitStart });
-      resolvedActions.push({
-        eventId: block.id, subject: block.subject, tier, action: 'shrunk_end',
-        before: { start: block.start, end: block.end },
-        after:  { start: block.start, end: visitStart },
-      });
+    // STANDARD, and cap-cleared OCCASIONAL, share the same resolution
+    // mechanics -- only THIS occurrence is ever touched (block.id here is the
+    // calendarView-expanded occurrence id, distinct from the series master's
+    // id -- PATCHing/DELETEing it creates a Graph exception for just this
+    // date, confirmed live working in Phase 1).
+    const outcome = await resolveDisplaceableBlock({ block, tier, visitStart, visitEnd, mailbox });
+    if (outcome.resolved) {
+      resolvedActions.push(outcome.resolvedAction);
+      if (tier === 'OCCASIONAL') {
+        await logBlockDisplacement({
+          mailbox, seriesMasterId: block.seriesMasterId, occurrenceId: block.id,
+          subject: block.subject, occurrenceDate: block.start.slice(0, 10),
+          action: outcome.resolvedAction.action, requestedBy: callerTag, requesterIdentity,
+        });
+      }
     } else {
-      // Visit falls strictly inside the middle of the block -- resolving
-      // this automatically would require splitting the occurrence into two
-      // separate pieces (a pre-visit remainder and a post-visit remainder).
-      // ACCEPTED V1 SCOPE LIMIT: no automatic split. Flag for manual review
-      // instead, same as a PROTECTED/DEEP_WORK conflict.
-      conflicts.push({
-        eventId: block.id, subject: block.subject, tier,
-        start: block.start, end: block.end,
-        reason: 'visit falls inside the middle of this STANDARD block -- would require splitting it into two pieces, not supported in v1',
-      });
+      conflicts.push(outcome.conflict);
     }
   }
 
