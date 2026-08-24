@@ -49,6 +49,13 @@ const QB_COMPANIES = {
     realmEnvVar: 'QB_REALM_ID_TRANSPORT',
     metaFile: join(DATA_DIR, 'qb-token-meta-transport.json'),
   },
+  propco: {
+    label: 'JRB Granville Propco',
+    credTarget: 'JRBAgent:QB_REFRESH_TOKEN_PROPCO',
+    refreshEnvVar: 'QB_REFRESH_TOKEN_PROPCO',
+    realmEnvVar: 'QB_REALM_ID_PROPCO',
+    metaFile: join(DATA_DIR, 'qb-token-meta-propco.json'),
+  },
 };
 
 export function listQBCompanies() {
@@ -60,6 +67,54 @@ export function listQBCompanies() {
 // (e.g. a report covering "every configured company" generically).
 export function getQBCompanyLabel(company) {
   return companyConfig(company).label;
+}
+
+/**
+ * Runs `fetchFn(company)` for every configured QB company in parallel and
+ * normalizes the three outcomes a multi-entity report needs to distinguish:
+ *   - not yet OAuth-authorized: `{ connected: false }` — silently omit, this
+ *     is expected until Michael finishes /qb-reauth for that company
+ *   - connected but the live call failed: `{ connected: true, error }` —
+ *     must be surfaced, never silently dropped from a total (a company that
+ *     fails to fetch is not the same as a company with $0)
+ *   - success: `{ connected: true, ...whatever fetchFn returned }`
+ * Used by cash-forecast-report.js and weekly-scorecard-report.js.
+ * ap-report.js/bank-monthly-report.js predate this helper and use their own
+ * per-company fetch pattern (each entity independently try/caught) — not
+ * retrofitted here to avoid touching already-live, already-tested code for a
+ * cosmetic consistency pass.
+ */
+export async function gatherAcrossCompanies(fetchFn) {
+  return Promise.all(listQBCompanies().map(async company => {
+    const label = getQBCompanyLabel(company);
+    if (!getQBRealmId(company)) return { company, label, connected: false };
+    try {
+      const data = await fetchFn(company);
+      return { company, label, connected: true, ...data };
+    } catch (err) {
+      // Guaranteed non-empty so every consumer's plain truthiness check
+      // (`if (e.error)`) can't be fooled by an Error with an empty/missing
+      // message (e.g. `new Error()`, or a non-Error rejection value) into
+      // treating a real failure as a success with no data.
+      return { company, label, connected: true, error: err.message || 'Unknown error' };
+    }
+  }));
+}
+
+/**
+ * Sums `pick(result)` across every company that both succeeded (`connected`
+ * and no `error`) AND has that field present (`pick` returns a finite
+ * number) — derives a combined total plus an "is any real data available at
+ * all" flag from `gatherAcrossCompanies`' results. `available` is false when
+ * NO company contributed a number, whether that's because none are
+ * connected yet or because every connected one's query failed — callers
+ * that need to tell those two cases apart for wording should check
+ * `results.some(r => r.connected)` themselves; this helper only answers "do
+ * I have a real number to show."
+ */
+export function summarizeAcrossCompanies(results, pick) {
+  const ok = results.filter(r => r.connected && !r.error && Number.isFinite(pick(r)));
+  return { ok, combinedTotal: ok.reduce((s, r) => s + pick(r), 0), available: ok.length > 0 };
 }
 
 function companyConfig(company) {

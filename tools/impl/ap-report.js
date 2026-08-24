@@ -15,16 +15,24 @@
 // see memory.js) is the only caching layer, so no separate "stale data"
 // banner is needed here.
 //
-// Multi-entity (added 2026-08-21): covers both QBO companies — J.R. Boehlke,
-// LLC ('jrb') and JRB Transport LLC ('transport'), reusing getAPAgingReport's
-// existing `company` param from the multi-company QuickBooks build (see
-// CLAUDE.md's "Multi-Company QuickBooks Support" section). Every bill is
-// tagged with its entity so Michael knows which company's checking account to
-// pay from. Each company's fetch is independently try/caught (not a bare
-// Promise.all) so a QBO hiccup on one company still lets the other's real,
-// successfully-fetched data reach Michael instead of blanking the whole email.
+// Multi-entity (added 2026-08-21, Propco added same day): covers every QBO
+// company in the static ENTITIES list below — J.R. Boehlke, LLC ('jrb'), JRB
+// Transport LLC ('transport'), and JRB Granville Propco ('propco') —
+// reusing getAPAgingReport's existing `company` param from the multi-company
+// QuickBooks build (see CLAUDE.md's "Multi-Company QuickBooks Support"
+// section). Every bill is tagged with its entity so Michael knows which
+// company's checking account to pay from. Each company's fetch is
+// independently try/caught (not a bare Promise.all) so a QBO hiccup on one
+// company still lets the others' real, successfully-fetched data reach
+// Michael instead of blanking the whole email. A company with no realm ID
+// yet (not yet OAuth-authorized — Propco as of this writing) is silently
+// omitted rather than shown as a failure; see fetchEntityAging's
+// notConnected check. Note: ENTITIES here is a static, hand-maintained list —
+// unlike bank-monthly-report.js's AP_ENTITIES, which derives dynamically
+// from qb-token.js's listQBCompanies() — so a future 5th company needs a
+// manual line added here too, not just a QB_COMPANIES registry entry.
 //
-// Intercompany note: investigated live on 2026-08-21 whether either entity's
+// Intercompany note: investigated live on 2026-08-21 whether JRB/Transport's
 // open bills need intercompany elimination (the classic "one entity's payable
 // is the other's mirror-image receivable, so don't double-count it" problem).
 // Confirmed directly against both companies' QBO data that the answer today
@@ -38,15 +46,18 @@
 // below is a defensive guard in case that ever changes (e.g. someone starts
 // entering an intercompany bill against that vendor relationship instead of a
 // journal entry) — it's a no-op today, confirmed live, not a workaround for a
-// real problem. Per Michael's decision 2026-08-21, this report intentionally
-// does NOT surface the Due-to/from intercompany balances themselves (a
-// separate, larger discrepancy was found there — ~$700 mismatch between the
-// two books' "Transportation" due-to/from accounts — flagged to Michael
-// directly in chat, not built into this report).
+// real problem. Propco's intercompany relationship (if any) has NOT been
+// investigated — it has no entry in EXCLUDED_INTERCOMPANY_VENDORS yet. Per
+// Michael's decision 2026-08-21, this report intentionally does NOT surface
+// the Due-to/from intercompany balances themselves (a separate, larger
+// discrepancy was found there — ~$700 mismatch between JRB/Transport's
+// "Transportation" due-to/from accounts — flagged to Michael directly in
+// chat, not built into this report).
 
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
 import { getAPAgingReport } from './quickbooks.js';
+import { getQBRealmId } from './qb-token.js';
 import { f$, fD, ageBadge, sectionHeader, alertBox } from './ar-report-helpers.js';
 
 const DUE_SOON_DAYS = 7;
@@ -66,6 +77,7 @@ const DISCREPANCY_TOLERANCE = 0.01;
 const ENTITIES = [
   { company: 'jrb', label: 'J.R. Boehlke' },
   { company: 'transport', label: 'JRB Transport' },
+  { company: 'propco', label: 'JRB Granville Propco' },
 ];
 
 // Defensive only — see file header note. Vendor display names, per entity,
@@ -107,6 +119,13 @@ function allBillsFrom(apAging) {
 // Never throws — a QBO failure for one entity shouldn't blank the whole
 // report when the other entity's data fetched fine.
 async function fetchEntityAging({ company, label }) {
+  // Not yet OAuth-authorized (e.g. Propco added to ENTITIES before Michael
+  // completes /qb-reauth for it) — skip quietly rather than surfacing a
+  // "data unavailable" warning every run for a company that was never
+  // connected in the first place. mergeEntityAgings() below only shows the
+  // failedLabels banner for a REAL fetch failure, not this case.
+  if (!getQBRealmId(company)) return { ok: false, company, label, notConnected: true };
+
   try {
     const raw = await getAPAgingReport(company);
     const excluded = EXCLUDED_INTERCOMPANY_VENDORS[company] ?? new Set();
@@ -137,7 +156,10 @@ async function fetchEntityAging({ company, label }) {
 // file's builders (written against a single-entity apAging) work unchanged.
 function mergeEntityAgings(results) {
   const ok = results.filter(r => r.ok);
-  const failed = results.filter(r => !r.ok);
+  // notConnected entities are omitted from the failure banner entirely (see
+  // fetchEntityAging) — only a real fetch failure on an already-authorized
+  // entity is worth interrupting Michael about every run.
+  const failed = results.filter(r => !r.ok && !r.notConnected);
   const buckets = { current: [], d30: [], d60: [], d90: [], d120plus: [] };
   let total = 0;
   for (const r of ok) {
@@ -264,7 +286,7 @@ function buildEmail({ apAging, dueSoon, vendorPriority, duplicateFlags, discrepa
 
 <!-- HEADER -->
 <tr><td style="background-color:#1a1a2e;padding:24px 32px;">
-  <p style="margin:0;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:0.5px;">J.R. Boehlke, LLC &amp; JRB Transport LLC</p>
+  <p style="margin:0;color:#ffffff;font-size:18px;font-weight:bold;letter-spacing:0.5px;">JRB Group</p>
   <p style="margin:4px 0 0;color:#aaaacc;font-size:13px;">Accounts Payable Report &nbsp;|&nbsp; ${fD(today)}</p>
 </td></tr>
 
@@ -400,6 +422,22 @@ export async function generateAndSendAPReport() {
 
   const entityResults = await Promise.all(ENTITIES.map(fetchEntityAging));
   const { apAging, includedLabels, failedLabels, perEntityTotals } = mergeEntityAgings(entityResults);
+
+  // Total outage (nothing real to report at all) is a hard failure, not a
+  // degraded-but-successful send — a bold "$0.00 Total Open AP" headline
+  // during a total data outage would read as "nothing owed" instead of
+  // "couldn't fetch." Throwing lets scheduler/cron.js's existing try/catch
+  // fire the Teams alert, same protection bank-monthly-report.js applies for
+  // its own equivalent total-outage case.
+  if (includedLabels.length === 0) {
+    // failedLabels (real fetch failures), NOT entityResults.map(r => r.label)
+    // (every entity, including ones simply never OAuth-authorized) — using
+    // the latter would name a notConnected company (e.g. Propco today) as
+    // having "failed to fetch" alongside genuinely broken ones, misdirecting
+    // whoever triages the resulting Teams alert.
+    const detail = failedLabels.length ? `every AP entity failed to fetch (${failedLabels.join(', ')})` : 'no AP entity is connected yet';
+    throw new Error(`ap_report: total outage — ${detail}`);
+  }
 
   // Note: getAPAgingReport() also returns `flagged` (60d+/$500+ bills, same
   // convention as getARAgingReport()'s AR call-queue source), but it's
