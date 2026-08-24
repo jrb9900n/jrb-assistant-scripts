@@ -52,6 +52,21 @@ export async function graph(method, path, data, extraHeaders) {
 
 const USER = () => process.env.M365_USER_EMAIL;
 
+// Calendar tools default to Michael's own calendar, not the assistant's --
+// unlike email/SharePoint (genuinely the assistant's own mailbox/files),
+// every real business use of these calendar functions in this codebase is
+// about Michael's calendar (every hardcoded call site already passes
+// userEmail explicitly; nothing relies on the assistant@ default). The
+// default only matters when an LLM tool call omits userEmail, and confirmed
+// live 2026-08-24 that this is a real failure mode: asked to check for
+// calendar conflicts, the model called list_calendar_events without
+// userEmail, silently read the (empty) assistant calendar, and confidently
+// reported "your calendar is completely clear" -- while create_calendar_event
+// calls in the same run DID pass Michael's address, so the new events landed
+// correctly even though the conflict check that should have caught overlaps
+// never actually looked at his calendar at all.
+const MICHAEL_CALENDAR = 'michael@jrboehlke.com';
+
 // ── Email ─────────────────────────────────────────────────────
 
 export async function listEmails({ folder = 'Inbox', limit = 20, unread_only = false, userEmail } = {}) {
@@ -240,7 +255,7 @@ export async function getEmailAttachmentBytes({ email_id, attachment_id, userEma
 }
 
 export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate, categories, location } = {}) {
-  const user = userEmail ?? USER();
+  const user = userEmail ?? MICHAEL_CALENDAR;
   const event = {
     subject,
     body: { contentType: 'text', content: body },
@@ -385,7 +400,7 @@ export async function getEmailCatalog({ mailbox, category, limit = 50, offset = 
 // ── Calendar read/update ──────────────────────────────────────
 
 export async function listCalendarEvents({ userEmail, startDateTime, endDateTime, limit = 20, query } = {}) {
-  const user = userEmail ?? USER();
+  const user = userEmail ?? MICHAEL_CALENDAR;
   const start = startDateTime ?? new Date().toISOString();
   const end   = endDateTime   ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
   const search = query ? `&$search="${encodeURIComponent(query)}"` : '';
@@ -408,7 +423,7 @@ export async function listCalendarEvents({ userEmail, startDateTime, endDateTime
 }
 
 export async function updateCalendarEvent({ userEmail, event_id, subject, start, end, body, bodyContentType = 'text', timezone = 'America/Chicago', categories } = {}) {
-  const user = userEmail ?? USER();
+  const user = userEmail ?? MICHAEL_CALENDAR;
   const patch = {};
   // `!== undefined` for subject/body, matching the categories fix below --
   // an explicit '' must clear the field, not silently no-op. start/end stay
@@ -433,7 +448,7 @@ export async function updateCalendarEvent({ userEmail, event_id, subject, start,
 }
 
 export async function deleteCalendarEvent({ userEmail, event_id } = {}) {
-  const user = userEmail ?? USER();
+  const user = userEmail ?? MICHAEL_CALENDAR;
   await graph('DELETE', `/users/${user}/events/${event_id}`);
   return { deleted: true, event_id };
 }

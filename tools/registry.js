@@ -195,7 +195,7 @@ const EMAIL_TOOLS = [
   },
   {
     name: 'create_calendar_event',
-    description: 'Create a calendar event, one-off or recurring. Defaults to assistant calendar. Pass userEmail to create on Michael\'s calendar.',
+    description: 'Create a calendar event, one-off or recurring. Defaults to Michael\'s calendar. Pass userEmail to create on a different calendar (e.g. assistant@jrboehlke.com).',
     input_schema: {
       type: 'object',
       properties: {
@@ -204,7 +204,7 @@ const EMAIL_TOOLS = [
         end:       { type: 'string', description: 'End datetime ISO 8601, e.g. 2026-07-01T09:30:00' },
         body:      { type: 'string', description: 'Event description/notes' },
         timezone:  { type: 'string', description: 'Timezone, default America/Chicago' },
-        userEmail: { type: 'string', description: 'Calendar owner. Omit for assistant, use michael@jrboehlke.com for Michael.' },
+        userEmail: { type: 'string', description: 'Calendar owner. Omit for Michael\'s calendar (the default), pass assistant@jrboehlke.com for the assistant\'s own calendar.' },
         recurrenceDaysOfWeek: {
           type: 'array', items: { type: 'string', enum: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] },
           description: 'Omit for a one-off event. If set, creates a weekly recurring series on these days of the week with no end date.',
@@ -217,11 +217,11 @@ const EMAIL_TOOLS = [
   },
   {
     name: 'list_calendar_events',
-    description: 'List calendar events in a date range. Defaults to assistant calendar. Pass userEmail for Michael\'s calendar.',
+    description: 'List calendar events in a date range. Defaults to Michael\'s calendar. Pass userEmail for a different calendar (e.g. assistant@jrboehlke.com). Always check this before claiming a time is free/conflict-free -- do not assume a calendar is clear without calling this first.',
     input_schema: {
       type: 'object',
       properties: {
-        userEmail:     { type: 'string', description: 'Calendar owner. Omit for assistant, use michael@jrboehlke.com for Michael.' },
+        userEmail:     { type: 'string', description: 'Calendar owner. Omit for Michael\'s calendar (the default), pass assistant@jrboehlke.com for the assistant\'s own calendar.' },
         startDateTime: { type: 'string', description: 'ISO 8601 start of range (defaults to now)' },
         endDateTime:   { type: 'string', description: 'ISO 8601 end of range (defaults to 30 days out)' },
         query:         { type: 'string', description: 'Optional keyword search within events' },
@@ -237,7 +237,7 @@ const EMAIL_TOOLS = [
       type: 'object',
       properties: {
         event_id:  { type: 'string', description: 'Event ID from list_calendar_events' },
-        userEmail: { type: 'string', description: 'Calendar owner. Omit for assistant.' },
+        userEmail: { type: 'string', description: 'Calendar owner. Omit for Michael\'s calendar (the default), pass assistant@jrboehlke.com for the assistant\'s own calendar.' },
         subject:   { type: 'string' },
         start:     { type: 'string', description: 'ISO 8601 datetime' },
         end:       { type: 'string', description: 'ISO 8601 datetime' },
@@ -255,7 +255,7 @@ const EMAIL_TOOLS = [
       type: 'object',
       properties: {
         event_id:  { type: 'string', description: 'Event ID from list_calendar_events' },
-        userEmail: { type: 'string', description: 'Calendar owner. Omit for assistant.' },
+        userEmail: { type: 'string', description: 'Calendar owner. Omit for Michael\'s calendar (the default), pass assistant@jrboehlke.com for the assistant\'s own calendar.' },
       },
       required: ['event_id'],
     },

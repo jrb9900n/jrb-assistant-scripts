@@ -237,16 +237,34 @@ async function handleList(req, res, type) {
 const IMAGE_CONTENT_TYPE_RE = /^image\/(png|jpe?g|gif|webp)$/i;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // stay well under Claude's per-image limit
 
+// A pasted (Ctrl+V) image often arrives as an inline <img src="..."> tag
+// inside activity.text's HTML rather than as a top-level attachments[]
+// entry -- confirmed missing live 2026-08-24 (Michael sent a photo, bot said
+// it saw nothing). activity.text gets its HTML tags stripped down to plain
+// text before use, which would silently destroy this reference if it isn't
+// captured first.
+const INLINE_IMG_SRC_RE = /<img[^>]+src=["']([^"']+)["']/gi;
+
 async function extractImageAttachments(activity) {
-  const attachments = activity.attachments || [];
+  const candidates = [];
+  for (const att of activity.attachments || []) {
+    if (att.contentUrl && IMAGE_CONTENT_TYPE_RE.test(att.contentType || '')) {
+      candidates.push({ url: att.contentUrl, mediaType: att.contentType.toLowerCase() });
+    }
+  }
+  INLINE_IMG_SRC_RE.lastIndex = 0;
+  let match;
+  while ((match = INLINE_IMG_SRC_RE.exec(activity.text || ''))) {
+    if (!candidates.some(c => c.url === match[1])) candidates.push({ url: match[1], mediaType: null });
+  }
+
   const images = [];
-  for (const att of attachments) {
-    if (!att.contentUrl || !IMAGE_CONTENT_TYPE_RE.test(att.contentType || '')) continue;
+  for (const { url, mediaType } of candidates) {
     try {
       const token = await getBotToken();
-      const res = await fetch(att.contentUrl, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
       if (!res.ok) {
-        logger.warn('Teams: image attachment download failed', { status: res.status, contentType: att.contentType });
+        logger.warn('Teams: image attachment download failed', { status: res.status, url: url.slice(0, 80) });
         continue;
       }
       const buf = Buffer.from(await res.arrayBuffer());
@@ -254,13 +272,40 @@ async function extractImageAttachments(activity) {
         logger.warn('Teams: image attachment too large, skipping', { size: buf.length, max: MAX_IMAGE_BYTES });
         continue;
       }
-      const mediaType = att.contentType.toLowerCase() === 'image/jpg' ? 'image/jpeg' : att.contentType.toLowerCase();
-      images.push({ mediaType, base64: buf.toString('base64') });
+      // Inline <img> tags carry no contentType -- fall back to whatever the
+      // download response itself reports.
+      const resolvedType = (mediaType || res.headers.get('content-type')?.split(';')[0] || '').toLowerCase();
+      if (!IMAGE_CONTENT_TYPE_RE.test(resolvedType)) {
+        logger.warn('Teams: image had unrecognized content type, skipping', { resolvedType });
+        continue;
+      }
+      images.push({ mediaType: resolvedType === 'image/jpg' ? 'image/jpeg' : resolvedType, base64: buf.toString('base64') });
     } catch (err) {
       logger.warn('Teams: image attachment fetch error', { err: err.message });
     }
   }
   return images;
+}
+
+// ── Per-conversation serialization ───────────────────────────────────────────
+// Teams can deliver two of Michael's messages close enough together that the
+// second one's conversation-history load races the first one's still-in-
+// flight turn-save -- confirmed live 2026-08-24 (naming two SA accounts to
+// tag, then immediately "Can you update those for me," got "I don't have
+// context for what 'those' refers to" one message later). Queuing every
+// message for a given Teams conversation onto the same promise chain forces
+// strict in-order processing instead of just narrowing the race window --
+// a full fix rather than the previously-accepted partial mitigation.
+const sessionQueues = new Map();
+
+function runSerializedPerSession(sessionId, fn) {
+  const prior = sessionQueues.get(sessionId) ?? Promise.resolve();
+  const run = prior.then(fn, fn);
+  // A never-rejecting tail for the queue's own bookkeeping -- one message's
+  // failure must not break serialization for the next message on the same
+  // conversation. The real result/error is still returned to the caller.
+  sessionQueues.set(sessionId, run.catch(() => {}));
+  return run;
 }
 
 // ── Teams activity handler ────────────────────────────────────────────────────
@@ -278,7 +323,26 @@ async function handleTeamsActivity(req, res) {
 
   if (activity.type !== 'message') return;
 
-  const userText = (activity.text || '').replace(/<[^>]+>/g, '').trim();
+  const sessionId = `teams-${activity.conversation.id}`;
+  await runSerializedPerSession(sessionId, () => processTeamsMessage(activity, sessionId));
+}
+
+async function processTeamsMessage(activity, sessionId) {
+  const rawText = (activity.text || '').replace(/<[^>]+>/g, '').trim();
+
+  // Extract any image attachments BEFORE the empty-text bail below -- Michael
+  // can send a photo as its own message with no caption text at all.
+  // Confirmed live 2026-08-24: a photo sent with no caption was silently
+  // dropped entirely (this bail used to run before image extraction ever
+  // happened), so the bot never saw it and later denied receiving one.
+  const images = await extractImageAttachments(activity).catch(err => {
+    logger.warn('Teams: could not extract image attachments', { err: err.message });
+    return [];
+  });
+
+  const userText = rawText || (images.length
+    ? '(Photo attached, no caption provided -- describe what you see and act on it if relevant to the current conversation.)'
+    : '');
   if (!userText) return;
 
   // Persist conversation reference so we can send proactive messages later
@@ -287,22 +351,19 @@ async function handleTeamsActivity(req, res) {
   // Short-term conversation memory: recent raw turns from this same Teams
   // conversation, so the agent doesn't lose the thread mid-conversation
   // (e.g. "test that" right after a message describing what to test).
-  // Fire-and-forget by design (not awaited before loadRecentTurns below) --
-  // known accepted limitation: if Michael sends 3+ messages in the same
-  // conversation faster than they can be processed, a later message's
-  // history load can race an earlier message's still-in-flight insert.
-  // loadRecentTurns' trailing-user-turn trim covers the common 2-message
-  // case; a full fix would need per-conversation request serialization,
-  // which isn't worth the complexity for a single-user Teams bot.
-  const sessionId = `teams-${activity.conversation.id}`;
-  saveTurn(sessionId, 'user', userText).catch(err =>
+  // Awaited (not fire-and-forget) so this message's own turn is guaranteed
+  // saved before loadRecentTurns runs below -- combined with
+  // runSerializedPerSession above (which guarantees this whole function runs
+  // to completion before the next queued message on this same conversation
+  // starts), this closes the burst-race gap that used to let a fast second
+  // message load history before the first message's turn had landed.
+  await saveTurn(sessionId, 'user', userText).catch(err =>
     logger.warn('Teams: saveTurn (user) failed', { err: err.message })
   );
 
-  // Feedback capture, conversation-history load, and any image attachment
-  // download all touch unrelated data — run them concurrently rather than
-  // paying three latencies sequentially.
-  const [, extraMessages, images] = await Promise.all([
+  // Feedback capture and conversation-history load touch unrelated data —
+  // run them concurrently rather than paying both latencies sequentially.
+  const [, extraMessages] = await Promise.all([
     (async () => {
       try {
         const { detectAndCaptureFeedback } = await import('../tools/impl/feedback-capture.js');
@@ -318,15 +379,11 @@ async function handleTeamsActivity(req, res) {
       logger.warn('Teams: could not load conversation history', { err: err.message });
       return [];
     }),
-    extractImageAttachments(activity).catch(err => {
-      logger.warn('Teams: could not extract image attachments', { err: err.message });
-      return [];
-    }),
   ]);
 
   async function remember(text) {
     await replyToTeams(activity, text);
-    saveTurn(sessionId, 'assistant', text).catch(err =>
+    await saveTurn(sessionId, 'assistant', text).catch(err =>
       logger.warn('Teams: saveTurn (assistant) failed', { err: err.message })
     );
   }

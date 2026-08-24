@@ -372,18 +372,16 @@ export async function scheduleEstimateVisit({ clientName, date, startTime, durat
   // Step 1: SA client lookup. Don't guess on zero or multiple matches --
   // hand it back for Michael to disambiguate.
   //
-  // KNOWN LIMITATION (confirmed live 2026-08-20): SA's V2AccountList_Query
-  // name filter (FieldColumn '1'/ContainOperator '1') appears to be a no-op
-  // server-side -- it returns the same ~30-row default page regardless of
-  // the search term, and searchClients only does a client-side substring
-  // check over that page (see its own comment in serviceautopilot.js). For
-  // a client base in the thousands, a specific client not already in that
-  // arbitrary default page will come back as a false "not found" here even
-  // though the account genuinely exists in SA. Not fixed in this build --
-  // reverse-engineering SA's real full-text search endpoint is a separate,
-  // substantial effort outside Phase 2's scope. Worth Michael knowing this
-  // tool's "client not found" result isn't fully reliable yet.
-  const matches = await searchClients({ name: clientName });
+  // maxScan raised well above searchClients' own conservative default (30) --
+  // SA's V2AccountList_Query name filter is a confirmed server-side no-op, so
+  // a real search needs to page through a meaningful chunk of the actual
+  // account population to have a real chance of finding a client that isn't
+  // already on SA's arbitrary "recent clients" default page (see
+  // searchClients' own comment in serviceautopilot.js). Even at 3000 this is
+  // a probabilistic improvement, not a guaranteed fix, for a client base in
+  // the thousands -- a genuine full-text search endpoint would be needed to
+  // close this completely, which is a separate, substantial effort.
+  const matches = await searchClients({ name: clientName, maxScan: 3000 });
   if (matches.length !== 1) {
     return {
       status: 'needs_clarification',
