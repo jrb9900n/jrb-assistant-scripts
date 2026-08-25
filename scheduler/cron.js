@@ -1492,7 +1492,12 @@ const SCHEDULED_TASKS = [
           // reconciler shrunk several block-schedule occurrences) -- some of
           // those redeliveries carry no subject/start at all. Skip silently
           // rather than reconcile against garbage or send a useless
-          // "undefined at unknown time" alert.
+          // "undefined at unknown time" alert. The other historical source of
+          // a missing subject (Graph's delta endpoint omitting inherited
+          // fields on occurrence expansions) is now fixed at the source in
+          // calendar-watch.js's bootstrapUrl $select -- this guard is
+          // defense-in-depth against the redelivery case, not a workaround
+          // for that one.
           if (!e.subject || !e.start) { notifiedCalendarChangeIds.add(dedupeKey); continue; }
 
           let reconcileNote = '';
