@@ -294,6 +294,60 @@ export async function getEmailAttachmentBytes({ email_id, attachment_id, userEma
   return Buffer.from(data.contentBytes, 'base64');
 }
 
+const TEXT_ATTACHMENT_TYPES = new Set(['text/plain', 'text/csv', 'application/json']);
+
+/**
+ * Fetch an email attachment's content as text the LLM can read directly -- extracts
+ * PDF text via pdf-parse, decodes plain-text/CSV/JSON as utf8. Graph's attachment
+ * content-bytes limitation only applies to the raw HTTP response (base64, no parsing);
+ * this function does the parsing on top of getEmailAttachmentBytes's same download.
+ * Returns `supported: false` with a note (not a thrown error) for file types with no
+ * text extraction path (images, Office docs, etc.) so a caller can report the gap
+ * instead of getting an unexplained crash.
+ */
+export async function readEmailAttachment({ email_id, attachment_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}/attachments/${encodeURIComponent(attachment_id)}`);
+  const { name, contentType, size } = data;
+
+  let buf;
+  if (data.contentBytes) {
+    buf = Buffer.from(data.contentBytes, 'base64');
+  } else if (data['@odata.type'] === '#microsoft.graph.referenceAttachment') {
+    return { name, contentType, size, supported: false, text: null, note: 'Reference attachment (e.g. a cloud file link) has no downloadable content bytes.' };
+  } else {
+    // Graph omits contentBytes above ~3MB on the inline JSON response (see
+    // getEmailAttachmentBytes's comment above) even for a real file attachment --
+    // fall back to the $value endpoint, which streams raw bytes regardless of size.
+    const token = await getToken();
+    const res = await axios.get(
+      `${GRAPH}/users/${user}/messages/${encodeURIComponent(email_id)}/attachments/${encodeURIComponent(attachment_id)}/$value`,
+      { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer' }
+    );
+    buf = Buffer.from(res.data);
+  }
+
+  if (contentType === 'application/pdf' || /\.pdf$/i.test(name ?? '')) {
+    const { PDFParse } = await import('pdf-parse');
+    const parser = new PDFParse({ data: buf });
+    try {
+      const result = await parser.getText();
+      return { name, contentType, size, supported: true, text: result.text };
+    } finally {
+      await parser.destroy();
+    }
+  }
+
+  if (TEXT_ATTACHMENT_TYPES.has(contentType) || /\.(txt|csv|json)$/i.test(name ?? '')) {
+    return { name, contentType, size, supported: true, text: buf.toString('utf8') };
+  }
+
+  return {
+    name, contentType, size, supported: false, text: null,
+    note: `No text extraction available for ${contentType || 'this file type'}. Supported: PDF, plain text, CSV, JSON.`,
+  };
+}
+
 export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate, categories, location, attendees } = {}) {
   const user = userEmail ?? MICHAEL_CALENDAR;
   const event = {
