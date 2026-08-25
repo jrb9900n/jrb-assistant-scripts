@@ -17,7 +17,7 @@ const SEARCH_TOOLS = [
 const EMAIL_TOOLS = [
   {
     name: 'list_emails',
-    description: 'List recent emails from a Microsoft 365 inbox. Defaults to assistant inbox. Pass userEmail to access another mailbox (e.g. michael@jrboehlke.com).',
+    description: 'List recent emails from a Microsoft 365 inbox. Defaults to the ASSISTANT\'s own operational inbox, NOT Michael\'s personal one. When Michael asks about "my"/"his own" email or inbox, you MUST pass userEmail: \'michael@jrboehlke.com\' explicitly — do not assume the default covers this, and never claim you lack access to his inbox.',
     input_schema: {
       type: 'object',
       properties: {

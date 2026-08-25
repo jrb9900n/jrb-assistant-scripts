@@ -59,6 +59,13 @@ export function isSchedulingRequest(text) {
 export function isReportRequest(text) {
   const t = normalise(text);
   if (t === null) return false;
+  // Email/inbox questions ("how many emails did I get today") collide with the
+  // generic "how many"/"show me" phrasing below but belong in 'general' (which
+  // has EMAIL_TOOLS) -- 'report''s toolset (QB/files/FleetSharp) has no email
+  // tool at all. Confirmed live 2026-08-24: this exact collision routed
+  // "summarize how many emails I received today" to 'report', and the model
+  // correctly (if unhelpfully) said it had no inbox tool available.
+  if (/\b(emails?|inbox)\b/.test(t)) return false;
   return /\b(how much|how many|revenue|invoices?|ar aging|balance sheet|weekly report|show me|what('s| is) (our|the|my)|list (all|open|pending|today)|total|year.?to.?date|ytd|month(ly)?|outstanding|cash flow|profit|loss)\b/.test(t);
 }
 
