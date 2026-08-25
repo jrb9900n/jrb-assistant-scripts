@@ -34,9 +34,35 @@ const EMAIL_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        email_id: { type: 'string', description: 'Email ID from list_emails or search_emails' },
+        email_id:  { type: 'string', description: 'Email ID from list_emails or search_emails' },
+        userEmail: { type: 'string', description: 'Mailbox owner the email_id came from. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
       },
       required: ['email_id'],
+    },
+  },
+  {
+    name: 'list_email_attachments',
+    description: 'List attachments on an email (name, content type, size). Use before read_email_attachment to get attachment IDs. Check has_attachments on get_email/search_emails results first.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email_id:  { type: 'string', description: 'Email ID from list_emails, search_emails, or get_email' },
+        userEmail: { type: 'string', description: 'Mailbox owner the email_id came from. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+      },
+      required: ['email_id'],
+    },
+  },
+  {
+    name: 'read_email_attachment',
+    description: 'Download an email attachment and extract its text content. Supports PDF, plain text, CSV, and JSON -- returns supported:false with a note for other file types (images, Word/Excel docs, etc.). Use list_email_attachments first to get the attachment_id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email_id:      { type: 'string', description: 'Email ID from list_emails, search_emails, or get_email' },
+        attachment_id: { type: 'string', description: 'Attachment ID from list_email_attachments' },
+        userEmail:     { type: 'string', description: 'Mailbox owner the email_id came from. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+      },
+      required: ['email_id', 'attachment_id'],
     },
   },
   {
