@@ -642,6 +642,17 @@ error.) Works for any `tools/impl/*.js` export — SA, QBO, Supabase, etc.
 
 ---
 
+## Email Attachment Reading (built 2026-08-24)
+
+Michael asked the bot to sum up invoice PDFs attached to an email in his inbox (Amanda Jelinek/Stark Pavement, "RE: ACCOUNT ON HOLD/PAST DUE"). The bot repeatedly replied that "Microsoft Graph API cannot extract attachment content" — false. `m365.js` already had `listEmailAttachments`/`getEmailAttachmentBytes` for exactly this, but neither was ever registered as an agent tool (`tools/registry.js`/`dispatcher.js`), so the LLM had no tool to call and fabricated a Graph limitation instead of saying it lacked a tool.
+
+- `list_email_attachments` / `read_email_attachment` agent tools added. `readEmailAttachment()` (new in `m365.js`) extracts real text — PDF via `pdf-parse` (v2 API: `new PDFParse({data: buf}).getText()`, must `destroy()` after), plain text/CSV/JSON as utf8 — instead of returning raw bytes, so the model can read and sum invoice contents directly. Returns `{supported: false, note}` for file types with no extraction path (images, Office docs) rather than throwing.
+- Graph omits `contentBytes` on the inline JSON attachment response above ~3MB even for a real (non-reference) file attachment — `readEmailAttachment` falls back to the `/$value` endpoint (raw bytes, no size cap) for that case, and only reports "reference attachment" when the response's `@odata.type` actually is `#microsoft.graph.referenceAttachment`.
+- `get_email`'s tool schema was missing `userEmail` even though `m365.getEmail()` already accepted it — added, so the model can fetch a full email body from `michael@jrboehlke.com` instead of silently defaulting to the assistant's own mailbox.
+- **Verified live** against the real reported email: extracted all 7 Stark invoice PDFs cleanly, totaling $2,624.79.
+
+---
+
 ## Inbox Management System (built 2026-05-18)
 
 Multi-mailbox email catalog, calendar r/w, and SharePoint/OneDrive access for both `assistant@jrboehlke.com` and `michael@jrboehlke.com`.
