@@ -6,9 +6,15 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\launcher\save-acs-secrets.ps1"
 
-Add-Type -TypeDefinition @"
-using System; using System.Runtime.InteropServices; using System.Text;
-public class CredWriter {
+# Guard against Add-Type collision when both secrets scripts are run in the
+# same PowerShell session (e.g. during testing). Each script uses a distinct
+# class name so the guard is per-script, not shared.
+if (-not ([System.Management.Automation.PSTypeName]'AcsCredWriter').Type) {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public class AcsCredWriter {
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
     public struct CREDENTIAL {
         public uint Flags; public uint Type; public string TargetName; public string Comment;
@@ -24,17 +30,37 @@ public class CredWriter {
         Marshal.Copy(blob, 0, ptr, blob.Length);
         CREDENTIAL c = new CREDENTIAL { Type=1, TargetName=target, UserName=user,
             CredentialBlob=ptr, CredentialBlobSize=(uint)blob.Length, Persist=2 };
-        bool ok = CredWrite(ref c, 0);
-        Marshal.FreeHGlobal(ptr);
+        bool ok = false;
+        try {
+            ok = CredWrite(ref c, 0);
+        } finally {
+            // Zero the secret bytes in unmanaged memory before freeing so the
+            // plaintext credential does not linger on the heap.
+            for (int i = 0; i < blob.Length; i++) {
+                Marshal.WriteByte(ptr, i, 0);
+            }
+            Array.Clear(blob, 0, blob.Length);
+            Marshal.FreeHGlobal(ptr);
+        }
         return ok;
     }
 }
 "@
+}
 
 function Set-JRBSecret([string]$Name) {
-    $value = Read-Host "Enter value for $Name"
-    if ($value) {
-        $ok = [CredWriter]::Save("JRBAgent:$Name", "JRBAgent", $value)
+    # -AsSecureString keeps the value out of a plain System.String in managed
+    # memory. We marshal it to an unmanaged BSTR solely to pass it into the
+    # C# Save() call; the BSTR is freed immediately after.
+    $secure = Read-Host "Enter value for $Name" -AsSecureString
+    if ($secure.Length -gt 0) {
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+        try {
+            $value = [System.Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+            $ok = [AcsCredWriter]::Save("JRBAgent:$Name", "JRBAgent", $value)
+        } finally {
+            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        }
         if ($ok) { Write-Host "  Saved $Name" -ForegroundColor Green }
         else     { Write-Host "  Failed $Name" -ForegroundColor Red }
     } else { Write-Host "  Skipped $Name" -ForegroundColor Yellow }

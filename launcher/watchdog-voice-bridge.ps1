@@ -11,7 +11,12 @@
 # diff is merged, or every restart attempt below will silently no-op against
 # start-agent.ps1's default arm instead of actually starting anything.
 
-$listening = netstat -ano | Select-String ":3979 .*LISTENING"
+# Use Get-NetTCPConnection instead of parsing netstat output: netstat output
+# is localized on non-English Windows ("LISTENING" becomes a translated word),
+# which would cause the string match to never fire and the bridge to restart
+# in a permanent loop. Get-NetTCPConnection is a structured cmdlet whose
+# property values are locale-independent enum constants.
+$listening = Get-NetTCPConnection -LocalPort 3979 -State Listen -ErrorAction SilentlyContinue
 if (-not $listening) {
     # Derive the script root dynamically so this works from any install location,
     # matching watchdog-bot.ps1's approach.
