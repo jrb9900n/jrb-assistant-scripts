@@ -574,6 +574,22 @@ async function processTeamsMessage(activity, sessionId) {
       // model could mistake for scheduling-relevant instructions.
       ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
+    } else if (intent === 'calendar') {
+      // Added 2026-08-25 -- see teams/router.js's isCalendarRescheduleRequest
+      // and tools/impl/block-schedule-reconciler.js's
+      // resolveCalendarConflictBySubject for the incident this fixes.
+      // extraMessages included (unlike scheduling's own branch) since this is
+      // an ordinary multi-turn back-and-forth over a Teams conversation, not
+      // a flow with its own session-keyed draft/rules context.
+      const calendarTask = `You received a Teams message from Michael about calendar rescheduling. Message: "${userText}"
+
+- If he's asking to prioritize a real meeting/event over one or more President Weekly Block Schedule blocks (e.g. "prioritize X over the client meeting block", "move my BTA meeting's conflicts"): use resolve_calendar_conflict with the real event's subject and date. It automatically finds every block overlapping that event and resolves it (shrink/split/delete) in favor of the real event. Do NOT read calendar events yourself and ask Michael to manually pick new slots for the displaced blocks -- that is exactly what this tool already does.
+- If resolve_calendar_conflict reports the event wasn't found or matched more than one event, relay its message back to Michael and ask him to clarify -- don't guess which event he meant.
+- For anything else calendar-related (reading a day's schedule, creating a new event, or directly updating/deleting one specific event by name), use your calendar tools directly.
+- Always confirm what actually happened: which blocks were shrunk, split, deleted, or kept, and any that were skipped as an intentional exemption.`;
+      retryTask = calendarTask; retryTaskType = 'calendar';
+      ({ result } = await runAgent({ task: calendarTask, taskType: 'calendar', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
+
     } else if (intent === 'crm') {
       const crmTask = `You received a Teams message from Michael. Execute the action he is requesting using your SA, CRM, and CardDAV tools.
 

@@ -111,6 +111,10 @@ const HANDLERS = {
   list_calendar_events:   (i) => m365.listCalendarEvents(i),
   update_calendar_event:  (i) => m365.updateCalendarEvent(i),
   delete_calendar_event:  (i) => m365.deleteCalendarEvent(i),
+  resolve_calendar_conflict: async ({ event_subject_contains, date }) => {
+    const { resolveCalendarConflictBySubject } = await import('./impl/block-schedule-reconciler.js');
+    return resolveCalendarConflictBySubject({ eventSubjectContains: event_subject_contains, date });
+  },
 
   // CRM / Finance
   qb_query:              (i) => qb.query(i),
