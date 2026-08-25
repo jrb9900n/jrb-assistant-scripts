@@ -1444,23 +1444,28 @@ const SCHEDULED_TASKS = [
     },
   },
   {
-    // Every 10 minutes — Phase 1 of the "autonomous schedule manager" roadmap
-    // agreed with Michael 2026-08-20. Detects new/changed events on his
-    // calendar that aren't JRB block-schedule blocks (a real meeting
+    // Every 10 minutes — Phase 1+3 of the "autonomous schedule manager"
+    // roadmap agreed with Michael 2026-08-20. Detects new/changed events on
+    // his calendar that aren't JRB block-schedule blocks (a real meeting
     // appearing, or an invite being accepted) via calendar-watch.js's Graph
-    // delta query. Detection + notification only -- no auto-displacement
-    // yet (that's Phase 3, which needs this plumbing first).
+    // delta query, then (2026-08-24, Phase 3) actually reconciles each one
+    // against that day's block schedule via
+    // block-schedule-reconciler.js -- a real invite now displaces ANY block,
+    // PROTECTED/DEEP_WORK included, per Michael's confirmed general rule
+    // ("as a general rule, move to accommodate real invites"), with the
+    // reconciler's own named exceptions (see EXEMPTIONS there) left alone.
     // No overlap lock between runs -- a run overlapping the next tick could
-    // race on calendar_delta_state's upsert. Accepted for Phase 1: this
-    // task's own Graph call is lightweight (single page for a normal
-    // mailbox, confirmed live) and finishes in well under 10 minutes in
-    // every observed run.
+    // race on calendar_delta_state's upsert. Accepted: this task's own Graph
+    // calls are lightweight (single page for a normal mailbox, confirmed
+    // live) and finish in well under 10 minutes in every observed run.
     schedule: '*/10 * * * *',
     name: 'calendar_change_watch',
     run: async () => {
       try {
         const { getCalendarChanges } = await import('../tools/impl/calendar-watch.js');
-        const changes = await getCalendarChanges({ mailbox: 'michael@jrboehlke.com' });
+        const { reconcileRealEventAgainstBlocks } = await import('../tools/impl/block-schedule-reconciler.js');
+        const MAILBOX = 'michael@jrboehlke.com';
+        const changes = await getCalendarChanges({ mailbox: MAILBOX });
         for (const e of changes) {
           // Keyed on id + lastModifiedDateTime, not just id -- a later genuine
           // change to an already-notified event (reschedule, new acceptance)
@@ -1480,15 +1485,47 @@ const SCHEDULED_TASKS = [
             ? parsedStart.toLocaleString('en-US', { timeZone: 'America/Chicago', dateStyle: 'medium', timeStyle: 'short' })
             : 'unknown time';
           const acceptedNote = e.responseStatus === 'accepted' && !e.isOrganizer ? ' (just accepted)' : '';
-          // Defensive fallback -- root cause of a missing subject was Graph's
-          // delta endpoint omitting inherited fields on occurrence expansions
-          // (fixed in calendar-watch.js's bootstrapUrl $select), but this
-          // keeps a future gap in the same class from ever rendering the
-          // literal word "undefined" in a Teams message again.
-          const subjectText = e.subject || '(no title)';
+
+          // Graph's delta feed can redeliver neighboring occurrences of a
+          // recurring series as "changed" whenever any one occurrence gets
+          // an exception (confirmed live 2026-08-24, immediately after this
+          // reconciler shrunk several block-schedule occurrences) -- some of
+          // those redeliveries carry no subject/start at all. Skip silently
+          // rather than reconcile against garbage or send a useless
+          // "undefined at unknown time" alert. The other historical source of
+          // a missing subject (Graph's delta endpoint omitting inherited
+          // fields on occurrence expansions) is now fixed at the source in
+          // calendar-watch.js's bootstrapUrl $select -- this guard is
+          // defense-in-depth against the redelivery case, not a workaround
+          // for that one.
+          if (!e.subject || !e.start) { notifiedCalendarChangeIds.add(dedupeKey); continue; }
+
+          let reconcileNote = '';
+          try {
+            const result = await reconcileRealEventAgainstBlocks({ mailbox: MAILBOX, realEvent: e });
+            if (result.skipped) {
+              reconcileNote = '';
+            } else {
+              const parts = [];
+              if (result.accepted) parts.push('auto-accepted (Breakthrough Academy)');
+              if (result.resolvedActions.length) {
+                parts.push(...result.resolvedActions.map(a =>
+                  `**${a.blockSubject}** (${a.tier}) ${a.action}${a.droppedMinutes ? ` — ${a.droppedMinutes} min lost` : ''}`
+                ));
+              }
+              if (result.exempted.length) {
+                parts.push(...result.exempted.map(x => `left **${x.blockSubject}** untouched (known intentional overlap)`));
+              }
+              if (parts.length) reconcileNote = '\n' + parts.map(p => `↳ ${p}`).join('\n');
+            }
+          } catch (reconcileErr) {
+            logger.warn('calendar_change_watch: block-schedule reconciliation failed', { err: reconcileErr.message, subject: e.subject });
+            reconcileNote = '\n↳ ⚠️ Block-schedule reconciliation failed — review manually.';
+          }
+
           try {
             await sendProactiveMessage(
-              `📅 New calendar item detected${acceptedNote}: **${subjectText}** at ${when}. Automatic block displacement isn't built yet — review for schedule conflicts.`
+              `📅 New calendar item detected${acceptedNote}: **${e.subject}** at ${when}.${reconcileNote}`
             );
             // Only mark as handled once the send actually succeeds -- marking
             // it beforehand would permanently drop this change if the send

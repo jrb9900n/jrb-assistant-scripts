@@ -96,7 +96,7 @@ async function extractRule(text) {
 
 // ── Save to Supabase rules table ──────────────────────────────────────────────
 
-async function saveToRules(rule, agent, source) {
+export async function saveToRules(rule, agent, source) {
   const { error } = await supabase().from('rules').insert({
     agent,
     rule,

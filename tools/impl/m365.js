@@ -294,6 +294,60 @@ export async function getEmailAttachmentBytes({ email_id, attachment_id, userEma
   return Buffer.from(data.contentBytes, 'base64');
 }
 
+const TEXT_ATTACHMENT_TYPES = new Set(['text/plain', 'text/csv', 'application/json']);
+
+/**
+ * Fetch an email attachment's content as text the LLM can read directly -- extracts
+ * PDF text via pdf-parse, decodes plain-text/CSV/JSON as utf8. Graph's attachment
+ * content-bytes limitation only applies to the raw HTTP response (base64, no parsing);
+ * this function does the parsing on top of getEmailAttachmentBytes's same download.
+ * Returns `supported: false` with a note (not a thrown error) for file types with no
+ * text extraction path (images, Office docs, etc.) so a caller can report the gap
+ * instead of getting an unexplained crash.
+ */
+export async function readEmailAttachment({ email_id, attachment_id, userEmail } = {}) {
+  const user = userEmail ?? USER();
+  const data = await graph('GET', `/users/${user}/messages/${encodeURIComponent(email_id)}/attachments/${encodeURIComponent(attachment_id)}`);
+  const { name, contentType, size } = data;
+
+  let buf;
+  if (data.contentBytes) {
+    buf = Buffer.from(data.contentBytes, 'base64');
+  } else if (data['@odata.type'] === '#microsoft.graph.referenceAttachment') {
+    return { name, contentType, size, supported: false, text: null, note: 'Reference attachment (e.g. a cloud file link) has no downloadable content bytes.' };
+  } else {
+    // Graph omits contentBytes above ~3MB on the inline JSON response (see
+    // getEmailAttachmentBytes's comment above) even for a real file attachment --
+    // fall back to the $value endpoint, which streams raw bytes regardless of size.
+    const token = await getToken();
+    const res = await axios.get(
+      `${GRAPH}/users/${user}/messages/${encodeURIComponent(email_id)}/attachments/${encodeURIComponent(attachment_id)}/$value`,
+      { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer' }
+    );
+    buf = Buffer.from(res.data);
+  }
+
+  if (contentType === 'application/pdf' || /\.pdf$/i.test(name ?? '')) {
+    const { PDFParse } = await import('pdf-parse');
+    const parser = new PDFParse({ data: buf });
+    try {
+      const result = await parser.getText();
+      return { name, contentType, size, supported: true, text: result.text };
+    } finally {
+      await parser.destroy();
+    }
+  }
+
+  if (TEXT_ATTACHMENT_TYPES.has(contentType) || /\.(txt|csv|json)$/i.test(name ?? '')) {
+    return { name, contentType, size, supported: true, text: buf.toString('utf8') };
+  }
+
+  return {
+    name, contentType, size, supported: false, text: null,
+    note: `No text extraction available for ${contentType || 'this file type'}. Supported: PDF, plain text, CSV, JSON.`,
+  };
+}
+
 export async function createCalendarEvent({ subject, start, end, body = '', timezone = 'America/Chicago', userEmail, recurrenceDaysOfWeek, recurrenceStartDate, categories, location, attendees } = {}) {
   const user = userEmail ?? MICHAEL_CALENDAR;
   const event = {
@@ -479,9 +533,18 @@ export async function listCalendarEvents({ userEmail, startDateTime, endDateTime
   const start = startDateTime ?? new Date().toISOString();
   const end   = endDateTime   ?? new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
   const search = query ? `&$search="${encodeURIComponent(query)}"` : '';
+  // Prefer: outlook.timezone, same as getCalendarViewWithCategories/getCalendarEvent below --
+  // without it Graph returns start/end in UTC while every other calendar function in this
+  // codebase works in America/Chicago wall-clock terms. Confirmed live 2026-08-24: this was the
+  // one calendar-read function still missing the header, and it's the one exposed as the
+  // list_calendar_events agent tool -- the model was doing its own UTC-to-Central arithmetic
+  // in-context on a Teams rescheduling request and repeatedly got it wrong/self-contradictory
+  // across turns before landing on the right answer.
   const data = await graph(
     'GET',
-    `/users/${user}/calendarView?startDateTime=${start}&endDateTime=${end}&$top=${limit}&$select=id,subject,start,end,location,organizer,attendees,bodyPreview,isAllDay${search}&$orderby=start/dateTime`
+    `/users/${user}/calendarView?startDateTime=${start}&endDateTime=${end}&$top=${limit}&$select=id,subject,start,end,location,organizer,attendees,bodyPreview,isAllDay${search}&$orderby=start/dateTime`,
+    undefined,
+    { Prefer: 'outlook.timezone="America/Chicago"' }
   );
   return (data.value ?? []).map(e => ({
     id:         e.id,
@@ -495,6 +558,53 @@ export async function listCalendarEvents({ userEmail, startDateTime, endDateTime
     notes:      e.bodyPreview?.slice(0, 300),
     all_day:    e.isAllDay,
   }));
+}
+
+/**
+ * Finds real (non-block-schedule) calendar events whose subject contains a
+ * given substring, on a specific LOCAL calendar date. Built for the calendar
+ * conflict-resolution tool (see block-schedule-reconciler.js's
+ * resolveCalendarConflictBySubject) so a Teams request like "prioritize my
+ * BTA meeting over the block schedule" can locate the real event without the
+ * model reading/paging through a whole day's events itself.
+ *
+ * Deliberately does NOT send the Prefer: outlook.timezone header (unlike
+ * listCalendarEvents above) -- the returned start/end need to stay bare UTC
+ * strings so they're directly compatible with reconcileRealEventAgainstBlocks'
+ * expected input contract (the same shape calendar-watch.js's
+ * getCalendarChanges() already supplies it). Passing already-local times
+ * into that function would double-convert them via its own
+ * toLocalNaiveFromUtc() call and silently reintroduce the exact class of
+ * timezone bug this file just fixed above.
+ *
+ * The query window is padded a day on each side and results are filtered
+ * back down to the requested local date via toLocalNaiveFromUtc -- same
+ * convention documented on getCalendarViewWithCategories below (an
+ * unpadded same-UTC-day window can silently miss an evening/early-morning
+ * local event whose UTC instant rolls onto the adjacent UTC day).
+ */
+export async function findCalendarEventsBySubject({ userEmail, subjectContains, date } = {}) {
+  const user = userEmail ?? MICHAEL_CALENDAR;
+  const padStart = new Date(`${date}T00:00:00Z`); padStart.setUTCDate(padStart.getUTCDate() - 1);
+  const padEnd = new Date(`${date}T23:59:59Z`); padEnd.setUTCDate(padEnd.getUTCDate() + 1);
+  const data = await graph(
+    'GET',
+    `/users/${user}/calendarView?startDateTime=${padStart.toISOString()}&endDateTime=${padEnd.toISOString()}&$top=50&$select=id,subject,start,end,organizer,isOrganizer,responseStatus,isAllDay&$orderby=start/dateTime`
+  );
+  const needle = subjectContains.toLowerCase();
+  return (data.value ?? [])
+    .filter(e => (e.subject ?? '').toLowerCase().includes(needle))
+    .map(e => ({
+      id:             e.id,
+      subject:        e.subject,
+      start:          e.start?.dateTime,
+      end:            e.end?.dateTime,
+      organizer:      e.organizer?.emailAddress?.address,
+      isOrganizer:    !!e.isOrganizer,
+      responseStatus: e.responseStatus?.response,
+      isAllDay:       !!e.isAllDay,
+    }))
+    .filter(e => toLocalNaiveFromUtc(e.start).slice(0, 10) === date);
 }
 
 export async function updateCalendarEvent({ userEmail, event_id, subject, start, end, body, bodyContentType = 'text', timezone = 'America/Chicago', categories } = {}) {
@@ -526,6 +636,17 @@ export async function deleteCalendarEvent({ userEmail, event_id } = {}) {
   const user = userEmail ?? MICHAEL_CALENDAR;
   await graph('DELETE', `/users/${user}/events/${event_id}`);
   return { deleted: true, event_id };
+}
+
+// Used by the block-schedule reconciler to auto-accept trusted recurring
+// invites (e.g. Breakthrough Academy) that would otherwise sit unresponded
+// while still displacing block time. Graph's accept endpoint sends the
+// organizer a real acceptance response by default (sendResponse defaults
+// true) -- matches what clicking "Accept" in Outlook would actually do.
+export async function acceptCalendarEvent({ userEmail, event_id, comment = '' } = {}) {
+  const user = userEmail ?? MICHAEL_CALENDAR;
+  await graph('POST', `/users/${user}/events/${event_id}/accept`, { comment, sendResponse: true });
+  return { accepted: true, event_id };
 }
 
 /**
@@ -619,7 +740,7 @@ export async function getCalendarViewWithCategories({ userEmail, startDateTime, 
   }));
 }
 
-function toLocalNaiveFromUtc(dateTimeStr) {
+export function toLocalNaiveFromUtc(dateTimeStr) {
   if (!dateTimeStr) return dateTimeStr;
   const d = new Date(dateTimeStr.endsWith('Z') ? dateTimeStr : `${dateTimeStr}Z`);
   const pad2 = n => String(n).padStart(2, '0');

@@ -17,7 +17,7 @@ const SEARCH_TOOLS = [
 const EMAIL_TOOLS = [
   {
     name: 'list_emails',
-    description: 'List recent emails from a Microsoft 365 inbox. Defaults to assistant inbox. Pass userEmail to access another mailbox (e.g. michael@jrboehlke.com).',
+    description: 'List recent emails from a Microsoft 365 inbox. Defaults to the ASSISTANT\'s own operational inbox, NOT Michael\'s personal one. When Michael asks about "my"/"his own" email or inbox, you MUST pass userEmail: \'michael@jrboehlke.com\' explicitly — do not assume the default covers this, and never claim you lack access to his inbox.',
     input_schema: {
       type: 'object',
       properties: {
@@ -34,9 +34,35 @@ const EMAIL_TOOLS = [
     input_schema: {
       type: 'object',
       properties: {
-        email_id: { type: 'string', description: 'Email ID from list_emails or search_emails' },
+        email_id:  { type: 'string', description: 'Email ID from list_emails or search_emails' },
+        userEmail: { type: 'string', description: 'Mailbox owner the email_id came from. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
       },
       required: ['email_id'],
+    },
+  },
+  {
+    name: 'list_email_attachments',
+    description: 'List attachments on an email (name, content type, size). Use before read_email_attachment to get attachment IDs. Check has_attachments on get_email/search_emails results first.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email_id:  { type: 'string', description: 'Email ID from list_emails, search_emails, or get_email' },
+        userEmail: { type: 'string', description: 'Mailbox owner the email_id came from. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+      },
+      required: ['email_id'],
+    },
+  },
+  {
+    name: 'read_email_attachment',
+    description: 'Download an email attachment and extract its text content. Supports PDF, plain text, CSV, and JSON -- returns supported:false with a note for other file types (images, Word/Excel docs, etc.). Use list_email_attachments first to get the attachment_id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        email_id:      { type: 'string', description: 'Email ID from list_emails, search_emails, or get_email' },
+        attachment_id: { type: 'string', description: 'Attachment ID from list_email_attachments' },
+        userEmail:     { type: 'string', description: 'Mailbox owner the email_id came from. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+      },
+      required: ['email_id', 'attachment_id'],
     },
   },
   {
@@ -1091,11 +1117,55 @@ const EMPLOYEE_TOOLS = [
   },
 ];
 
+// Escalation path to a full headless Claude Code session, gated on Michael's
+// yes/no (built 2026-08-25 -- see tools/impl/claude-code-escalation.js).
+// Given to every Michael-initiated taskType EXCEPT employee (privacy
+// boundary -- a non-Michael requester must never be able to trigger this)
+// and auto_fix (unattended; escalation needs a live Teams round-trip for
+// Michael's approval, which self_heal_watcher's cron-triggered runs don't
+// have).
+const ESCALATION_TOOLS = [
+  {
+    name: 'escalate_to_claude_code',
+    description: "Call this when you genuinely lack a tool to complete Michael's request -- e.g. no tool exists for an action he asked for, or the task needs broader investigation/tool orchestration than your current tool set supports. Do NOT call this for something you simply haven't tried yet, or that a clarifying question to Michael would resolve. This asks Michael for permission before anything runs; if he says no, nothing happens. Do not also explain in your own reply that you can't do this -- this tool's own response IS that explanation, sent to him verbatim.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'Specifically what tool or capability is missing, in one or two sentences.' },
+        task_to_escalate: { type: 'string', description: "A clear, self-contained restatement of the task to hand off if Michael approves -- can be more precise than Michael's original wording, but must not drop or invent scope." },
+      },
+      required: ['reason', 'task_to_escalate'],
+    },
+  },
+];
+
+// Conversational entry point into the Phase 3 auto-displacement machinery
+// (see tools/impl/block-schedule-reconciler.js, built 2026-08-24) -- built
+// 2026-08-25 after a live Teams request ("prioritize my BTA meeting over
+// the client meeting block") got no useful help: the model had no tool to
+// actually run that already-built priority-order resolution logic on
+// demand, so it read raw calendar data and just kept asking Michael to
+// hand-pick new slots for every displaced block instead.
+const CALENDAR_CONFLICT_TOOLS = [
+  {
+    name: 'resolve_calendar_conflict',
+    description: "Use this when Michael asks to prioritize a real meeting/event over one or more President Weekly Block Schedule blocks (e.g. \"move my BTA meeting's conflicts\", \"prioritize X over the client meeting block\"). Finds the real event by a distinctive subject substring + local date, then automatically resolves EVERY block that overlaps it in favor of the real event -- shrinking, splitting, or removing just the conflicting occurrence(s), any tier including PROTECTED/DEEP WORK, per Michael's confirmed rule that real commitments always win over block scaffolding. Do NOT manually read calendar events and ask Michael to pick new slots yourself for this kind of request -- that's exactly what this tool already does. If it reports the event wasn't found or was ambiguous, relay that back and ask Michael to clarify rather than guessing.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        event_subject_contains: { type: 'string', description: "A distinctive substring of the real event's subject, e.g. 'BTA' or 'Breakthrough Academy'." },
+        date: { type: 'string', description: 'The local (Central Time) date the event falls on, YYYY-MM-DD.' },
+      },
+      required: ['event_subject_contains', 'date'],
+    },
+  },
+];
+
 const TOOL_MAP = {
-  email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS],
-  crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS],
-  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
-  code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
+  email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...ESCALATION_TOOLS],
+  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
+  code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   // Unattended investigate-and-fix pass (self_heal_watcher) -- same tools as
   // 'code' minus github_merge_pr, so it can open a PR for Michael but can
   // never merge one itself, and no TEAMS_TOOLS since nothing should be
@@ -1112,10 +1182,10 @@ const TOOL_MAP = {
   // availability and book real time with him, nothing else.
   employee:   [...EMPLOYEE_TOOLS, ...BOOKING_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...BOOKING_TOOLS, ...TEAMS_TOOLS],
-  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...TEAMS_TOOLS],
-  sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS],
+  scheduling: [...SCHEDULING_TOOLS, ...BOOKING_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
 };
 
 export function getTools(taskType) {

@@ -27,6 +27,7 @@ import * as carddav     from './impl/carddav.js';
 import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { requestEmployeeApproval } from './impl/privacy-gate.js';
+import { requestEscalation } from './impl/claude-code-escalation.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 import { createClient } from '@supabase/supabase-js';
 
@@ -67,6 +68,8 @@ const HANDLERS = {
   search_emails:         (i) => m365.searchEmails(i),
   draft_email:           (i) => m365.draftEmail(i),
   send_email:            (i) => m365.sendEmail(i),
+  list_email_attachments:(i) => m365.listEmailAttachments(i),
+  read_email_attachment: (i) => m365.readEmailAttachment(i),
   list_mail_folders:     (i) => m365.listMailFolders(i),
   create_mail_folder:    (i) => m365.createMailFolder(i),
   move_email:            (i) => m365.moveEmail(i),
@@ -108,6 +111,10 @@ const HANDLERS = {
   list_calendar_events:   (i) => m365.listCalendarEvents(i),
   update_calendar_event:  (i) => m365.updateCalendarEvent(i),
   delete_calendar_event:  (i) => m365.deleteCalendarEvent(i),
+  resolve_calendar_conflict: async ({ event_subject_contains, date }) => {
+    const { resolveCalendarConflictBySubject } = await import('./impl/block-schedule-reconciler.js');
+    return resolveCalendarConflictBySubject({ eventSubjectContains: event_subject_contains, date });
+  },
 
   // CRM / Finance
   qb_query:              (i) => qb.query(i),
@@ -229,6 +236,19 @@ const HANDLERS = {
   // anything the model could fill in itself. See tools/impl/privacy-gate.js.
   request_employee_approval: (i, context) => requestEmployeeApproval({
     sender: context?.sender, activity: context?.activity, requestText: context?.requestText,
+  }),
+
+  // Claude Code escalation — activity/sessionId/taskType come from the
+  // trusted context object (see core/agent.js's runAgent, teams/bot.js's
+  // Michael-message branches); reason/task_to_escalate are the model's own
+  // tool input, fine to trust since they only shape a follow-up prompt, not
+  // any identity/authorization decision. See tools/impl/claude-code-escalation.js.
+  escalate_to_claude_code: (i, context) => requestEscalation({
+    activity: context?.activity,
+    sessionId: context?.sessionId,
+    taskType: context?.taskType ?? 'general',
+    task: i.task_to_escalate,
+    reason: i.reason,
   }),
 };
 

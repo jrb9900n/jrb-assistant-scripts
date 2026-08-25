@@ -133,6 +133,36 @@ async function replyToTeams(activity, text) {
   }
 }
 
+// Same as replyToTeams, but attaches synthesized speech audio as a data URI.
+// A data URI (vs. uploading to storage and linking) keeps this self-contained
+// -- no new storage dependency -- and stays well within reasonable payload
+// size for a single spoken reply, since synthesizeSpeech's input is already
+// capped at TTS_MAX_INPUT_CHARS before this is ever called.
+async function replyToTeamsWithAudio(activity, text, audioBuffer) {
+  const token = await getBotToken();
+  const serviceUrl = activity.serviceUrl.replace(/\/$/, '');
+  const url = `${serviceUrl}/v3/conversations/${activity.conversation.id}/activities/${activity.id}`;
+  const replyRes = await fetch(url, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      type: 'message',
+      text,
+      attachments: [{
+        contentType: 'audio/mp3',
+        contentUrl: `data:audio/mp3;base64,${audioBuffer.toString('base64')}`,
+        name: 'voice-reply.mp3',
+      }],
+    }),
+  });
+  if (!replyRes.ok) {
+    logger.error('Teams voice reply failed', { status: replyRes.status, body: await replyRes.text() });
+  }
+}
+
 // ── /notify endpoint — send a proactive Teams message to Michael ──────────────
 async function handleNotify(req, res) {
   const auth = req.headers['x-execute-secret'] || req.headers['authorization']?.replace('Bearer ', '');
@@ -309,6 +339,46 @@ function runSerializedPerSession(sessionId, fn) {
   return run;
 }
 
+// ── Teams voice memos ────────────────────────────────────────────────────────
+// A voice memo arrives as a single `audio/*` attachment, same download/auth
+// mechanics as an image attachment above, but piped through OpenAI's Whisper
+// API for transcription instead of handed to the model as-is (Claude doesn't
+// take raw audio input). A voice memo typically carries no activity.text at
+// all, so the caller must fold this transcript in BEFORE deciding whether the
+// message has any actionable content.
+const AUDIO_CONTENT_TYPE_RE = /^audio\//i;
+const MAX_AUDIO_BYTES = 25 * 1024 * 1024; // generous cap for a several-minute voice memo
+
+async function extractAndTranscribeVoiceMemo(activity) {
+  const attachments = activity.attachments || [];
+  const audioAtt = attachments.find(a => a.contentUrl && AUDIO_CONTENT_TYPE_RE.test(a.contentType || ''));
+  if (!audioAtt) return null;
+
+  try {
+    const token = await getBotToken();
+    const res = await fetch(audioAtt.contentUrl, { headers: { Authorization: `Bearer ${token}` } });
+    if (!res.ok) {
+      logger.warn('Teams: voice memo download failed', { status: res.status, contentType: audioAtt.contentType });
+      return null;
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    if (buf.length > MAX_AUDIO_BYTES) {
+      logger.warn('Teams: voice memo too large, skipping', { size: buf.length, max: MAX_AUDIO_BYTES });
+      return null;
+    }
+    const { transcribeAudio } = await import('../tools/impl/openai-voice.js');
+    return await transcribeAudio({ audioBuffer: buf, mimeType: audioAtt.contentType, filename: audioAtt.name || 'voice-memo' });
+  } catch (err) {
+    logger.warn('Teams: voice memo transcription error', { err: err.message });
+    return null;
+  }
+}
+
+// A user asking for a spoken reply is the only trigger for voice output
+// (Michael's explicit choice — replies stay text-only otherwise, even when
+// the incoming message was itself a voice memo).
+const WANTS_VOICE_REPLY_RE = /\b(reply|respond|answer|say|read|talk|speak)\b.{0,30}\b(voice|audio|out loud|aloud)\b|\b(voice|audio)\b.{0,10}\breply\b/i;
+
 // ── Teams activity handler ────────────────────────────────────────────────────
 async function handleTeamsActivity(req, res) {
   let body = '';
@@ -341,9 +411,17 @@ async function processTeamsMessage(activity, sessionId) {
     return [];
   });
 
-  const userText = rawText || (images.length
-    ? '(Photo attached, no caption provided -- describe what you see and act on it if relevant to the current conversation.)'
-    : '');
+  // Transcribe any voice memo BEFORE the empty-text bail below -- a voice
+  // memo typically arrives with activity.text empty, carrying its entire
+  // content in the audio attachment. Bailing on !userText first would
+  // silently drop the whole message.
+  const voiceTranscript = await extractAndTranscribeVoiceMemo(activity);
+
+  const userText = voiceTranscript
+    ? (rawText ? `${rawText}\n\n[Voice memo transcript]: ${voiceTranscript}` : voiceTranscript)
+    : rawText || (images.length
+      ? '(Photo attached, no caption provided -- describe what you see and act on it if relevant to the current conversation.)'
+      : '');
   if (!userText) return;
 
   // Resolve WHO is messaging before anything else. Added 2026-08-24 —
@@ -359,6 +437,8 @@ async function processTeamsMessage(activity, sessionId) {
     await handleEmployeeMessage(activity, sender, sessionId, userText);
     return;
   }
+
+  const wantsVoiceReply = WANTS_VOICE_REPLY_RE.test(userText);
 
   // Persist conversation reference so we can send proactive messages later
   saveConversationRef(activity);
@@ -396,7 +476,23 @@ async function processTeamsMessage(activity, sessionId) {
     }),
   ]);
 
-  async function remember(text) {
+  async function remember(text, { voiceReply = false } = {}) {
+    if (voiceReply) {
+      try {
+        const { synthesizeSpeech } = await import('../tools/impl/openai-voice.js');
+        const audio = await synthesizeSpeech(text);
+        if (audio) {
+          await replyToTeamsWithAudio(activity, text, audio);
+          saveTurn(sessionId, 'assistant', text).catch(err =>
+            logger.warn('Teams: saveTurn (assistant) failed', { err: err.message })
+          );
+          return;
+        }
+        logger.warn('Teams: voice reply requested but synthesis unavailable, falling back to text');
+      } catch (err) {
+        logger.warn('Teams: voice reply synthesis error, falling back to text', { err: err.message });
+      }
+    }
     await replyToTeams(activity, text);
     await saveTurn(sessionId, 'assistant', text).catch(err =>
       logger.warn('Teams: saveTurn (assistant) failed', { err: err.message })
@@ -419,6 +515,22 @@ async function processTeamsMessage(activity, sessionId) {
     }
   } catch (err) {
     logger.warn('Teams: resolvePendingApprovalReply check failed (non-fatal)', { err: err.message });
+  }
+
+  // Same shape as the privacy-gate check above, for a different pending
+  // state machine: a yes/no reply to a Claude Code escalation Michael was
+  // asked to approve (see tools/impl/claude-code-escalation.js, triggered by
+  // the escalate_to_claude_code tool). Checked second since both are cheap
+  // no-ops in the overwhelmingly common case of neither being pending.
+  try {
+    const { resolvePendingEscalationReply } = await import('../tools/impl/claude-code-escalation.js');
+    const escalationResult = await resolvePendingEscalationReply(userText);
+    if (escalationResult) {
+      await remember(escalationResult.replyToMichael);
+      return;
+    }
+  } catch (err) {
+    logger.warn('Teams: resolvePendingEscalationReply check failed (non-fatal)', { err: err.message });
   }
 
   const intent = classifyIntent(userText);
@@ -460,7 +572,23 @@ async function processTeamsMessage(activity, sessionId) {
       // above. Mixing in raw cross-intent turns (e.g. an earlier CRM or dev
       // exchange in the same Teams conversation) would just add noise the
       // model could mistake for scheduling-relevant instructions.
-      ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true, images }));
+      ({ result } = await runAgent({ task: userText, taskType: 'scheduling', systemPromptOverride: systemPrompt, saveContext: true, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
+
+    } else if (intent === 'calendar') {
+      // Added 2026-08-25 -- see teams/router.js's isCalendarRescheduleRequest
+      // and tools/impl/block-schedule-reconciler.js's
+      // resolveCalendarConflictBySubject for the incident this fixes.
+      // extraMessages included (unlike scheduling's own branch) since this is
+      // an ordinary multi-turn back-and-forth over a Teams conversation, not
+      // a flow with its own session-keyed draft/rules context.
+      const calendarTask = `You received a Teams message from Michael about calendar rescheduling. Message: "${userText}"
+
+- If he's asking to prioritize a real meeting/event over one or more President Weekly Block Schedule blocks (e.g. "prioritize X over the client meeting block", "move my BTA meeting's conflicts"): use resolve_calendar_conflict with the real event's subject and date. It automatically finds every block overlapping that event and resolves it (shrink/split/delete) in favor of the real event. Do NOT read calendar events yourself and ask Michael to manually pick new slots for the displaced blocks -- that is exactly what this tool already does.
+- If resolve_calendar_conflict reports the event wasn't found or matched more than one event, relay its message back to Michael and ask him to clarify -- don't guess which event he meant.
+- For anything else calendar-related (reading a day's schedule, creating a new event, or directly updating/deleting one specific event by name), use your calendar tools directly.
+- Always confirm what actually happened: which blocks were shrunk, split, deleted, or kept, and any that were skipped as an intentional exemption.`;
+      retryTask = calendarTask; retryTaskType = 'calendar';
+      ({ result } = await runAgent({ task: calendarTask, taskType: 'calendar', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else if (intent === 'crm') {
       const crmTask = `You received a Teams message from Michael. Execute the action he is requesting using your SA, CRM, and CardDAV tools.
@@ -476,7 +604,7 @@ Message: "${userText}"
 - If Michael asks to schedule/book an estimate visit with a client: use schedule_estimate_visit. If it comes back needs_clarification, ask him which client he means instead of guessing.
 - Always confirm what you did: client name, SA IDs, actions taken.`;
       retryTask = crmTask; retryTaskType = 'crm';
-      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false, images }));
+      ({ result } = await runAgent({ task: crmTask, taskType: 'crm', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else if (intent === 'ops_alert') {
       // A system/watchdog alert was posted or pasted into live chat (see
@@ -505,17 +633,17 @@ Message: "${userText}"
     } else if (intent === 'dev') {
       const devTask = `Michael sent this Teams message:\n\n"${userText}"\n\nFollow the github-dev skill workflow. Reply with a scope proposal:\n- Restate the goal in 2-3 sentences\n- List the files that will be created or changed\n- Identify which repo this belongs in\n- State any assumptions\n- Ask Michael to confirm before you proceed\n\nDo not write any code yet. Return only the reply text.`;
       retryTask = devTask; retryTaskType = 'code';
-      ({ result } = await runAgent({ task: devTask, taskType: 'code', extraMessages, saveContext: false, images }));
+      ({ result } = await runAgent({ task: devTask, taskType: 'code', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else if (intent === 'dev_ambiguous') {
       result = `Want to make sure I handle this correctly — are you asking me to build or write code, or looking for information/advice? Reply "yes, build it" and I'll put together a scope plan.`;
 
     } else if (intent === 'report') {
       retryTaskType = 'report';
-      ({ result } = await runAgent({ task: userText, taskType: 'report', extraMessages, saveContext: false, images }));
+      ({ result } = await runAgent({ task: userText, taskType: 'report', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else {
-      ({ result } = await runAgent({ task: userText, taskType: 'general', extraMessages, images }));
+      ({ result } = await runAgent({ task: userText, taskType: 'general', extraMessages, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
     }
 
     // Dispatcher catches tool-level errors — runAgent won't throw on SA blocks.
@@ -546,7 +674,7 @@ Message: "${userText}"
         await remember(result);
       }
     } else {
-      await remember(result);
+      await remember(result, { voiceReply: wantsVoiceReply });
     }
   } catch (err) {
     logger.error('Teams handler error', { err: err.message });

@@ -201,5 +201,6 @@ export async function getCalendarChanges({ mailbox, lookAheadDays = 60 }) {
       organizer: e.organizer?.emailAddress?.address,
       responseStatus: e.responseStatus?.response,
       isCancelled: e.isCancelled,
+      isAllDay: e.isAllDay,
     }));
 }
