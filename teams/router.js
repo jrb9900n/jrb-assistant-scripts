@@ -50,6 +50,27 @@ export function isCrmActionRequest(text) {
   return /\b(ticket|estimate|quote|job|waiting list|service autopilot|\bsa\b|client|lead|crm|follow.?up|call them|reach out|contact form|new customer|new lead|carddav|provision carddav|revoke carddav|card.?dav)\b/.test(t);
 }
 
+// Confirmed live 2026-08-24: "we need to work on the calendar re-scheduling
+// feature... prioritize [my BTA meeting] over the client meeting block"
+// tripped isCrmActionRequest's bare \bclient\b token and routed to 'crm',
+// whose tool set has zero calendar read/write (only BOOKING_TOOLS's
+// availability-check/book-new-time) -- the bot correctly (but unhelpfully)
+// said it could only check availability. "Client Meeting Block" and "Direct
+// Report / Approval Window" are literal named blocks in Michael's own
+// President Weekly Block Schedule (see CLAUDE.md's Autonomous Schedule
+// Manager section), so any request to move/reprioritize them will keep
+// hitting this collision unless caught first. Checked ahead of
+// isCrmActionRequest in classifyIntent below for that reason -- same
+// "narrower, more specific signal wins" precedent as isReportRequest's
+// email/inbox carve-out.
+export function isCalendarRescheduleRequest(text) {
+  const t = normalise(text);
+  if (t === null) return false;
+  const rescheduleVerbs = /\b(reschedul\w*|move|prioriti[sz]e|bump|shift|displace|free up|clear (my|the)|swap|conflict)\b/;
+  const calendarNouns = /\b(calendar|meeting|block|slot|invite|appointment)\b/;
+  return rescheduleVerbs.test(t) && calendarNouns.test(t);
+}
+
 export function isSchedulingRequest(text) {
   const t = normalise(text);
   if (t === null) return false;
@@ -108,7 +129,7 @@ export function isApprovalReply(text) {
 }
 
 /**
- * Classify a message into one of: ops_alert | scheduling | crm | dev | dev_ambiguous | report | general
+ * Classify a message into one of: ops_alert | calendar | scheduling | crm | dev | dev_ambiguous | report | general
  * Used by both the Teams bot and the email poller.
  *
  * Priority order rationale:
@@ -130,21 +151,30 @@ export function isApprovalReply(text) {
  *      not actually work. Revisit with Michael before changing this
  *      ordering again — see [[feedback-sa-terminology]]'s "ask before
  *      narrowing a heuristic" precedent for the same class of judgment call.
- *   2. CRM is checked before scheduling because a message can contain both
+ *   2. Calendar-reschedule is checked next, ahead of CRM -- a request to
+ *      move/reprioritize a named block ("client meeting block", "direct
+ *      report window") would otherwise trip isCrmActionRequest's bare
+ *      \bclient\b token and land in 'crm', whose tool set has no calendar
+ *      read/write at all. Confirmed live 2026-08-24: exactly this collision
+ *      routed "prioritize my BTA meeting over the client meeting block" to
+ *      'crm', and the bot correctly (but unhelpfully) said it could only
+ *      check availability. See isCalendarRescheduleRequest's own comment.
+ *   3. CRM is checked before scheduling because a message can contain both
  *      scheduling vocabulary AND explicit CRM signals (e.g. "schedule a follow-
  *      up call with new lead Dave").  A CRM signal is a stronger, more specific
  *      routing indicator and must not be silently dropped.
- *   3. Scheduling follows CRM — purely scheduling messages have no CRM tokens.
- *   4. Dev intents come next (explicit before ambiguous).
- *   5. Report last before the generic fallback.
+ *   4. Scheduling follows CRM — purely scheduling messages have no CRM tokens.
+ *   5. Dev intents come next (explicit before ambiguous).
+ *   6. Report last before the generic fallback.
  */
 export function classifyIntent(text) {
   if (typeof text !== 'string' || !text) return 'general';
-  if (isOpsAlertLike(text))      return 'ops_alert';
-  if (isCrmActionRequest(text))  return 'crm';
-  if (isSchedulingRequest(text)) return 'scheduling';
-  if (isExplicitDevTask(text))   return 'dev';
-  if (isAmbiguousDevTask(text))  return 'dev_ambiguous';
-  if (isReportRequest(text))     return 'report';
+  if (isOpsAlertLike(text))              return 'ops_alert';
+  if (isCalendarRescheduleRequest(text)) return 'calendar';
+  if (isCrmActionRequest(text))          return 'crm';
+  if (isSchedulingRequest(text))         return 'scheduling';
+  if (isExplicitDevTask(text))           return 'dev';
+  if (isAmbiguousDevTask(text))          return 'dev_ambiguous';
+  if (isReportRequest(text))             return 'report';
   return 'general';
 }

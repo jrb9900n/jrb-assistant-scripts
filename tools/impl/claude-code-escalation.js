@@ -47,6 +47,14 @@ const ALLOWED_TOOLS = 'mcp__jrb-agent__run_task,mcp__jrb-agent__get_status,mcp__
 // minute) but bounded.
 const ESCALATION_TIMEOUT_MS = 8 * 60 * 1000;
 const ESCALATION_MAX_BUDGET_USD = process.env.ESCALATION_MAX_BUDGET_USD ?? '3';
+// A pending escalation Michael never explicitly answered (moved on to
+// something else, or replied in a way isApprovalReply doesn't parse as
+// yes/no) shouldn't linger forever -- found live 2026-08-24/25: three
+// separate unrelated pending rows piled up in one evening's conversation,
+// all silently waiting to turn his next actual "yes" into a confusing "you
+// have 3 pending escalations, which one?" prompt. Auto-deny anything this
+// stale before creating a new one for the same conversation.
+const STALE_PENDING_MS = 30 * 60 * 1000;
 
 // ── Called from the escalate_to_claude_code tool handler (dispatcher.js) ───
 // context (sender, activity, sessionId) comes from the TRUSTED context
@@ -54,6 +62,18 @@ const ESCALATION_MAX_BUDGET_USD = process.env.ESCALATION_MAX_BUDGET_USD ?? '3';
 // pattern as privacy-gate.js's requestEmployeeApproval.
 export async function requestEscalation({ activity, sessionId, task, taskType, reason }) {
   const db = supabase();
+
+  const staleCutoff = new Date(Date.now() - STALE_PENDING_MS).toISOString();
+  const { error: expireError } = await db
+    .from('claude_code_escalations')
+    .update({ status: 'denied', resolved_at: new Date().toISOString() })
+    .eq('session_id', sessionId)
+    .eq('status', 'pending')
+    .lt('created_at', staleCutoff);
+  if (expireError) {
+    logger.warn('claude-code-escalation: stale-pending cleanup failed (non-fatal)', { err: expireError.message });
+  }
+
   const { data: row, error } = await db
     .from('claude_code_escalations')
     .insert({

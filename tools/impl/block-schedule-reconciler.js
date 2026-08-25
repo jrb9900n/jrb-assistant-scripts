@@ -22,7 +22,7 @@
 // direction is bad: silently displacing an intentional co-location, or
 // silently leaving a genuine conflict unresolved.
 
-import { getCalendarViewWithCategories, updateCalendarEvent, deleteCalendarEvent, acceptCalendarEvent, toLocalNaiveFromUtc } from './m365.js';
+import { getCalendarViewWithCategories, updateCalendarEvent, deleteCalendarEvent, acceptCalendarEvent, toLocalNaiveFromUtc, findCalendarEventsBySubject } from './m365.js';
 import { BLOCK_CATEGORY } from './calendar-watch.js';
 import { classifyBlockTier } from './scheduling-visits.js';
 import { logger } from '../../core/logger.js';
@@ -165,4 +165,45 @@ export async function reconcileRealEventAgainstBlocks({ mailbox, realEvent }) {
   }
 
   return { skipped: null, accepted, resolvedActions, exempted };
+}
+
+/**
+ * Conversational entry point into the same auto-displacement machinery
+ * above, for a Teams request like "prioritize my BTA meeting over the block
+ * schedule" -- previously the model had no way to invoke this logic on
+ * demand at all (reconcileRealEventAgainstBlocks was only ever called from
+ * scheduler/cron.js's calendar_change_watch task), so it would improvise
+ * from raw calendar reads and end up asking Michael to hand-pick new slots
+ * for every displaced block instead of just running the priority-order
+ * resolution that already exists for exactly this case.
+ *
+ * Looks the real event up by a subject substring + local date rather than
+ * requiring an event id, since that's how Michael actually refers to it in
+ * chat ("my BTA meeting Thursday"). Never guesses on an ambiguous or missing
+ * match -- same convention as scheduleEstimateVisit's client lookup.
+ */
+// mailbox defaults to Michael's own address, not left to the individual
+// helper functions' own inconsistent defaults -- getCalendarViewWithCategories
+// falls back to USER() (the ASSISTANT's mailbox, M365_USER_EMAIL) when
+// userEmail is undefined, not Michael's. This whole block-schedule system is
+// Michael-specific by design (see calendar-watch.js/cron.js, which always
+// pass his address explicitly), so an undefined mailbox here must not
+// silently read/write the wrong calendar -- the exact class of bug already
+// found and fixed once in list_calendar_events (see CLAUDE.md's "Four bugs"
+// section).
+export async function resolveCalendarConflictBySubject({ mailbox = 'michael@jrboehlke.com', eventSubjectContains, date }) {
+  const matches = await findCalendarEventsBySubject({ userEmail: mailbox, subjectContains: eventSubjectContains, date });
+  if (matches.length === 0) {
+    return { found: false, message: `No calendar event matching "${eventSubjectContains}" found on ${date}. Confirm the exact event name and date with Michael before trying again.` };
+  }
+  if (matches.length > 1) {
+    return {
+      found: false,
+      message: `Multiple events match "${eventSubjectContains}" on ${date}: ${matches.map(m => `"${m.subject}" at ${m.start}`).join('; ')}. Ask Michael which one he means.`,
+      candidates: matches.map(m => ({ subject: m.subject, start: m.start, end: m.end })),
+    };
+  }
+  const realEvent = matches[0];
+  const outcome = await reconcileRealEventAgainstBlocks({ mailbox, realEvent });
+  return { found: true, event: { subject: realEvent.subject, start: realEvent.start, end: realEvent.end }, ...outcome };
 }

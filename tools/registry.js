@@ -1139,6 +1139,28 @@ const ESCALATION_TOOLS = [
   },
 ];
 
+// Conversational entry point into the Phase 3 auto-displacement machinery
+// (see tools/impl/block-schedule-reconciler.js, built 2026-08-24) -- built
+// 2026-08-25 after a live Teams request ("prioritize my BTA meeting over
+// the client meeting block") got no useful help: the model had no tool to
+// actually run that already-built priority-order resolution logic on
+// demand, so it read raw calendar data and just kept asking Michael to
+// hand-pick new slots for every displaced block instead.
+const CALENDAR_CONFLICT_TOOLS = [
+  {
+    name: 'resolve_calendar_conflict',
+    description: "Use this when Michael asks to prioritize a real meeting/event over one or more President Weekly Block Schedule blocks (e.g. \"move my BTA meeting's conflicts\", \"prioritize X over the client meeting block\"). Finds the real event by a distinctive subject substring + local date, then automatically resolves EVERY block that overlaps it in favor of the real event -- shrinking, splitting, or removing just the conflicting occurrence(s), any tier including PROTECTED/DEEP WORK, per Michael's confirmed rule that real commitments always win over block scaffolding. Do NOT manually read calendar events and ask Michael to pick new slots yourself for this kind of request -- that's exactly what this tool already does. If it reports the event wasn't found or was ambiguous, relay that back and ask Michael to clarify rather than guessing.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        event_subject_contains: { type: 'string', description: "A distinctive substring of the real event's subject, e.g. 'BTA' or 'Breakthrough Academy'." },
+        date: { type: 'string', description: 'The local (Central Time) date the event falls on, YYYY-MM-DD.' },
+      },
+      required: ['event_subject_contains', 'date'],
+    },
+  },
+];
+
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...ESCALATION_TOOLS],
@@ -1161,9 +1183,9 @@ const TOOL_MAP = {
   employee:   [...EMPLOYEE_TOOLS, ...BOOKING_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
   scheduling: [...SCHEDULING_TOOLS, ...BOOKING_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
-  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
 };
 
 export function getTools(taskType) {
