@@ -1027,11 +1027,14 @@ const SA_TOOLS = [
   },
 ];
 
-// Marketing agent tools (built 2026-08-25) — see tools/impl/marketing-segments.js
-// for the segment-identification methodology and the three real bugs it
-// encodes fixes for. Deliberately no tool here can send an email or spend/
-// change ad budget — see TOOL_MAP.marketing's comment for why that's a hard
-// structural guarantee, not just prompt discipline.
+// Marketing agent tools (built 2026-08-25, create_ads_flag added 2026-08-26) —
+// see tools/impl/marketing-segments.js for the segment-identification
+// methodology and the three real bugs it encodes fixes for. Deliberately no
+// tool here can send an email, create/modify a live campaign, or authorize
+// spend directly — see TOOL_MAP.marketing's comment for why that's a hard
+// structural guarantee, not just prompt discipline. create_ads_flag CAN write
+// into the separate Google Ads agent's own database, but only with a source
+// tag that agent's own pipeline refuses to ever auto-execute.
 const MARKETING_TOOLS = [
   {
     name: 'identify_marketing_segment',
@@ -1060,6 +1063,21 @@ const MARKETING_TOOLS = [
         notes:        { type: 'string', description: 'Any additional context worth recording' },
       },
       required: ['campaignName', 'saTagNames', 'clientCount'],
+    },
+  },
+  {
+    name: 'create_ads_flag',
+    description: 'Surface a genuinely new Google Ads idea into the SAME daily digest email the separate Google Ads agent already sends Michael — for ideas worth his attention that you cannot and must not act on yourself. This does NOT create or modify a live campaign, and it can never be auto-executed: it lands in that agent\'s flags table tagged with a non-native source, which its own approval pipeline structurally refuses to run (Approve is refused outright; only Reject/dismiss works, and that never executes anything). Use a stable dedupKey so re-surfacing the same idea across weeks updates one entry instead of piling up duplicates — mirrors identify_marketing_segment\'s dedup_key convention.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        priority: { type: 'string', enum: ['low', 'medium', 'high', 'urgent'], description: 'How urgently this deserves Michael\'s attention' },
+        subject:  { type: 'string', description: 'Short one-line summary of the idea' },
+        details:  { type: 'string', description: 'What you observed and why this idea is worth raising' },
+        recommendedAction: { type: 'string', description: 'What Michael (or he, relaying to the Ads agent himself) could do about it — this is informational only, never executed automatically' },
+        dedupKey: { type: 'string', description: 'Stable identifier for this underlying idea in lowercase snake_case, e.g. \'retaining_walls:seasonal_budget_bump\' — reuse the identical string if you\'d otherwise re-raise the same idea later' },
+      },
+      required: ['priority', 'subject', 'details', 'recommendedAction'],
     },
   },
   {
@@ -1445,9 +1463,13 @@ const TOOL_MAP = {
   // sa_dispatch_job/sa_set_billing_defaults/sa_update_route_order/etc,
   // write tools with no use here that directly contradict the "propose and
   // draft only" boundary this taskType's own agent persona asserts. The
-  // existing Google Ads Python agent's own tactical autonomy is untouched
-  // by this taskType — see tools/impl/marketing-segments.js's header for
-  // why Ads-side changes aren't wired in here at all yet.
+  // existing Google Ads Python agent's own tactical autonomy is untouched by
+  // this taskType — see tools/impl/marketing-segments.js's header. The one
+  // exception is create_ads_flag (in MARKETING_TOOLS, built 2026-08-26): it
+  // can WRITE into that agent's own flags table, but only ever with a
+  // structurally non-native source that agent's own approval pipeline
+  // refuses to execute — see tools/impl/marketing-ads-flags.js's header.
+  // It cannot create/modify a campaign or spend directly.
   marketing:  [...SA_TOOLS.filter(t => t.name.includes('tag')), ...EMAIL_TOOLS.filter(t => t.name !== 'send_email' && t.name !== 'send_draft_reply'), ...TEAMS_TOOLS, ...MARKETING_TOOLS, ...ESCALATION_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
 };

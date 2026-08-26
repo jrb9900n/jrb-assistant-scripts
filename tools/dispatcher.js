@@ -33,6 +33,7 @@ import { sendProactiveMessage } from '../teams/notify.js';
 import { createClient } from '@supabase/supabase-js';
 import * as marketingSegments  from './impl/marketing-segments.js';
 import * as marketingCampaigns from './impl/marketing-campaigns.js';
+import * as marketingAdsFlags  from './impl/marketing-ads-flags.js';
 import { readFileSync } from 'node:fs';
 
 // Single hardcoded path to the shared marketing business-context doc (also
@@ -206,6 +207,7 @@ const HANDLERS = {
   // and tools/impl/marketing-campaigns.js.
   identify_marketing_segment:       (i) => marketingSegments.identifySegment(i),
   create_marketing_campaign:        (i) => marketingCampaigns.createMarketingCampaign(i),
+  create_ads_flag:                  (i) => marketingAdsFlags.createAdsFlag(i),
   update_marketing_campaign_status: (i) => marketingCampaigns.updateMarketingCampaignStatus(i),
   list_marketing_campaigns:         (i) => marketingCampaigns.listMarketingCampaigns(i),
   get_marketing_campaign:           (i) => marketingCampaigns.getMarketingCampaign(i),

@@ -20,43 +20,13 @@
 // google_ads_bridge.py without a separate explicit scope decision, since
 // this module is reachable from Teams/report task types.
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import { existsSync } from 'fs';
 import { fileURLToPath } from 'url';
-
-const execFileAsync = promisify(execFile);
+import { runPythonBridge } from './python-bridge.js';
 
 const BRIDGE_SCRIPT = fileURLToPath(new URL('./google_ads_bridge.py', import.meta.url));
 
-// Same fallback pattern as fleetsharp.js's EDGE_PATH/CHROME_PATH -- absolute
-// path first (matches this machine's actual install), falling back to
-// whatever "python" resolves to on PATH (e.g. a different machine/profile).
-const PYTHON_PATH = 'C:\\Users\\Assistant\\AppData\\Local\\Programs\\Python\\Python312\\python.exe';
-const PYTHON_EXE = existsSync(PYTHON_PATH) ? PYTHON_PATH : 'python';
-
 async function runBridge(command, args = {}) {
-  let stdout;
-  try {
-    ({ stdout } = await execFileAsync(PYTHON_EXE, [BRIDGE_SCRIPT, command, JSON.stringify(args)], {
-      timeout: 30_000,
-      maxBuffer: 10 * 1024 * 1024,
-    }));
-  } catch (err) {
-    // execFile rejects on non-zero exit, but the bridge still prints a JSON
-    // error to stdout before exiting 1 -- prefer that structured message
-    // over the generic "Command failed" error execFile throws.
-    stdout = err.stdout;
-    if (!stdout) throw err;
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    throw new Error(`Google Ads bridge returned non-JSON output: ${stdout.slice(0, 500)}`);
-  }
-  if (!parsed.ok) throw new Error(parsed.error || 'Google Ads bridge failed with no error message');
-  return parsed.data;
+  return runPythonBridge(BRIDGE_SCRIPT, command, args, { errorLabel: 'Google Ads bridge' });
 }
 
 // ── Public read-only report functions ──────────────────────────
