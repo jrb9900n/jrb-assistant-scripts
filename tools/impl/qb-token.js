@@ -311,10 +311,23 @@ export function buildQBAuthUrl(company = 'jrb', state) {
   return `https://appcenter.intuit.com/connect/oauth2?${params}`;
 }
 
-/** Recovers the company key encoded by buildQBAuthUrl from the callback's `state` param. Defaults to 'jrb' for old links without a prefix. */
+/**
+ * Recovers the company key encoded by buildQBAuthUrl from the callback's `state` param.
+ * Throws on anything that isn't a recognized company prefix -- this used to silently
+ * default to 'jrb', which meant a mangled/dropped state param (confirmed live 2026-08-25:
+ * a propco reauth's state didn't survive the redirect on a second machine) got treated as
+ * a legitimate 'jrb' reauth and overwrote production JRB's refresh token with one scoped
+ * to a different QBO realm, breaking the live jrb connection until manually caught and
+ * re-authorized. Guessing wrong here is a production incident, not a graceful fallback --
+ * an ambiguous state must fail loudly so the reauth can be retried, never silently land on
+ * whichever company happens to be the default.
+ */
 export function parseQBAuthState(state) {
   const prefix = String(state || '').split(':')[0];
-  return QB_COMPANIES[prefix] ? prefix : 'jrb';
+  if (!QB_COMPANIES[prefix]) {
+    throw new Error(`QB reauth state param missing or unrecognized ("${state}") -- refusing to guess which company this belongs to. Retry the reauth link; if this keeps happening, the state param is being dropped/altered before it reaches the callback.`);
+  }
+  return prefix;
 }
 
 // ── Read current refresh token from Credential Manager ────────
