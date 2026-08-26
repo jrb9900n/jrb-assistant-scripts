@@ -19,6 +19,18 @@ export const PYTHON_EXE = existsSync(PYTHON_PATH) ? PYTHON_PATH : 'python';
 // script that lives in a different repo/directory).
 export async function runPythonBridge(scriptPath, command, args = {}, opts = {}) {
   const { timeout = 30_000, maxBuffer = 10 * 1024 * 1024, errorLabel = 'Python bridge' } = opts;
+
+  // Fail fast with an actionable message rather than an opaque spawn error
+  // if the bridge script doesn't exist at the expected path. This is
+  // especially important for cross-repo paths (e.g. external_flag_bridge.py)
+  // that can't be validated at import time.
+  if (!existsSync(scriptPath)) {
+    throw new Error(
+      `${errorLabel}: bridge script not found at '${scriptPath}'. ` +
+      `Ensure the target repo is present and the path is correct.`
+    );
+  }
+
   let stdout;
   try {
     ({ stdout } = await execFileAsync(PYTHON_EXE, [scriptPath, command, JSON.stringify(args)], { timeout, maxBuffer }));
