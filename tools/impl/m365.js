@@ -141,15 +141,16 @@ export async function getEmail({ email_id, userEmail } = {}) {
   };
 }
 
-export async function draftEmail({ to, subject, body, cc = [] }) {
+export async function draftEmail({ to, subject, body, cc = [], userEmail } = {}) {
+  const user = userEmail ?? USER();
   const message = {
     subject,
     body: { contentType: 'HTML', content: withSignOff(body) },
     toRecipients: to.map(a => ({ emailAddress: { address: a } })),
     ccRecipients: cc.map(a => ({ emailAddress: { address: a } })),
   };
-  const data = await graph('POST', `/users/${USER()}/messages`, message);
-  logger.info('Email drafted', { id: data.id, subject });
+  const data = await graph('POST', `/users/${user}/messages`, message);
+  logger.info('Email drafted', { id: data.id, subject, user });
   return { draft_id: data.id, subject, message: 'Draft created — not sent.' };
 }
 

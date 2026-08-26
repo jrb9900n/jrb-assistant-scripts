@@ -85,14 +85,15 @@ const EMAIL_TOOLS = [
   },
   {
     name: 'draft_email',
-    description: 'Create a draft email in Microsoft 365. Does NOT send — returns draft ID for review.',
+    description: 'Create a draft email in Microsoft 365. Does NOT send — returns draft ID for review. Defaults to the assistant\'s own mailbox; pass userEmail: "michael@jrboehlke.com" to create the draft in Michael\'s mailbox instead (e.g. so he can review/send it himself).',
     input_schema: {
       type: 'object',
       properties: {
-        to:      { type: 'array', items: { type: 'string' }, description: 'Recipient email addresses' },
-        subject: { type: 'string' },
-        body:    { type: 'string', description: 'Plain text or HTML body' },
-        cc:      { type: 'array', items: { type: 'string' } },
+        to:        { type: 'array', items: { type: 'string' }, description: 'Recipient email addresses' },
+        subject:   { type: 'string' },
+        body:      { type: 'string', description: 'Plain text or HTML body' },
+        cc:        { type: 'array', items: { type: 'string' } },
+        userEmail: { type: 'string', description: 'Mailbox to create the draft in. Omit for the assistant\'s own mailbox, or pass "michael@jrboehlke.com" for Michael\'s.' },
       },
       required: ['to', 'subject', 'body'],
     },

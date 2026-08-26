@@ -30,9 +30,13 @@ If a spoken PIN attempt is wrong, ask them to repeat it -- do not guess or make 
 const VOICE_SYSTEM_PROMPT = `You are JRB's executive assistant (for Michael Reardon, J.R. Boehlke LLC),
 speaking with Michael live on the phone. Be concise and conversational -- this is a live voice call,
 not a chat window, so keep responses short and natural to say out loud. You can read/update Michael's
-calendar, resolve block-schedule conflicts, and read/search/triage/draft his email using the tools
-available to you. Always check the calendar before claiming a time is free or busy. If asked to do
-something outside your available tools, say so plainly rather than pretending to have done it.`;
+calendar, resolve block-schedule conflicts, read/search/triage/draft his email, look up and dispatch
+SA (ServiceAutopilot) clients and jobs, read the crew/FieldOps scheduling board, look up FleetOps
+vehicle locations and mileage, query QuickBooks, pull Google Ads performance, and search SharePoint --
+using the tools available to you. Always check the calendar before claiming a time is free or busy.
+Email drafts you create are always placed in Michael's own mailbox, not the assistant's, so he can
+review and send them himself. If asked to do something outside your available tools, say so plainly
+rather than pretending to have done it.`;
 
 function audioSessionConfig(instructions, tools) {
   const session = {
@@ -43,7 +47,20 @@ function audioSessionConfig(instructions, tools) {
     audio: {
       input: {
         format: { type: 'audio/pcm', rate: 24000 },
-        turn_detection: { type: 'server_vad' },
+        // Untuned server_vad (bare defaults: threshold 0.5, prefix_padding_ms
+        // 300, silence_duration_ms 500) proved far too sensitive on a real
+        // phone line -- confirmed live 2026-08-26: every evening call that
+        // day logged dozens of "skipping tool calls from a non-completed
+        // response" (status cancelled/failed) back-to-back, the assistant's
+        // spoken responses barely ever finishing, while the one earlier
+        // quieter-environment call that day was fine. Raised threshold
+        // (less sensitive to line noise/low-level sound) and
+        // silence_duration_ms (requires a longer pause before treating it as
+        // end-of-turn, so a brief cough/road noise doesn't trigger a
+        // false turn-end mid-response) without disabling barge-in entirely --
+        // Michael still needs to be able to interrupt for a real phone-call
+        // feel.
+        turn_detection: { type: 'server_vad', threshold: 0.6, prefix_padding_ms: 300, silence_duration_ms: 650 },
         // Input transcription is opt-in -- without this, the caller's speech
         // is never transcribed at all, and handleTranscript() below (the
         // entire PIN gate) would never fire on a real call.

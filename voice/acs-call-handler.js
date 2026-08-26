@@ -74,6 +74,18 @@ export async function handleCallbackEvent(evt) {
   const callConnectionId = evt.data?.callConnectionId;
   if (!callConnectionId) return;
 
+  // NOTE (2026-08-26): confirmed live that this branch never actually fires
+  // -- zero 'Voice bridge: call ended' log lines across all 6 real calls
+  // that day, including short ones nowhere near the trial number's 5-min-
+  // per-call cap. Two evening calls' activity did stop almost exactly 5:00
+  // after being answered (4:48 and 5:01 elapsed), consistent with the trial
+  // cap hard-cutting the underlying PSTN/media path in a way that never
+  // reaches Call Automation as a normal disconnect -- but that doesn't
+  // explain the sub-cap calls also never logging this. Left in place as
+  // defense-in-depth / the "proper" cleanup path for whenever a real
+  // (non-trial) number removes the cap variable, but attachAcsMediaSocket's
+  // ws.on('close') handler in this file is the cleanup path that's actually
+  // been reliable -- don't assume this one is running in production.
   if (evt.eventType === 'Microsoft.Communication.CallDisconnected' ||
       evt.eventType === 'Microsoft.Communication.MediaStreamingFailed') {
     const session = sessions.get(callConnectionId);
@@ -143,8 +155,21 @@ export function attachAcsMediaSocket(ws, headers) {
   });
 
   ws.on('close', () => {
+    // Primary cleanup path, not just a backstop: confirmed live 2026-08-26
+    // that handleCallbackEvent's 'Microsoft.Communication.CallDisconnected'
+    // branch (the intended cleanup trigger -- closes openaiClient AND
+    // removes the sessions.js entry) never actually fired for any of that
+    // day's 6 real calls, including ones that ended well under the trial
+    // number's 5-min-per-call cap -- so it isn't solely a trial-cap artifact.
+    // This media-socket close is a TCP-level event ACS always delivers when
+    // a call's audio stream ends, regardless of whether the separate HTTP
+    // callback for CallDisconnected ever reaches this server, so it's the
+    // reliable place to do full cleanup. Without the sessions.remove() call
+    // here, session-state.js's Map only ever grew -- openaiClient was closed
+    // but the stale entry (fromNumber, authState, etc.) never got evicted.
     session.openaiClient?.close();
     session.wsToAcs = null;
+    sessions.remove(callConnectionId);
   });
 
   ws.on('error', (err) => {
