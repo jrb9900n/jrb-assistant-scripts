@@ -144,7 +144,7 @@ export async function getEmail({ email_id, userEmail } = {}) {
 export async function draftEmail({ to, subject, body, cc = [] }) {
   const message = {
     subject,
-    body: { contentType: 'HTML', content: body },
+    body: { contentType: 'HTML', content: withSignOff(body) },
     toRecipients: to.map(a => ({ emailAddress: { address: a } })),
     ccRecipients: cc.map(a => ({ emailAddress: { address: a } })),
   };
@@ -962,6 +962,15 @@ export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {})
   }));
 }
 
+// Returns text unchanged if it already ends with "Michael" (case-insensitive, trailing
+// punctuation allowed); otherwise appends it as a default sign-off. Applied to all
+// drafted message bodies (new drafts and replies) per Michael's standing preference.
+function withSignOff(text) {
+  const trimmed = (text || '').trim();
+  if (/michael[.,!]?\s*$/i.test(trimmed)) return text;
+  return `<br><br>Michael`;
+}
+
 // Creates a draft reply in Michael's mailbox, preserving the email thread.
 // Returns the draft message ID so it can be sent later or reviewed in Outlook.
 //
@@ -1003,7 +1012,7 @@ export async function createReplyDraft({ userEmail, email_id, body } = {}) {
   // compose-area inline style (Calibri 12pt, black). Without this wrapper, new text
   // renders in Outlook's default display font, visually mismatched against the Calibri
   // attribution block Exchange generates below the separator.
-  const styledReplyText = `<div style="font-family: Calibri, Arial, Helvetica, sans-serif; font-size: 12pt; color: rgb(0, 0, 0);">${body}</div>`;
+  const styledReplyText = `<div style="font-family: Calibri, Arial, Helvetica, sans-serif; font-size: 11pt; color: rgb(0, 0, 0);">${withSignOff(body)}</div>`;
 
   let combinedContent;
   if (existingContent.trim()) {
