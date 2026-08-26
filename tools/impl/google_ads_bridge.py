@@ -84,9 +84,10 @@ def get_campaign_metrics(client, args):
     require_dates(args)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
-        SELECT campaign.id, campaign.name, campaign.status,
+        SELECT campaign.id, campaign.name, campaign.status, campaign_budget.amount_micros,
                metrics.impressions, metrics.clicks, metrics.cost_micros,
-               metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc
+               metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc,
+               metrics.cost_per_conversion
         FROM campaign
         WHERE segments.date BETWEEN '{args['startDate']}' AND '{args['endDate']}'
         {name_filter(args)}
@@ -97,11 +98,13 @@ def get_campaign_metrics(client, args):
         "id": str(r.campaign.id),
         "name": r.campaign.name,
         "status": r.campaign.status.name,
+        "dailyBudgetUsd": round(r.campaign_budget.amount_micros / 1e6, 2) if r.campaign_budget.amount_micros else None,
         "impressions": r.metrics.impressions,
         "clicks": r.metrics.clicks,
         "costUsd": round(r.metrics.cost_micros / 1e6, 2),
         "conversions": round(r.metrics.conversions, 2),
         "conversionsValue": round(r.metrics.conversions_value, 2),
+        "cpaUsd": round(r.metrics.cost_per_conversion / 1e6, 2) if r.metrics.conversions > 0 else None,
         "ctr": round(r.metrics.ctr, 4),
         "avgCpcUsd": round(r.metrics.average_cpc / 1e6, 2),
     } for r in rows]
