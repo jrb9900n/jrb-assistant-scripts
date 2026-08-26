@@ -990,6 +990,121 @@ const SA_TOOLS = [
       required: ['invoiceIds'],
     },
   },
+  {
+    name: 'sa_get_clients_by_tag',
+    description: 'Bulk-find every Service Autopilot client/lead carrying a given tag, in one paginated call — much faster than checking sa_get_client_tags per client. Useful both for reading the existing "Client Type"/"Service Line" classification tags (Residential, Commercial - Direct, Commercial - HOA, Commercial - Property Mgmt, Municipal/Government, GC Subcontract, Commercial - General Contractor; Snow, Lawn/Landscape, Paving, Concrete) and for checking who currently holds a marketing campaign tag.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        tagId: { type: 'string', description: 'Tag GUID from sa_list_tags' },
+        max:   { type: 'number', description: 'Max clients to return — defaults to 8000. The underlying default is 5000 and silently truncates rather than erroring, so pass an explicit higher value for any tag that might cover more than that (e.g. "Residential" alone covers 8,700+ clients).', default: 8000 },
+      },
+      required: ['tagId'],
+    },
+  },
+  {
+    name: 'sa_find_or_create_tag',
+    description: 'Find an existing Service Autopilot tag by exact name (case-insensitive), or create it if it doesn\'t exist yet. Prefer this over sa_add_tag_to_client\'s built-in find-or-create when you need the tag\'s ID up front (e.g. to check who already holds it via sa_get_clients_by_tag) without also applying it to a client yet.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name:       { type: 'string', description: 'Tag name, e.g. "TEMP 2026 Recoat - Sealcoat Due"' },
+        categoryId: { type: 'string', description: 'Tag category GUID from sa_list_tag_categories — required only if the tag doesn\'t already exist' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'sa_find_or_create_tag_category',
+    description: 'Find an existing Service Autopilot tag category by exact name (case-insensitive), or create it if it doesn\'t exist yet. Use once to establish a new category (e.g. "Marketing Campaign") before creating campaign-specific tags under it via sa_find_or_create_tag.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'Category name, e.g. "Marketing Campaign"' },
+      },
+      required: ['name'],
+    },
+  },
+];
+
+// Marketing agent tools (built 2026-08-25) — see tools/impl/marketing-segments.js
+// for the segment-identification methodology and the three real bugs it
+// encodes fixes for. Deliberately no tool here can send an email or spend/
+// change ad budget — see TOOL_MAP.marketing's comment for why that's a hard
+// structural guarantee, not just prompt discipline.
+const MARKETING_TOOLS = [
+  {
+    name: 'identify_marketing_segment',
+    description: 'Identify a client re-engagement segment: everyone whose most recent invoiced service in a category is older than a recency threshold (measured from today, not a fixed date), excluding anyone with a matching estimate already in the current calendar year. Read-only — makes no writes. Returns clean candidates ready to tag, a flaggedForReview list (subcontractor/GC-pass-through-looking names, roster collisions, or no live SA match found) that need a human look before inclusion, and an excludedCurrentYearEstimate list showing who was excluded and why. Known service categories: Sealcoat, Crack Fill, Striping — ask before assuming a new category name works; it must be added to SERVICE_CATEGORY_LINE_ITEMS in code first with real, verified SA line-item names.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        serviceCategory: { type: 'string', description: 'One of the known service categories, e.g. "Sealcoat"' },
+        recencyThresholdDays: { type: 'number', description: 'How many days since last service counts as "due" — default 365', default: 365 },
+        excludeCurrentYearEstimates: { type: 'boolean', description: 'Exclude anyone with a matching estimate already this calendar year — default true, keep true unless you have a specific reason not to', default: true },
+      },
+      required: ['serviceCategory'],
+    },
+  },
+  {
+    name: 'create_marketing_campaign',
+    description: 'Log a new marketing campaign to the audit trail (marketing_campaigns table) — call this once per campaign, right after tagging its approved client list in SA, not before. Status starts as "proposed"; use update_marketing_campaign_status to move it through approved/applied/completed/removed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        campaignName: { type: 'string', description: 'Short human-readable name, e.g. "Sealcoat Re-engagement Q3 2026"' },
+        description:  { type: 'string', description: 'What this campaign targets and why' },
+        saTagNames:   { type: 'array', items: { type: 'string' }, description: 'The SA tag name(s) used for this campaign' },
+        saTagCategory: { type: 'string', description: 'The SA tag category name these tags live under' },
+        clientCount:  { type: 'number', description: 'How many clients were tagged' },
+        notes:        { type: 'string', description: 'Any additional context worth recording' },
+      },
+      required: ['campaignName', 'saTagNames', 'clientCount'],
+    },
+  },
+  {
+    name: 'update_marketing_campaign_status',
+    description: 'Update a marketing campaign\'s status as it moves through its lifecycle: proposed -> approved -> applied -> completed, or removed once its temporary tags have been cleared from SA.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id:        { type: 'string', description: 'Campaign id from create_marketing_campaign or list_marketing_campaigns' },
+        status:    { type: 'string', description: 'One of: proposed, approved, applied, completed, removed' },
+        notes:     { type: 'string', description: 'Optional note about this status change' },
+        appliedAt: { type: 'string', description: 'ISO timestamp — set when moving to "applied"' },
+        removedAt: { type: 'string', description: 'ISO timestamp — set when moving to "removed"' },
+      },
+      required: ['id', 'status'],
+    },
+  },
+  {
+    name: 'list_marketing_campaigns',
+    description: 'List marketing campaigns from the audit trail, optionally filtered by status. Check this before proposing a new segment/campaign, to avoid re-proposing something already applied or recently removed.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', description: 'Filter by status: proposed, approved, applied, completed, or removed' },
+        serviceCategory: { type: 'string', description: 'Filter by a keyword in the campaign description' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_marketing_campaign',
+    description: 'Fetch one marketing campaign\'s full record by id.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Campaign id' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'get_marketing_business_context',
+    description: 'Read J.R. Boehlke\'s current marketing business-context document — services, geography, target audience, value props, customer language, competitive landscape, seasonal intelligence, and brand voice. This is the SAME document the separate Google Ads agent uses, kept as one shared source of truth. Always call this before drafting any marketing content or forming a campaign recommendation, rather than relying on assumptions from training data.',
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
 ];
 
 const SCHEDULING_TOOLS = [
@@ -1314,6 +1429,26 @@ const TOOL_MAP = {
   dev_ambiguous: [...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  // Marketing agent (built 2026-08-25). `send_email` AND `send_draft_reply`
+  // are both deliberately excluded from the EMAIL_TOOLS spread — a single
+  // `!== 'send_email'` filter (the original version of this line) left
+  // `send_draft_reply` in, which routes to the same real Graph send call
+  // (m365.sendDraft -> POST /messages/{id}/send) under a different tool
+  // name, defeating the "nothing can send" guarantee entirely. This is a
+  // hard structural guarantee, not just prompt discipline, matching
+  // Michael's explicit requirement that every new campaign/send needs his
+  // approval first. draft_email and the calendar tools (also bundled in
+  // EMAIL_TOOLS) stay available. SA access is narrowed to just the
+  // tag-related tools this taskType's skills actually call (identify/apply
+  // only ever create/read/apply/remove tags) — the original `...SA_TOOLS`
+  // spread also granted sa_create_client/sa_create_job/sa_create_estimate/
+  // sa_dispatch_job/sa_set_billing_defaults/sa_update_route_order/etc,
+  // write tools with no use here that directly contradict the "propose and
+  // draft only" boundary this taskType's own agent persona asserts. The
+  // existing Google Ads Python agent's own tactical autonomy is untouched
+  // by this taskType — see tools/impl/marketing-segments.js's header for
+  // why Ads-side changes aren't wired in here at all yet.
+  marketing:  [...SA_TOOLS.filter(t => t.name.includes('tag')), ...EMAIL_TOOLS.filter(t => t.name !== 'send_email' && t.name !== 'send_draft_reply'), ...TEAMS_TOOLS, ...MARKETING_TOOLS, ...ESCALATION_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
 };
 

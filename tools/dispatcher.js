@@ -31,6 +31,15 @@ import { requestEmployeeApproval } from './impl/privacy-gate.js';
 import { requestEscalation } from './impl/claude-code-escalation.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 import { createClient } from '@supabase/supabase-js';
+import * as marketingSegments  from './impl/marketing-segments.js';
+import * as marketingCampaigns from './impl/marketing-campaigns.js';
+import { readFileSync } from 'node:fs';
+
+// Single hardcoded path to the shared marketing business-context doc (also
+// read by the separate google-ads-agent Python daemon) — deliberately not a
+// general file-read tool, to keep this capability's blast radius to exactly
+// this one document.
+const MARKETING_CONTEXT_PATH = 'C:\\Users\\Assistant\\google-ads-agent\\.agents\\product-marketing.md';
 
 const MICHAEL = 'michael@jrboehlke.com';
 
@@ -189,6 +198,25 @@ const HANDLERS = {
   sa_get_audit_trail:      (i) => sa.getAuditTrail(i),
   sa_get_invoice_status:   (i) => sa.getInvoiceStatuses(i),
   schedule_estimate_visit: (i) => scheduleEstimateVisit(i),
+  sa_get_clients_by_tag:   (i) => sa.getClientsByTag({ tagId: i.tagId, max: i.max ?? 8000 }),
+  sa_find_or_create_tag:   (i) => sa.findOrCreateTag(i),
+  sa_find_or_create_tag_category: (i) => sa.findOrCreateTagCategory(i),
+
+  // Marketing agent (built 2026-08-25) — see tools/impl/marketing-segments.js
+  // and tools/impl/marketing-campaigns.js.
+  identify_marketing_segment:       (i) => marketingSegments.identifySegment(i),
+  create_marketing_campaign:        (i) => marketingCampaigns.createMarketingCampaign(i),
+  update_marketing_campaign_status: (i) => marketingCampaigns.updateMarketingCampaignStatus(i),
+  list_marketing_campaigns:         (i) => marketingCampaigns.listMarketingCampaigns(i),
+  get_marketing_campaign:           (i) => marketingCampaigns.getMarketingCampaign(i),
+  get_marketing_business_context:   () => {
+    try {
+      return readFileSync(MARKETING_CONTEXT_PATH, 'utf8');
+    } catch (err) {
+      logger.warn('get_marketing_business_context: failed to read shared context doc', { path: MARKETING_CONTEXT_PATH, err: err.message });
+      return `Business context document is unavailable (${err.code === 'ENOENT' ? 'file not found' : err.message} at ${MARKETING_CONTEXT_PATH}). Do not guess at services/positioning/geography — flag this to Michael and ask him to confirm before proposing anything that depends on it.`;
+    }
+  },
 
   // Read-only, safe for anyone -- only ever surfaces free/busy windows, never
   // subjects/tiers/reasons.

@@ -541,6 +541,82 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // Monday 6:00 AM — marketing re-engagement segment scan, well ahead of
+    // both the 12:45 PM marketing_performance_report (which reads back this
+    // run's results into its new "Marketing Ideas" section) and the 1:00 PM
+    // Marketing Review block. Kept separate from the 12:45 report so this
+    // job's SA/Supabase load never risks delaying that time-sensitive send.
+    //
+    // Runs identify_marketing_segment across all known, hand-verified
+    // categories (Sealcoat, Crack Fill, Striping — see
+    // tools/impl/marketing-segments.js's SERVICE_CATEGORY_LINE_ITEMS) and
+    // writes the results to marketing_segment_candidates for the digest to
+    // read back. Each identifySegment() call re-fetches the full SA account
+    // roster independently rather than sharing one fetch across categories —
+    // a known, accepted inefficiency (a few dozen extra seconds per category,
+    // once a week) not worth the added complexity of threading a shared
+    // roster through the function for this few categories.
+    //
+    // Read-only in effect from Michael's perspective — writes only to the
+    // scan-results table, never applies an SA tag or drafts anything. That
+    // only happens once he reviews and approves via the marketing-advisor
+    // agent / apply-reengagement-campaign skill.
+    schedule: '0 6 * * 1',
+    name: 'marketing_segment_scan',
+    recoverMissedExecutions: true,
+    run: async () => {
+      try {
+        const { identifySegment, SERVICE_CATEGORY_LINE_ITEMS } = await import('../tools/impl/marketing-segments.js');
+        const { createClient } = await import('@supabase/supabase-js');
+        const supabase = createClient(process.env.FLEETOPS_SUPABASE_URL, process.env.FLEETOPS_SUPABASE_SERVICE_KEY);
+
+        const scanRunAt = new Date().toISOString();
+        let totalWritten = 0;
+        for (const serviceCategory of Object.keys(SERVICE_CATEGORY_LINE_ITEMS)) {
+          const { candidates, flaggedForReview } = await identifySegment({ serviceCategory });
+          const rows = [
+            ...candidates.map(c => ({
+              service_category: serviceCategory,
+              client_id: c.clientId,
+              client_name: c.clientName,
+              sa_client_guid: c.clientId,
+              last_service_or_estimate_date: c.lastServiceDate,
+              days_since: c.daysSince,
+              match_confidence: 'clean',
+              ambiguity_flag: null,
+              scan_run_at: scanRunAt,
+            })),
+            ...flaggedForReview.map(f => ({
+              service_category: serviceCategory,
+              client_id: f.clientId,
+              client_name: f.clientName,
+              sa_client_guid: f.clientId,
+              last_service_or_estimate_date: f.lastServiceDate,
+              days_since: f.daysSince,
+              match_confidence: 'flagged',
+              ambiguity_flag: f.flags?.join(',') || null,
+              scan_run_at: scanRunAt,
+            })),
+          ];
+          if (rows.length > 0) {
+            const { error } = await supabase.from('marketing_segment_candidates').insert(rows);
+            if (error) throw new Error(`${serviceCategory}: ${error.message}`);
+          }
+          totalWritten += rows.length;
+        }
+        logger.info('marketing_segment_scan: done', { totalWritten });
+      } catch (err) {
+        logger.error('marketing_segment_scan: FAILED', { err: err.message });
+        try {
+          const { sendProactiveMessage } = await import('../teams/notify.js');
+          await sendProactiveMessage(`Marketing segment scan FAILED. Error: ${err.message}`);
+        } catch (notifyErr) {
+          logger.error('marketing_segment_scan: Teams alert also failed', { err: notifyErr.message });
+        }
+      }
+    },
+  },
+  {
     // Weekdays 11:15 AM — Approvals Queue report, ahead of the 11:30 AM-12:00 PM
     // Direct Report / Approval Window calendar block. v1 covers expense-report
     // approvals only (see approvals-queue-report.js header comment for why QBO

@@ -43,7 +43,9 @@ const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 // call runAgent() at all (see tools/registry.js's TOOL_MAP.dev_ambiguous) --
 // its whole job is asking one well-judged clarifying question, not a task
 // where the cheap model's shallower reasoning is an acceptable tradeoff.
-const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix', 'general', 'calendar', 'dev_ambiguous']);
+// 'marketing' (built 2026-08-25) drafts campaign/re-engagement content --
+// writing quality matters the same way it does for 'email'/'report'.
+const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix', 'general', 'calendar', 'dev_ambiguous', 'marketing']);
 
 function routeModel(taskPrompt, forceModel, taskType) {
     if (forceModel) return forceModel;
