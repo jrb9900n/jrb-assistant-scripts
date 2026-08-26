@@ -43,6 +43,7 @@ import { promisify } from 'node:util';
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
 import { supabase, f$, fD, sectionHeader, alertBox } from './ar-report-helpers.js';
+import { gatherWeeklyMarketingIdeas } from './marketing-ideas.js';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -252,7 +253,7 @@ function statusBadge(status) {
   return `<span style="font-size:10px;font-weight:bold;color:${color};text-transform:uppercase;">${status}</span>`;
 }
 
-function buildEmail({ weekStart, ads, metrics, previous, wonJobs, freshness, periodDays }) {
+function buildEmail({ weekStart, ads, metrics, previous, wonJobs, freshness, periodDays, ideas }) {
   const costPerWonJob = computeCostPerWonJob(metrics, wonJobs);
 
   let html = `<!DOCTYPE html>
@@ -383,10 +384,59 @@ function buildEmail({ weekStart, ads, metrics, previous, wonJobs, freshness, per
   html += alertBox('#fff8f0', '#e6a817', 'Not Currently Computable',
     `<p style="margin:0;font-size:13px;color:#533f03;">No lead-source, referral, or UTM/channel field exists yet on the SA estimate/lead records this report can see (checked <code>sa_sent_estimates</code>, <code>sa_accepted_estimates</code>, <code>estimates</code>, <code>sa_estimates_2026</code>). Adding one — e.g. a CRM intake question or landing-page UTM capture — would let a future version of this report split paid vs. organic leads and jobs.</p>`);
 
+  // ── Marketing ideas (segment scan + pending campaigns) ───────────────────
+  html += buildMarketingIdeasSection(ideas);
+
   html += `
 </td></tr>
 </table></td></tr></table>
 </body></html>`;
+
+  return html;
+}
+
+// Built 2026-08-25 alongside the new marketing-agent taskType/tools. Reads
+// back this week's already-computed segment scan + pending campaign
+// proposals — see marketing-ideas.js's header for why this doesn't run
+// identifySegment() live inside this time-sensitive send. Ideas/drafts only
+// — nothing here sends an email or touches SA; that only happens once
+// Michael reviews and tells the marketing-advisor agent to proceed.
+function buildMarketingIdeasSection(ideas) {
+  let html = sectionHeader('Marketing Ideas');
+
+  if (!ideas.available) {
+    return html + alertBox('#fff0f0', '#c0392b', 'Marketing Ideas Unavailable',
+      `<p style="margin:0;font-size:13px;color:#533f03;">Could not read this week's segment scan or pending campaigns. Error: ${(ideas.error || 'unknown').slice(0, 200)}</p>`);
+  }
+
+  if (ideas.segmentsByCategory.length === 0 && ideas.pendingCampaigns.length === 0) {
+    return html + `<p style="margin:0 0 16px;font-size:13px;color:#888888;font-style:italic;">No new segment scan results or pending campaign proposals this week.</p>`;
+  }
+
+  if (ideas.segmentsByCategory.length > 0) {
+    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">This week's re-engagement segment scan:</p>`;
+    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">`;
+    for (const s of ideas.segmentsByCategory) {
+      html += `<tr>
+        <td style="padding:5px 6px;font-size:13px;color:#444444;">${s.serviceCategory}</td>
+        <td style="padding:5px 6px;font-size:13px;color:#1a1a2e;text-align:right;">${s.clean} candidates${s.flagged ? `, ${s.flagged} flagged for review` : ''}</td>
+      </tr>`;
+    }
+    html += `</table>`;
+    html += `<p style="margin:-8px 0 16px;font-size:11px;color:#888888;">Ask the marketing-advisor agent (taskType "marketing") to walk through a category via the identify-reengagement-segment skill for the full candidate list before deciding whether to run a campaign.</p>`;
+  }
+
+  if (ideas.pendingCampaigns.length > 0) {
+    html += `<p style="margin:0 0 8px;font-size:13px;color:#444444;">Campaigns proposed but not yet approved:</p>`;
+    html += `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:16px;">`;
+    for (const c of ideas.pendingCampaigns) {
+      html += `<tr>
+        <td style="padding:5px 6px;font-size:13px;color:#444444;">${c.campaign_name}</td>
+        <td style="padding:5px 6px;font-size:13px;color:#1a1a2e;text-align:right;">${c.client_count ?? '—'} clients</td>
+      </tr>`;
+    }
+    html += `</table>`;
+  }
 
   return html;
 }
@@ -398,16 +448,17 @@ export async function generateAndSendMarketingPerformanceReport() {
   const periodStartISO = periodStart.toISOString();
   const periodEndISO = now.toISOString();
 
-  const [ads, wonJobs, freshness] = await Promise.all([
+  const [ads, wonJobs, freshness, ideas] = await Promise.all([
     fetchGoogleAdsPerformance(ADS_PERIOD_DAYS),
     gatherWonJobs(periodStartISO, periodEndISO),
     gatherFreshnessStatus(),
+    gatherWeeklyMarketingIdeas(),
   ]);
 
   const metrics = aggregateAdsMetrics(ads.campaigns, ads.periodDays);
   const previous = await gatherAndRecordSnapshot(weekStart, metrics, wonJobs);
 
-  const body = buildEmail({ weekStart, ads, metrics, previous, wonJobs, freshness, periodDays: ads.periodDays });
+  const body = buildEmail({ weekStart, ads, metrics, previous, wonJobs, freshness, periodDays: ads.periodDays, ideas });
 
   await sendEmail({
     to: ['michael@jrboehlke.com'],
