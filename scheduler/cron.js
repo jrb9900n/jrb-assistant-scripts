@@ -515,12 +515,12 @@ const SCHEDULED_TASKS = [
   },
   {
     // Monday 12:45 PM — Marketing Performance report, ahead of the 1:00-2:00 PM
-    // Marketing Performance calendar block. Google Ads figures are fetched by
-    // shelling out to a small Python script that reuses the already-authenticated
-    // google-ads-agent daemon's client (see marketing-performance-ads-fetch.py) —
-    // that call degrades to an "unavailable" section on its own rather than
-    // throwing, so a daemon/venv hiccup doesn't block the SA-sourced won-job
-    // figures from still landing on time.
+    // Marketing Performance calendar block. Google Ads figures come from
+    // tools/impl/google-ads.js's getCampaignMetrics() (see that file's header
+    // for why it shells out to the official Python client instead of a Node
+    // REST call) — that call degrades to an "unavailable" section on its own
+    // rather than throwing, so a bridge/API hiccup doesn't block the
+    // SA-sourced won-job figures from still landing on time.
     schedule: '45 12 * * 1',
     name: 'marketing_performance_report',
     recoverMissedExecutions: true,

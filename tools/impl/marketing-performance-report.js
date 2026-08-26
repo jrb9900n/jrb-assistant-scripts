@@ -5,14 +5,16 @@
 // reference implementation this mirrors).
 //
 // Data sources:
-//   - Google Ads campaign performance: fetched by shelling out to
-//     marketing-performance-ads-fetch.py, which imports the already-built,
-//     already-authenticated GoogleAdsTools client from the separate
-//     google-ads-agent Python daemon on this machine (see that script's
-//     header comment for why — avoids re-implementing Google Ads OAuth in
-//     Node and a second place for the token to go stale). Degrades to an
-//     "unavailable" section rather than failing the whole report if the
-//     daemon/venv/API is unreachable.
+//   - Google Ads campaign performance: tools/impl/google-ads.js's
+//     getCampaignMetrics(), which shells out to google_ads_bridge.py (the
+//     official gRPC-based google-ads Python client — Google's REST interface
+//     404s on every method as of 2026-08-26, see google-ads.js's header).
+//     This replaced an earlier version of this report that shelled out to a
+//     since-deleted marketing-performance-ads-fetch.py requiring a
+//     GOOGLE_ADS_AGENT_DIR env var that was never actually set in
+//     start-agent.ps1 — that section had been silently failing every run.
+//     Degrades to an "unavailable" section rather than failing the whole
+//     report if the bridge/API is unreachable.
 //   - Won-job counts/revenue: fleetops Supabase `sa_estimates_2026`
 //     (stage_name = 'Closed - Won', won_date in the same trailing window as
 //     the ad spend), used only for a blended cost-per-won-job estimate.
@@ -35,38 +37,44 @@
 //     true attribution. Same "directional, not textbook" spirit as the
 //     AR/Collections report's DSO estimate.
 
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
-
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
 import { supabase, f$, fD, sectionHeader, alertBox, mondayOf } from './ar-report-helpers.js';
 import { gatherWeeklyMarketingIdeas } from './marketing-ideas.js';
+import { getCampaignMetrics } from './google-ads.js';
 
-const execFileAsync = promisify(execFile);
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const ADS_FETCH_SCRIPT = path.join(__dirname, 'marketing-performance-ads-fetch.py');
-const PYTHON_BIN = process.env.MARKETING_REPORT_PYTHON_BIN || 'python';
-const ADS_FETCH_TIMEOUT_MS = 30_000;
 const ADS_PERIOD_DAYS = 7;
 const ESTIMATES_STALE_HOURS = 48;
 
-// ── Google Ads fetch (shells out — see file header + the .py script's own
-// header for why this isn't a native Node Google Ads client) ───────────────
+function isoDate(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+// ── Google Ads fetch — see file header for why this goes through
+// google-ads.js/google_ads_bridge.py rather than a Node REST client ────────
 async function fetchGoogleAdsPerformance(daysBack = ADS_PERIOD_DAYS) {
   try {
-    const { stdout } = await execFileAsync(
-      PYTHON_BIN,
-      [ADS_FETCH_SCRIPT, String(daysBack)],
-      { timeout: ADS_FETCH_TIMEOUT_MS }
-    );
-    const lastLine = stdout.trim().split('\n').filter(Boolean).pop();
-    if (!lastLine) throw new Error('empty output from ads fetch script');
-    const parsed = JSON.parse(lastLine);
-    if (parsed.error) throw new Error(parsed.error);
-    return { available: true, campaigns: parsed.campaigns ?? [], periodDays: parsed.period_days ?? daysBack };
+    const endDate = new Date();
+    const startDate = new Date(endDate.getTime() - daysBack * 86400000);
+    const rows = await getCampaignMetrics({ startDate: isoDate(startDate), endDate: isoDate(endDate) });
+    // Field names below (spend_usd, avg_cpc_usd, cpa_usd, daily_budget_usd)
+    // match this report's existing template/aggregation code, which predates
+    // google-ads.js's own camelCase convention — translated here rather than
+    // renaming google-ads.js's fields, so its public shape stays consistent
+    // with every other tools/impl/*.js module.
+    const campaigns = rows.map(r => ({
+      name: r.name,
+      status: r.status,
+      spend_usd: r.costUsd,
+      impressions: r.impressions,
+      clicks: r.clicks,
+      ctr: r.ctr * 100, // google-ads.js returns a raw fraction (0.0344); this report's template expects a percentage number
+      avg_cpc_usd: r.avgCpcUsd,
+      conversions: r.conversions,
+      cpa_usd: r.cpaUsd ?? null,
+      daily_budget_usd: r.dailyBudgetUsd ?? null,
+    }));
+    return { available: true, campaigns, periodDays: daysBack };
   } catch (err) {
     logger.warn('marketing_performance_report: Google Ads fetch failed — section will show unavailable', { err: err.message });
     return { available: false, campaigns: [], periodDays: daysBack, error: err.message };

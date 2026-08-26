@@ -76,7 +76,10 @@ def list_campaigns(client, args):
         "name": r.campaign.name,
         "status": r.campaign.status.name,
         "channelType": r.campaign.advertising_channel_type.name,
-        "dailyBudgetUsd": round(r.campaign_budget.amount_micros / 1e6, 2) if r.campaign_budget.amount_micros else None,
+        # amount_micros is in millionths of the account currency; guard with
+        # `is not None` so a legitimate 0-micros budget returns 0.0 rather
+        # than None (a plain falsy check would mishandle the zero case).
+        "dailyBudgetUsd": round(r.campaign_budget.amount_micros / 1e6, 2) if r.campaign_budget.amount_micros is not None else None,
     } for r in rows]
 
 
@@ -84,9 +87,10 @@ def get_campaign_metrics(client, args):
     require_dates(args)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
-        SELECT campaign.id, campaign.name, campaign.status,
+        SELECT campaign.id, campaign.name, campaign.status, campaign_budget.amount_micros,
                metrics.impressions, metrics.clicks, metrics.cost_micros,
-               metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc
+               metrics.conversions, metrics.conversions_value, metrics.ctr, metrics.average_cpc,
+               metrics.cost_per_conversion
         FROM campaign
         WHERE segments.date BETWEEN '{args['startDate']}' AND '{args['endDate']}'
         {name_filter(args)}
@@ -97,11 +101,18 @@ def get_campaign_metrics(client, args):
         "id": str(r.campaign.id),
         "name": r.campaign.name,
         "status": r.campaign.status.name,
+        # See list_campaigns for the `is not None` rationale.
+        "dailyBudgetUsd": round(r.campaign_budget.amount_micros / 1e6, 2) if r.campaign_budget.amount_micros is not None else None,
         "impressions": r.metrics.impressions,
         "clicks": r.metrics.clicks,
         "costUsd": round(r.metrics.cost_micros / 1e6, 2),
         "conversions": round(r.metrics.conversions, 2),
         "conversionsValue": round(r.metrics.conversions_value, 2),
+        # cost_per_conversion is returned by the Google Ads API in the
+        # account's currency units directly (NOT in micros), unlike
+        # cost_micros / average_cpc which are in micros. Dividing by 1e6
+        # would produce a value 1,000,000x too small (e.g. $50 CPA → $0.000050).
+        "cpaUsd": round(r.metrics.cost_per_conversion, 2) if r.metrics.conversions > 0 else None,
         "ctr": round(r.metrics.ctr, 4),
         "avgCpcUsd": round(r.metrics.average_cpc / 1e6, 2),
     } for r in rows]
