@@ -34,6 +34,17 @@ import { supabase, daysBetween } from './ar-report-helpers.js';
 import { getAllSAAccounts } from './serviceautopilot.js';
 import { logger } from '../../core/logger.js';
 
+// PostgREST/Supabase silently caps unbounded queries at ~1000 rows by
+// default - a previously-documented, repeatedly-fixed bug class in this
+// exact codebase (estimating-pipeline-report.js, sales-pipeline-report.js,
+// weekly-scorecard-report.js all guard against it the same way, with an
+// explicit .order() + .range() rather than a bare default page size).
+// sa_estimates_2026 in particular is already confirmed to sit at ~1000 rows
+// today per estimating-pipeline-report.js's own comment - an unpaginated
+// query against it here would already be silently truncating.
+const LINE_ITEMS_QUERY_MAX_ROWS = 19999; // no documented row count for sa_invoice_line_items; generous headroom since it spans 2+ years of current-SA history, filtered to a handful of exact line_item_name values
+const ESTIMATES_QUERY_MAX_ROWS = 4999; // same headroom used by the sibling report files above against this same table
+
 // Known, hand-verified service categories -> the exact sa_invoice_line_items
 // line_item_name values that belong to them. Deliberately a small, explicit
 // map rather than a keyword guess against arbitrary service names - these
@@ -56,7 +67,7 @@ export const SERVICE_CATEGORY_LINE_ITEMS = {
 const CROSS_CHECK_PATTERNS = {
   Sealcoat: /seal/i,
   'Crack Fill': /crack/i,
-  Striping: /^striping$/i,
+  Striping: /striping/i,
 };
 
 // Subcontractor/GC pass-through keyword heuristic - flags (never
@@ -109,8 +120,13 @@ export async function identifySegment({ serviceCategory, recencyThresholdDays = 
     .from('sa_invoice_line_items')
     .select('client_name, line_item_date, total, invoice_id')
     .in('line_item_name', lineItemNames)
-    .gt('total', 0);
+    .gt('total', 0)
+    .order('line_item_date', { ascending: true })
+    .range(0, LINE_ITEMS_QUERY_MAX_ROWS - 1);
   if (liErr) throw new Error(`identifySegment: sa_invoice_line_items query failed: ${liErr.message}`);
+  if (lineItems && lineItems.length === LINE_ITEMS_QUERY_MAX_ROWS) {
+    logger.warn('identifySegment: sa_invoice_line_items query hit LINE_ITEMS_QUERY_MAX_ROWS - results may be truncated', { serviceCategory, max: LINE_ITEMS_QUERY_MAX_ROWS });
+  }
 
   // ── 2. Group by EXACT client_name (never normalized here - confirmed
   //      zero cases this session of one exact name covering multiple
@@ -152,7 +168,12 @@ export async function identifySegment({ serviceCategory, recencyThresholdDays = 
     const { data: estimates, error: estErr } = await supabase
       .from('sa_estimates_2026')
       .select('client_name, estimate_number, stage, stage_name, quote_date, line_items')
-      .gte('quote_date', yearStart);
+      .gte('quote_date', yearStart)
+      .order('quote_date', { ascending: true })
+      .range(0, ESTIMATES_QUERY_MAX_ROWS - 1);
+    if (estimates && estimates.length === ESTIMATES_QUERY_MAX_ROWS) {
+      logger.warn('identifySegment: sa_estimates_2026 cross-check query hit ESTIMATES_QUERY_MAX_ROWS - results may be truncated', { serviceCategory, max: ESTIMATES_QUERY_MAX_ROWS });
+    }
     if (estErr) {
       logger.warn('identifySegment: current-year estimate cross-check failed, proceeding WITHOUT it', { err: estErr.message });
     } else {
@@ -181,7 +202,11 @@ export async function identifySegment({ serviceCategory, recencyThresholdDays = 
 
   // ── 6. Resolve to a live SA clientId via the full roster (never SA's
   //      broken name-search filter - see CLAUDE.md's documented gap) ──────
-  const roster = await getAllSAAccounts({ max: 10000 });
+  // max is generous headroom above the ~10,242 live accounts confirmed in
+  // CLAUDE.md's classification backfill notes - that roster only grows, and
+  // a cap sized to today's count would silently start truncating later
+  // (the same class of bug getClientsByTag's default already caused once).
+  const roster = await getAllSAAccounts({ max: 50000 });
   const rosterByNorm = new Map();
   for (const a of roster) {
     const key = normalizeName(a.name);

@@ -42,7 +42,7 @@ import { promisify } from 'node:util';
 
 import { logger } from '../../core/logger.js';
 import { sendEmail } from './m365.js';
-import { supabase, f$, fD, sectionHeader, alertBox } from './ar-report-helpers.js';
+import { supabase, f$, fD, sectionHeader, alertBox, mondayOf } from './ar-report-helpers.js';
 import { gatherWeeklyMarketingIdeas } from './marketing-ideas.js';
 
 const execFileAsync = promisify(execFile);
@@ -52,14 +52,6 @@ const PYTHON_BIN = process.env.MARKETING_REPORT_PYTHON_BIN || 'python';
 const ADS_FETCH_TIMEOUT_MS = 30_000;
 const ADS_PERIOD_DAYS = 7;
 const ESTIMATES_STALE_HOURS = 48;
-
-function mondayOf(referenceDate = new Date()) {
-  const d = new Date(Date.UTC(referenceDate.getUTCFullYear(), referenceDate.getUTCMonth(), referenceDate.getUTCDate()));
-  const dow = d.getUTCDay(); // 0=Sun
-  const diff = dow === 0 ? -6 : 1 - dow;
-  d.setUTCDate(d.getUTCDate() + diff);
-  return d.toISOString().slice(0, 10);
-}
 
 // ── Google Ads fetch (shells out — see file header + the .py script's own
 // header for why this isn't a native Node Google Ads client) ───────────────

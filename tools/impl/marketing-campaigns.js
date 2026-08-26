@@ -55,7 +55,7 @@ export async function updateMarketingCampaignStatus({ id, status, notes, applied
 export async function listMarketingCampaigns({ status, serviceCategory } = {}) {
   let query = supabase.from('marketing_campaigns').select('*').order('created_at', { ascending: false });
   if (status) query = query.eq('status', status);
-  if (serviceCategory) query = query.ilike('description', `%${serviceCategory}%`);
+  if (serviceCategory) query = query.or(`campaign_name.ilike.%${serviceCategory}%,description.ilike.%${serviceCategory}%`);
   const { data, error } = await query;
   if (error) throw new Error(`listMarketingCampaigns: ${error.message}`);
   return data;

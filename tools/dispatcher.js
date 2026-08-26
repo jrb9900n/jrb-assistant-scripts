@@ -204,7 +204,14 @@ const HANDLERS = {
   update_marketing_campaign_status: (i) => marketingCampaigns.updateMarketingCampaignStatus(i),
   list_marketing_campaigns:         (i) => marketingCampaigns.listMarketingCampaigns(i),
   get_marketing_campaign:           (i) => marketingCampaigns.getMarketingCampaign(i),
-  get_marketing_business_context:   () => readFileSync(MARKETING_CONTEXT_PATH, 'utf8'),
+  get_marketing_business_context:   () => {
+    try {
+      return readFileSync(MARKETING_CONTEXT_PATH, 'utf8');
+    } catch (err) {
+      logger.warn('get_marketing_business_context: failed to read shared context doc', { path: MARKETING_CONTEXT_PATH, err: err.message });
+      return `Business context document is unavailable (${err.code === 'ENOENT' ? 'file not found' : err.message} at ${MARKETING_CONTEXT_PATH}). Do not guess at services/positioning/geography — flag this to Michael and ask him to confirm before proposing anything that depends on it.`;
+    }
+  },
 
   // Read-only, safe for anyone -- only ever surfaces free/busy windows, never
   // subjects/tiers/reasons.

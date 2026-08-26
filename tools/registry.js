@@ -1300,16 +1300,26 @@ const TOOL_MAP = {
   scheduling: [...SCHEDULING_TOOLS, ...BOOKING_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
-  // Marketing agent (built 2026-08-25). `send_email` is deliberately excluded
-  // from the EMAIL_TOOLS spread — this is a hard structural guarantee that
-  // nothing in this taskType can ever send a real email, not just prompt
-  // discipline, matching Michael's explicit requirement that every new
-  // campaign/send needs his approval first. draft_email and the calendar
-  // tools (bundled in EMAIL_TOOLS) stay available. The existing Google Ads
-  // Python agent's own tactical autonomy is untouched by this taskType —
-  // see tools/impl/marketing-segments.js's header for why Ads-side changes
-  // aren't wired in here at all yet.
-  marketing:  [...SA_TOOLS, ...EMAIL_TOOLS.filter(t => t.name !== 'send_email'), ...TEAMS_TOOLS, ...MARKETING_TOOLS, ...ESCALATION_TOOLS],
+  // Marketing agent (built 2026-08-25). `send_email` AND `send_draft_reply`
+  // are both deliberately excluded from the EMAIL_TOOLS spread — a single
+  // `!== 'send_email'` filter (the original version of this line) left
+  // `send_draft_reply` in, which routes to the same real Graph send call
+  // (m365.sendDraft -> POST /messages/{id}/send) under a different tool
+  // name, defeating the "nothing can send" guarantee entirely. This is a
+  // hard structural guarantee, not just prompt discipline, matching
+  // Michael's explicit requirement that every new campaign/send needs his
+  // approval first. draft_email and the calendar tools (also bundled in
+  // EMAIL_TOOLS) stay available. SA access is narrowed to just the
+  // tag-related tools this taskType's skills actually call (identify/apply
+  // only ever create/read/apply/remove tags) — the original `...SA_TOOLS`
+  // spread also granted sa_create_client/sa_create_job/sa_create_estimate/
+  // sa_dispatch_job/sa_set_billing_defaults/sa_update_route_order/etc,
+  // write tools with no use here that directly contradict the "propose and
+  // draft only" boundary this taskType's own agent persona asserts. The
+  // existing Google Ads Python agent's own tactical autonomy is untouched
+  // by this taskType — see tools/impl/marketing-segments.js's header for
+  // why Ads-side changes aren't wired in here at all yet.
+  marketing:  [...SA_TOOLS.filter(t => t.name.includes('tag')), ...EMAIL_TOOLS.filter(t => t.name !== 'send_email' && t.name !== 'send_draft_reply'), ...TEAMS_TOOLS, ...MARKETING_TOOLS, ...ESCALATION_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
 };
 

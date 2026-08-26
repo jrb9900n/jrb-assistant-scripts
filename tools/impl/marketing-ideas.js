@@ -7,16 +7,8 @@
 // SA/Supabase-heavy and runs separately via the marketing_segment_scan cron
 // job (6:00 AM Monday, well ahead of this report).
 
-import { supabase } from './ar-report-helpers.js';
+import { supabase, mondayOf } from './ar-report-helpers.js';
 import { logger } from '../../core/logger.js';
-
-function mondayOf(referenceDate = new Date()) {
-  const d = new Date(Date.UTC(referenceDate.getUTCFullYear(), referenceDate.getUTCMonth(), referenceDate.getUTCDate()));
-  const dow = d.getUTCDay();
-  const diff = dow === 0 ? -6 : 1 - dow;
-  d.setUTCDate(d.getUTCDate() + diff);
-  return d.toISOString().slice(0, 10);
-}
 
 export async function gatherWeeklyMarketingIdeas() {
   try {
@@ -25,7 +17,7 @@ export async function gatherWeeklyMarketingIdeas() {
     const [candidatesResult, campaignsResult] = await Promise.all([
       supabase
         .from('marketing_segment_candidates')
-        .select('service_category, client_name, ambiguity_flag, reviewed')
+        .select('service_category, client_name, ambiguity_flag')
         .gte('scan_run_at', `${weekStart}T00:00:00Z`),
       supabase
         .from('marketing_campaigns')
