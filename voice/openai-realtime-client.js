@@ -114,6 +114,26 @@ export async function connectRealtimeSession({ session, hangUp }) {
       // response.function_call_arguments.done -- a response can also
       // contain more than one function_call item, so every matching item
       // is handled, not just the first.
+      //
+      // A response that was interrupted (barge-in) or otherwise didn't
+      // finish cleanly can still emit response.done with a status other
+      // than 'completed' -- its output items (including a function_call's
+      // `arguments` string) may be truncated mid-generation in that case.
+      // Confirmed live: two "malformed tool call arguments" JSON.parse
+      // failures during the first real test call, both immediately
+      // preceding a successful retry -- consistent with an interrupted
+      // response's half-written arguments reaching here. Skipping
+      // non-completed responses avoids attempting (and logging a warning
+      // for) a tool call that was never going to have valid arguments,
+      // rather than relying on the model to notice the error and retry.
+      if (evt.response?.status !== 'completed') {
+        logger.info('Voice bridge: skipping tool calls from a non-completed response', {
+          callId: session.callConnectionId,
+          status: evt.response?.status,
+        });
+        return;
+      }
+
       const items = evt.response?.output ?? [];
       for (const item of items) {
         if (item.type !== 'function_call') continue;
