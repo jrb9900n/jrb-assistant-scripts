@@ -28,17 +28,36 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
  * Returns a short string to inject at the top of the system prompt.
  *
  * @param {object} opts
- * @param {string} opts.topic   - Current task topic (used for relevance filter)
- * @param {number} [opts.limit] - Max summaries to load (default 5)
+ * @param {string} opts.topic   - Current task's topic.
+ * @param {boolean} [opts.strict] - When true, only load summaries whose
+ *   `topics` actually contains `topic` (the old, exact-match behavior). Used
+ *   by callers with a deliberately isolated memory stream -- e.g.
+ *   teams/bot.js's loadSchedulingMemory(), which intentionally keeps
+ *   crew-scheduling recall separate from everything else so an unrelated
+ *   recent CRM/report summary can't get spliced into the scheduling prompt.
+ *   Default false: see rationale below.
+ * @param {number} [opts.limit] - Max summaries to load (default 8)
  */
-export async function loadContext({ topic, limit = 5 }) {
+export async function loadContext({ topic, strict = false, limit = 8 } = {}) {
+  // Filtering strictly on topics.contains([topic]) used to mean a summary
+  // saved under one taskType (e.g. 'crm') was invisible to a later message
+  // that happened to classify differently (e.g. 'general') -- even for the
+  // exact same real-world subject. Since taskType is itself derived from
+  // teams/router.js's regex-based classifier (a message can drift between
+  // buckets depending on exact phrasing, not topical relevance), that made
+  // recall accidentally gated by which keyword regex fired, not by whether
+  // the memory was actually relevant. For core/agent.js's default call
+  // (feeds every ordinary Teams intent branch's system prompt), the fix is
+  // to stop filtering by topic and just load the N most recent summaries
+  // regardless of which taskType saved them -- one continuous context for
+  // Michael, not N separate topic-siloed ones. `strict` opts back into the
+  // old exact-match behavior for callers that deliberately want isolation.
   let query = supabase
     .from('agent_memory')
     .select('summary, created_at, topics')
     .order('created_at', { ascending: false })
     .limit(limit);
-
-  if (topic) query = query.contains('topics', [topic]);
+  if (strict && topic) query = query.contains('topics', [topic]);
 
   const { data: summaries, error } = await query;
   if (error) {

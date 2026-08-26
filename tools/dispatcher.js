@@ -23,6 +23,7 @@ import * as sa          from './impl/serviceautopilot.js';
 import { scheduleEstimateVisit } from './impl/scheduling-visits.js';
 import { checkMichaelAvailability, bookTimeWithMichael } from './impl/scheduling-booking.js';
 import * as fleetsharp  from './impl/fleetsharp.js';
+import * as googleAds   from './impl/google-ads.js';
 import * as carddav     from './impl/carddav.js';
 import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
@@ -79,6 +80,10 @@ const HANDLERS = {
   send_email:            (i) => m365.sendEmail(i),
   list_email_attachments:(i) => m365.listEmailAttachments(i),
   read_email_attachment: (i) => m365.readEmailAttachment(i),
+  list_sent_emails:      (i) => m365.listSentEmails(i),
+  get_sent_emails_to:    (i) => m365.getSentEmailsTo(i),
+  get_thread_emails:     (i) => m365.getThreadEmails(i),
+  create_reply_draft:    (i) => m365.createReplyDraft(i),
   list_mail_folders:     (i) => m365.listMailFolders(i),
   create_mail_folder:    (i) => m365.createMailFolder(i),
   move_email:            (i) => m365.moveEmail(i),
@@ -241,6 +246,12 @@ const HANDLERS = {
   fleetsharp_get_live_positions:  () => fleetsharp.getLivePositions(),
   fleetsharp_get_daily_mileage:   (i) => fleetsharp.getDailyMileage(i),
   fleetsharp_get_tracker_names:   () => fleetsharp.getTrackerNames(),
+
+  // Google Ads (read-only — see tools/impl/google-ads.js header)
+  google_ads_list_campaigns:          (i) => googleAds.listCampaigns(i),
+  google_ads_get_campaign_metrics:    (i) => googleAds.getCampaignMetrics(i),
+  google_ads_get_keyword_performance: (i) => googleAds.getKeywordPerformance(i),
+  google_ads_get_lead_conversions:    (i) => googleAds.getLeadConversions(i),
 
   // CardDAV
   carddav_provision:      (i) => carddav.provisionCredential(i),

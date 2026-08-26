@@ -29,8 +29,23 @@ const SONNET = 'claude-sonnet-4-6';
 const HAIKU  = 'claude-haiku-4-5-20251001';
 const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 
-// These task types always use Sonnet — they involve writing, analysis, or multi-step work
-const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix', 'marketing']);
+// These task types always use Sonnet — they involve writing, analysis, or multi-step work.
+// 'general' and 'calendar' added 2026-08-26: 'general' is both the largest
+// catch-all bucket (anything that doesn't trip a routing keyword) AND the
+// widest tool bucket in tools/registry.js's TOOL_MAP -- the exact kind of
+// broad, judgment-heavy request ("remember what we talked about", "check
+// three systems and cross-reference") that most needs Sonnet's reasoning and
+// 16k output budget was instead falling to Haiku's keyword-regex heuristic
+// and 1k output cap by default. 'calendar' had the same gap -- confirmed live
+// 2026-08-24 (see CLAUDE.md's "Bug #4") that a calendar-modifying request
+// reached Haiku and gave false information because it never actually used
+// its tools carefully. 'dev_ambiguous' added alongside the fix that made it
+// call runAgent() at all (see tools/registry.js's TOOL_MAP.dev_ambiguous) --
+// its whole job is asking one well-judged clarifying question, not a task
+// where the cheap model's shallower reasoning is an acceptable tradeoff.
+// 'marketing' (built 2026-08-25) drafts campaign/re-engagement content --
+// writing quality matters the same way it does for 'email'/'report'.
+const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix', 'general', 'calendar', 'dev_ambiguous', 'marketing']);
 
 function routeModel(taskPrompt, forceModel, taskType) {
     if (forceModel) return forceModel;

@@ -1,6 +1,10 @@
 // teams/router.js — Shared intent classification for Teams messages and email poller.
 // All detection functions live here so bot.js and cron.js stay in sync.
 
+import Anthropic from '@anthropic-ai/sdk';
+
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
 /**
  * Normalise input to a lowercase string, or return null if the value is not a
  * non-empty string.  Used by every exported function as a null-guard.
@@ -177,4 +181,55 @@ export function classifyIntent(text) {
   if (isAmbiguousDevTask(text))          return 'dev_ambiguous';
   if (isReportRequest(text))             return 'report';
   return 'general';
+}
+
+// Every regex above is checked against fixed vocabulary -- a message that
+// doesn't happen to use one of those exact words/phrases falls through to
+// 'general' even when it's really a calendar/CRM/scheduling/report request
+// phrased differently than anticipated. Three separate live misroutes already
+// needed hand-patches (see the comments on isCalendarRescheduleRequest,
+// isReportRequest, and classifyIntent's own priority-order rationale above)
+// -- evidence this is a structural gap, not a one-off. Rather than growing
+// the regex list further for every new phrasing found, classifyIntentLLM is
+// a cheap fallback: ONE Haiku call, ONLY when the fast regex path found
+// nothing (i.e. classifyIntent already returned 'general'), so every
+// confidently-matched message (the large majority) still gets zero added
+// latency/cost and unambiguous, deterministic routing. If the LLM call fails
+// or returns anything unrecognized, this fails open to 'general' -- same
+// behavior as today, never worse.
+// 'ops_alert' is deliberately NOT a category here. It's gated ONLY on the
+// literal ⚠️ sigil (isOpsAlertLike, checked first in classifyIntent above) as
+// an explicit, carefully-reasoned safety tradeoff -- auto_fix's tools include
+// file-edit/branch/PR access, and by the time a message reaches this
+// fallback, isOpsAlertLike has ALREADY run and returned false. Letting an
+// LLM guess "this sounds like an outage" from plain English (e.g. "the
+// backup job died again, can you look into it") would reopen exactly the
+// unbounded-match risk the sigil-only design exists to close. See
+// isOpsAlertLike's and classifyIntent's own comments before ever adding this
+// category back.
+const LLM_FALLBACK_CATEGORIES = [
+  { name: 'calendar',   desc: 'rescheduling, moving, prioritizing, or resolving a conflict with a calendar block, meeting, or appointment' },
+  { name: 'crm',        desc: 'Service Autopilot (SA) / CRM work: tickets, estimates, jobs, clients, leads, CardDAV' },
+  { name: 'scheduling', desc: 'crew, route, or dispatch scheduling for field work (Dave/Noah/Eric/Don, mowing, plowing, stops)' },
+  { name: 'dev',        desc: 'an explicit request to build, write, or deploy code/scripts/automation' },
+  { name: 'report',     desc: 'a data or financial question: revenue, invoices, AR/AP, cash flow, totals, counts' },
+  { name: 'general',    desc: 'anything else -- conversation, memory recall ("what did we discuss"), cross-system questions, email, information/advice' },
+];
+
+export async function classifyIntentLLM(text) {
+  try {
+    const response = await anthropic.messages.create({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 20,
+      messages: [{
+        role: 'user',
+        content: `Classify this Teams message into exactly one category.\n\nCategories:\n${LLM_FALLBACK_CATEGORIES.map(c => `- ${c.name}: ${c.desc}`).join('\n')}\n\nMessage: "${text}"\n\nRespond with ONLY the category name from the list above, nothing else.`,
+      }],
+    });
+    const raw = (response.content[0]?.text ?? '').trim().toLowerCase();
+    const match = LLM_FALLBACK_CATEGORIES.find(c => raw === c.name || raw.includes(c.name));
+    return match ? match.name : 'general';
+  } catch {
+    return 'general';
+  }
 }
