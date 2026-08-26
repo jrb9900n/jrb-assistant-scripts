@@ -968,7 +968,7 @@ export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {})
 function withSignOff(text) {
   const trimmed = (text || '').trim();
   if (/michael[.,!]?\s*$/i.test(trimmed)) return text;
-  return `<br><br>Michael`;
+  return `${text}<br><br>Michael<br>`;
 }
 
 // Creates a draft reply in Michael's mailbox, preserving the email thread.
