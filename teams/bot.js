@@ -22,7 +22,7 @@ import {
   handleOAuthRegister,
   handleOAuthWellKnown,
 } from '../mcp/oauth.js';
-import { classifyIntent } from './router.js';
+import { classifyIntent, classifyIntentLLM } from './router.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -88,7 +88,11 @@ ${rulesBlock}${draftContext}${memoryBlock ? `\n\n${memoryBlock}` : ''}`.trim();
 async function loadSchedulingMemory() {
   try {
     const { loadContext } = await import('../memory/memory.js');
-    return await loadContext({ topic: 'scheduling', limit: 3 });
+    // strict:true -- scheduling deliberately keeps its own isolated memory
+    // stream (see the extraMessages comment at this function's call site);
+    // unlike core/agent.js's default (broad, cross-topic) call, an unrelated
+    // recent CRM/report summary must not get spliced into this prompt.
+    return await loadContext({ topic: 'scheduling', strict: true, limit: 3 });
   } catch (e) {
     logger.warn('Could not load scheduling memory', { err: e.message });
     return '';
@@ -533,7 +537,16 @@ async function processTeamsMessage(activity, sessionId) {
     logger.warn('Teams: resolvePendingEscalationReply check failed (non-fatal)', { err: err.message });
   }
 
-  const intent = classifyIntent(userText);
+  let intent = classifyIntent(userText);
+  // The regex router only reaches 'general' when nothing else confidently
+  // matched -- a cheap one-shot Haiku re-classification here catches
+  // phrasings the fixed keyword list didn't anticipate (e.g. "check three
+  // systems and cross-reference X") without adding any latency to the large
+  // majority of messages that DO match a regex directly. See router.js's
+  // classifyIntentLLM comment for the full rationale.
+  if (intent === 'general') {
+    intent = await classifyIntentLLM(userText).catch(() => 'general');
+  }
   logger.info('Teams message', { intent, text: userText.slice(0, 80) });
 
   // Track what we're about to run so the catch block can queue a retry if SA is blocked
@@ -636,7 +649,16 @@ Message: "${userText}"
       ({ result } = await runAgent({ task: devTask, taskType: 'code', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else if (intent === 'dev_ambiguous') {
-      result = `Want to make sure I handle this correctly — are you asking me to build or write code, or looking for information/advice? Reply "yes, build it" and I'll put together a scope plan.`;
+      // Was a fully hardcoded canned string with no LLM call at all -- now
+      // runs through runAgent() so the clarifying question is contextual
+      // (and has memory/conversation history via extraMessages) instead of
+      // static, while keeping the actual safety property intact: taskType
+      // 'dev_ambiguous' (tools/registry.js) deliberately has NO code/file/
+      // github/deploy tools, so the model literally cannot start real dev
+      // work off an ambiguous request -- it can only ask.
+      const ambiguousTask = `Michael sent this Teams message, which may or may not be a request to build/write code, a script, or deploy something:\n\n"${userText}"\n\nYou do NOT have code/file/deployment/GitHub tools available for this response on purpose -- do not attempt any dev work now. Ask ONE brief, context-aware clarifying question to find out whether he wants you to build/write something (he'll confirm and you'll scope it out fully next message) or whether he's just asking for information/advice about the topic. Tailor the question to what he actually asked -- 1-2 sentences, no generic canned phrasing.`;
+      retryTask = ambiguousTask; retryTaskType = 'dev_ambiguous';
+      ({ result } = await runAgent({ task: ambiguousTask, taskType: 'dev_ambiguous', extraMessages, saveContext: false, images, context: { sender, activity, sessionId, taskType: retryTaskType } }));
 
     } else if (intent === 'report') {
       retryTaskType = 'report';

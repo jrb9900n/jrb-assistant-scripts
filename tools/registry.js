@@ -286,6 +286,58 @@ const EMAIL_TOOLS = [
       required: ['event_id'],
     },
   },
+  {
+    name: 'list_sent_emails',
+    description: 'List recently sent emails (subject, recipients, date, thread ID, snippet — no body). Use to check whether Michael already replied to someone, or to browse recent outbound mail.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        userEmail: { type: 'string', description: 'Mailbox to check. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+        limit:     { type: 'number', description: 'Max results', default: 30 },
+        afterDate: { type: 'string', description: 'ISO 8601 date — only emails sent after this date' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_sent_emails_to',
+    description: 'Fetch full past sent emails (with body) to one specific recipient — use to learn Michael\'s actual writing style/tone toward that person before drafting a new reply, or to confirm exactly what was already said to them.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        userEmail:        { type: 'string', description: 'Mailbox to search. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+        recipientAddress: { type: 'string', description: 'Recipient email address to filter by' },
+        limit:            { type: 'number', description: 'Max results', default: 5 },
+      },
+      required: ['recipientAddress'],
+    },
+  },
+  {
+    name: 'get_thread_emails',
+    description: 'List every email in a conversation thread (by thread/conversation ID), newest first. Use to see the full back-and-forth on a topic before answering "what did we discuss on this thread" or "did I already reply to this."',
+    input_schema: {
+      type: 'object',
+      properties: {
+        userEmail: { type: 'string', description: 'Mailbox the thread belongs to. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+        thread_id: { type: 'string', description: 'conversationId / thread_id, from get_email, search_emails, or list_emails' },
+        limit:     { type: 'number', description: 'Max messages to return', default: 10 },
+      },
+      required: ['thread_id'],
+    },
+  },
+  {
+    name: 'create_reply_draft',
+    description: 'Create a draft reply to a specific email, preserving the thread (To, Subject, references). Does NOT send — returns a draft_id for review, or pass it to send_draft_reply to send later.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        userEmail: { type: 'string', description: 'Mailbox the source email is in. Omit for assistant inbox, use michael@jrboehlke.com for Michael.' },
+        email_id:  { type: 'string', description: 'ID of the email being replied to, from list_emails/search_emails/get_email/get_thread_emails' },
+        body:      { type: 'string', description: 'HTML body for the reply' },
+      },
+      required: ['email_id', 'body'],
+    },
+  },
 ];
 
 const TEAMS_TOOLS = [
@@ -1182,11 +1234,44 @@ const TOOL_MAP = {
   // availability and book real time with him, nothing else.
   employee:   [...EMPLOYEE_TOOLS, ...BOOKING_TOOLS],
   file:       [...FILE_TOOLS, ...TEAMS_TOOLS],
-  scheduling: [...SCHEDULING_TOOLS, ...BOOKING_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  // buildSchedulingSystemPrompt (teams/bot.js) explicitly instructs the model
+  // to call sa_list_resources/sa_dispatch_job/sa_update_route_order during the
+  // confirm step, but those three tool schemas live only inside SA_TOOLS --
+  // never duplicated into SCHEDULING_TOOLS -- so this taskType was never
+  // actually given the tools its own prompt promised it. Filtered to just
+  // those three (not all of SA_TOOLS) since that's the only part of SA
+  // scheduling actually needs; sa_create_client/sa_create_estimate/etc.
+  // belong to the 'crm' taskType, not here.
+  scheduling: [...SCHEDULING_TOOLS, ...SA_TOOLS.filter(t => ['sa_list_resources', 'sa_dispatch_job', 'sa_update_route_order'].includes(t.name)), ...BOOKING_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  // A message that LOOKS technical (mentions script/code/github/deploy/etc.)
+  // but isn't an explicit build request (see isAmbiguousDevTask in
+  // teams/router.js) used to get a fully hardcoded canned reply with no LLM
+  // call at all. It now runs through runAgent() so the clarifying question is
+  // contextual instead of static -- but deliberately has NO code/file/github/
+  // deploy tools (unlike 'general', which does), so the model can't
+  // accidentally start real dev work off an ambiguous request; it can only
+  // ask a clarifying question (or escalate/notify if something's actually
+  // wrong). Same "explicit narrow entry, not a TOOL_MAP.general fallthrough"
+  // pattern as the 'employee'/'auto_fix' entries above.
+  dev_ambiguous: [...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
 };
+
+// Fail loudly at load time, not silently at call time, if a future rename
+// inside SA_TOOLS ever drops one of the three names scheduling's toolset is
+// filtered down to -- the same "prompt promises a tool the taskType doesn't
+// actually have" bug this file's own scheduling comment describes fixing,
+// just with a rename as the new trigger instead of an omission.
+const REQUIRED_SCHEDULING_SA_TOOLS = ['sa_list_resources', 'sa_dispatch_job', 'sa_update_route_order'];
+{
+  const found = new Set(TOOL_MAP.scheduling.map(t => t.name));
+  const missing = REQUIRED_SCHEDULING_SA_TOOLS.filter(n => !found.has(n));
+  if (missing.length) {
+    throw new Error(`tools/registry.js: TOOL_MAP.scheduling is missing required SA tool(s): ${missing.join(', ')} -- check SA_TOOLS for a rename.`);
+  }
+}
 
 export function getTools(taskType) {
   return TOOL_MAP[taskType] ?? TOOL_MAP.general;
