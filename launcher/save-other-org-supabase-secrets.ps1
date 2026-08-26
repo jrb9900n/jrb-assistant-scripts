@@ -43,7 +43,17 @@ if (-not ([System.Management.Automation.PSTypeName]'CredWriter').Type) {
 
 function Set-JRBSecret([string]$Name) {
     $value = (Read-Host "Enter value for $Name").Trim()
-    if ($Name -like "*_URL") { $value = $value.TrimEnd('/') }
+    if ($Name -like "*_URL") {
+        $value = $value.TrimEnd('/')
+        # A bare project ref (e.g. copy-pasted from the dashboard URL bar's
+        # path segment instead of the API URL field) has no scheme and no
+        # dot - expand it to a real Supabase URL so the keepalive's DNS
+        # lookup doesn't silently fail against a made-up hostname.
+        if ($value -and $value -notmatch '^https?://' -and $value -notmatch '\.') {
+            $value = "https://$value.supabase.co"
+            Write-Host "  (expanded bare project ref to $value)" -ForegroundColor DarkGray
+        }
+    }
     if ($value) {
         $ok = [CredWriter]::Save("JRBAgent:$Name", "JRBAgent", $value)
         if ($ok) { Write-Host "  Saved $Name" -ForegroundColor Green }
