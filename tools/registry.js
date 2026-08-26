@@ -1154,6 +1154,64 @@ const FLEETSHARP_TOOLS = [
   },
 ];
 
+// Google Ads reporting — read-only by design (see tools/impl/google-ads.js
+// header). Placed in the same TOOL_MAP slots as FLEETSHARP_TOOLS (report +
+// general) and deliberately left out of 'email'/'employee'/'auto_fix' — those
+// task types process untrusted inbound content or run unattended, and this
+// module touches a live ad-spend account.
+const GOOGLE_ADS_TOOLS = [
+  {
+    name: 'google_ads_list_campaigns',
+    description: 'List Google Ads campaigns (id, name, status, channel type, daily budget). Use to find a campaign by name before pulling its metrics, or to check whether a campaign is enabled/paused.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nameContains: { type: 'string', description: 'Optional substring filter on campaign name, e.g. "Retaining Wall".' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'google_ads_get_campaign_metrics',
+    description: 'Get impressions, clicks, cost, conversions, CTR, and average CPC per campaign over a date range.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nameContains: { type: 'string', description: 'Optional substring filter on campaign name.' },
+        startDate: { type: 'string', description: 'Start of the range, YYYY-MM-DD' },
+        endDate: { type: 'string', description: 'End of the range, YYYY-MM-DD' },
+      },
+      required: ['startDate', 'endDate'],
+    },
+  },
+  {
+    name: 'google_ads_get_keyword_performance',
+    description: 'Get per-keyword impressions, clicks, cost, and conversions over a date range, across ad groups/campaigns.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nameContains: { type: 'string', description: 'Optional substring filter on campaign name.' },
+        startDate: { type: 'string', description: 'Start of the range, YYYY-MM-DD' },
+        endDate: { type: 'string', description: 'End of the range, YYYY-MM-DD' },
+      },
+      required: ['startDate', 'endDate'],
+    },
+  },
+  {
+    name: 'google_ads_get_lead_conversions',
+    description: 'Get recorded conversions (leads) per campaign and conversion action over a date range. Only returns campaign/date rows with at least one conversion.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        nameContains: { type: 'string', description: 'Optional substring filter on campaign name.' },
+        startDate: { type: 'string', description: 'Start of the range, YYYY-MM-DD' },
+        endDate: { type: 'string', description: 'End of the range, YYYY-MM-DD' },
+      },
+      required: ['startDate', 'endDate'],
+    },
+  },
+];
+
 // Tools available to a non-Michael Teams requester (taskType 'employee',
 // added 2026-08-24 — see tools/impl/privacy-gate.js). This list is the HARD
 // structural half of the privacy design: it must never include anything that
@@ -1216,7 +1274,7 @@ const CALENDAR_CONFLICT_TOOLS = [
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...ESCALATION_TOOLS],
-  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
+  report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   // Unattended investigate-and-fix pass (self_heal_watcher) -- same tools as
   // 'code' minus github_merge_pr, so it can open a PR for Michael but can
@@ -1256,7 +1314,7 @@ const TOOL_MAP = {
   dev_ambiguous: [...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...ESCALATION_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
 };
 
 // Fail loudly at load time, not silently at call time, if a future rename
