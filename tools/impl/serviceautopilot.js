@@ -2592,16 +2592,46 @@ export async function setClientCrackfill({ clientId, pavementSf: pavementSfArg }
  * Uses MyDay_GetTickets with CustomerJobID filter (discovered 2026-06-13).
  * Returns newest first, limited to `limit` entries.
  */
+/**
+ * Fetch recent CRM notes/tickets for a client — call history, site visits, consultation notes.
+ *
+ * FIX 2026-08-25 (two bugs corrected):
+ *
+ * Bug 1 — getClientDetails was called as getClientDetails(clientId) (raw string), not
+ * getClientDetails({ clientId }) (object). getClientDetails() destructures { clientId }
+ * from its argument, so a raw string produced clientId=undefined inside the function,
+ * which caused SA to return "no data returned for clientId undefined".
+ *
+ * Bug 2 — MyDay_GetTickets with AllTickets:true completely ignores the CustomerJobID
+ * filter server-side and returns SA's global/company-wide ticket feed (confirmed live
+ * 2026-08-25: probing with Behzad Shabahang's customerJobId returned Dan McCoy's
+ * ticket as the first result). The fix is to fetch with a large page size (fetch enough
+ * to cover the per-client window) and then filter client-side by EntityID === customerJobId,
+ * which is the field SA itself uses to associate a ticket with a specific account.
+ *
+ * Returns newest first, limited to `limit` per-client entries.
+ */
 export async function getClientNotes({ clientId, limit = 10 }) {
-  const details = await getClientDetails(clientId);
+  // Bug 1 fix: pass object, not raw string
+  const details = await getClientDetails({ clientId });
   const { customerJobId } = details;
 
+  // Bug 2 fix: fetch a broad window (global feed), then filter by EntityID client-side.
+  // Fetch more than `limit` so filtering still yields up to `limit` per-client results.
+  const fetchSize = Math.max(limit * 20, 200);
   const res = await post('/CRMBFF/TicketList/MyDay_GetTickets', {
-    QueryInput: { MaxRows: limit, AllTickets: true, StartingRow: 0, CustomerJobID: customerJobId },
+    QueryInput: { MaxRows: fetchSize, AllTickets: true, StartingRow: 0, CustomerJobID: customerJobId },
   }, 'ClientView.aspx');
 
-  const tickets = res.data?.Tickets || [];
-  logger.info('SA: getClientNotes complete', { clientId, count: tickets.length });
+  const allTickets = res.data?.Tickets || [];
+
+  // Filter to only tickets belonging to this client (EntityID === customerJobId).
+  // AllTickets:true ignores CustomerJobID server-side; this is the client-side guard.
+  const tickets = allTickets
+    .filter(t => t.EntityID === customerJobId)
+    .slice(0, limit);
+
+  logger.info('SA: getClientNotes complete', { clientId, customerJobId, fetchedGlobal: allTickets.length, perClient: tickets.length });
 
   return tickets.map(t => {
     const d = t.RequestDate || t.StartDate || {};
@@ -2620,12 +2650,7 @@ export async function getClientNotes({ clientId, limit = 10 }) {
   });
 }
 
-/**
- * Sync the SA waiting list to Supabase (sa_waiting_list table).
- * Uses the puppeteer session to bypass Incapsula — raw HTTP calls fail.
- * Called by the /sync-waiting-list endpoint (FieldOps Refresh button).
- * Returns { synced: number, extractedAt: string }.
- */
+
 export async function syncWaitingList() {
   const today = new Date();
   const body = {
