@@ -964,16 +964,75 @@ export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {})
 
 // Creates a draft reply in Michael's mailbox, preserving the email thread.
 // Returns the draft message ID so it can be sent later or reviewed in Outlook.
+//
+// FIX (2026-08-26): the original Step 2 PATCH overwrote the ENTIRE draft body with only
+// the new reply text, discarding Exchange's auto-generated quoted-original HTML from Step 1.
+// This caused two symptoms: (a) the quoted thread was completely absent from the draft, and
+// (b) the reply text rendered in Outlook's default display font (often Times New Roman)
+// instead of Calibri — because Exchange's inline-styled .elementToProof compose div was
+// part of the same content that got overwritten. Both symptoms were confirmed live on the
+// PlanHub test draft and the Hefner's Custard thread created by michael_inbox_processor.
+//
+// The fix preserves Exchange's stub body by prepending the new reply text (wrapped in an
+// Exchange-matching Calibri-12pt styled div) into the stub's <body> element rather than
+// replacing the entire body.content field. A GET fallback handles the subset of Graph
+// tenants where body.content is absent/empty on the createReply POST response.
 export async function createReplyDraft({ userEmail, email_id, body } = {}) {
   const user = userEmail ?? USER();
-  // Step 1: create the reply stub (preserves thread headers, To, Subject)
+
+  // Step 1: create the reply stub.
+  // Exchange auto-populates the draft with correct threading headers and a quoted block
+  // (an <hr>, From/Sent/To/Subject attribution, and the original message body).
   const stub = await graph('POST', `/users/${user}/messages/${encodeURIComponent(email_id)}/createReply`, {});
   const draftId = stub.id;
-  // Step 2: patch the body onto the draft
+
+  // Step 2: get the existing body content Exchange wrote into the draft.
+  // Most Graph tenants return body.content on the createReply POST response directly,
+  // but some only populate it on a subsequent GET (a tenant-config / Exchange-version
+  // difference in how the quoted block is materialized). An empty stub.body.content is
+  // the signal to do the GET rather than silently losing the quoted thread.
+  let existingContent = stub.body?.content ?? '';
+  if (!existingContent.trim()) {
+    logger.info('createReplyDraft: stub.body.content empty on POST response — fetching via GET', { user, draftId });
+    const fetched = await graph('GET', `/users/${user}/messages/${encodeURIComponent(draftId)}?$select=id,body`);
+    existingContent = fetched.body?.content ?? '';
+  }
+
+  // Step 3: build the combined body.
+  // Wrap the new reply text in a styled div that matches Exchange's own .elementToProof
+  // compose-area inline style (Calibri 12pt, black). Without this wrapper, new text
+  // renders in Outlook's default display font, visually mismatched against the Calibri
+  // attribution block Exchange generates below the separator.
+  const styledReplyText = `<div style="font-family: Calibri, Arial, Helvetica, sans-serif; font-size: 12pt; color: rgb(0, 0, 0);">${body}</div>`;
+
+  let combinedContent;
+  if (existingContent.trim()) {
+    // Inject new reply text right after the opening <body> tag of Exchange's stub HTML.
+    // This places it at the top of the compose area, above the <hr> and quoted block.
+    const bodyTagMatch = existingContent.match(/<body[^>]*>/i);
+    if (bodyTagMatch) {
+      const insertPos = bodyTagMatch.index + bodyTagMatch[0].length;
+      combinedContent =
+        existingContent.slice(0, insertPos) +
+        styledReplyText +
+        existingContent.slice(insertPos);
+    } else {
+      // Exchange returned a fragment (no <body> tag) — prepend directly.
+      combinedContent = styledReplyText + existingContent;
+    }
+  } else {
+    // Fallback: Exchange stub body was empty even after the GET.
+    // Produce a minimal valid reply rather than sending a bare fragment.
+    combinedContent = `<html><body>${styledReplyText}</body></html>`;
+    logger.warn('createReplyDraft: Exchange stub body was empty after GET — draft will have no quoted thread', { user, draftId, sourceMessageId: email_id });
+  }
+
+  // Step 4: patch the draft with the combined body (new text + Exchange's quoted thread).
   await graph('PATCH', `/users/${user}/messages/${encodeURIComponent(draftId)}`, {
-    body: { contentType: 'HTML', content: body },
+    body: { contentType: 'HTML', content: combinedContent },
   });
-  logger.info('Reply draft created', { user, draftId, sourceMessageId: email_id });
+
+  logger.info('Reply draft created', { user, draftId, sourceMessageId: email_id, hadExistingContent: !!existingContent.trim() });
   return { draft_id: draftId };
 }
 
