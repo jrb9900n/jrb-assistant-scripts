@@ -23,6 +23,7 @@ import * as sa          from './impl/serviceautopilot.js';
 import { scheduleEstimateVisit } from './impl/scheduling-visits.js';
 import { checkMichaelAvailability, bookTimeWithMichael } from './impl/scheduling-booking.js';
 import * as fleetsharp  from './impl/fleetsharp.js';
+import * as googleAds   from './impl/google-ads.js';
 import * as carddav     from './impl/carddav.js';
 import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
@@ -213,6 +214,12 @@ const HANDLERS = {
   fleetsharp_get_live_positions:  () => fleetsharp.getLivePositions(),
   fleetsharp_get_daily_mileage:   (i) => fleetsharp.getDailyMileage(i),
   fleetsharp_get_tracker_names:   () => fleetsharp.getTrackerNames(),
+
+  // Google Ads (read-only — see tools/impl/google-ads.js header)
+  google_ads_list_campaigns:          (i) => googleAds.listCampaigns(i),
+  google_ads_get_campaign_metrics:    (i) => googleAds.getCampaignMetrics(i),
+  google_ads_get_keyword_performance: (i) => googleAds.getKeywordPerformance(i),
+  google_ads_get_lead_conversions:    (i) => googleAds.getLeadConversions(i),
 
   // CardDAV
   carddav_provision:      (i) => carddav.provisionCredential(i),

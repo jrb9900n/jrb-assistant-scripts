@@ -137,6 +137,14 @@ $secrets = @{
     "BRAVE_SEARCH_API_KEY" = Get-Secret "BRAVE_SEARCH_API_KEY"
     "OPENAI_API_KEY"       = Get-Secret "OPENAI_API_KEY"
     "GOOGLE_MAPS_API_KEY"  = Get-Secret "GOOGLE_MAPS_API_KEY"
+    # Google Ads reporting (read-only) - reuses the google-ads-agent project's
+    # already-authorized OAuth grant, migrated into Credential Manager rather
+    # than requesting a new one. See tools/impl/google-ads.js.
+    "GOOGLE_ADS_CLIENT_ID"         = Get-Secret "GOOGLE_ADS_CLIENT_ID"
+    "GOOGLE_ADS_CLIENT_SECRET"     = Get-Secret "GOOGLE_ADS_CLIENT_SECRET"
+    "GOOGLE_ADS_DEVELOPER_TOKEN"   = Get-Secret "GOOGLE_ADS_DEVELOPER_TOKEN"
+    "GOOGLE_ADS_REFRESH_TOKEN"     = Get-Secret "GOOGLE_ADS_REFRESH_TOKEN"
+    "GOOGLE_ADS_LOGIN_CUSTOMER_ID" = Get-Secret "GOOGLE_ADS_LOGIN_CUSTOMER_ID"
     "SA_EMAIL"             = Get-Secret "SA_EMAIL"
     "SA_PASSWORD"          = Get-Secret "SA_PASSWORD"
     "SA_EMAIL_OLD"         = Get-Secret "SA_EMAIL_OLD"
