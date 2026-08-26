@@ -70,28 +70,35 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LOG_FILE   = Join-Path $scriptRoot "logs\supabase-keepalive.log"
 $ts         = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
-# Same two Supabase projects used elsewhere in this repo (see CLAUDE.md's
-# Credentials section) - both free-tier, both at risk of auto-pause.
+# Same Supabase projects used elsewhere in this repo (see CLAUDE.md's
+# Credentials section) - all free-tier, all at risk of auto-pause. jrb-history
+# (the "Old SA" 2015-Aug 2023 archive, a separate email/account from the other
+# two - see sa-history-match.js) has no fixed URL hardcoded anywhere in this
+# repo, so its URL is read from Credential Manager too, not hardcoded like the
+# other two.
 $projects = @(
     @{ Name = "jrb-assistant"; Url = "https://znpahinyplccdyoekfeo.supabase.co"; KeyName = "SUPABASE_SERVICE_KEY" },
-    @{ Name = "fleetops";      Url = "https://mzywmgesulyalevtzudw.supabase.co"; KeyName = "FLEETOPS_SUPABASE_SERVICE_KEY" }
+    @{ Name = "fleetops";      Url = "https://mzywmgesulyalevtzudw.supabase.co"; KeyName = "FLEETOPS_SUPABASE_SERVICE_KEY" },
+    @{ Name = "jrb-history";   UrlKeyName = "SUPABASE_HISTORY_URL";              KeyName = "SUPABASE_HISTORY_KEY" }
 )
 
 $failures = [System.Collections.Generic.List[string]]::new()
 
 foreach ($p in $projects) {
     $key = Get-Secret $p.KeyName
-    if (-not $key) {
-        $msg = "$ts  SKIP $($p.Name): secret $($p.KeyName) not found in Credential Manager"
+    $url = if ($p.Url) { $p.Url } else { Get-Secret $p.UrlKeyName }
+    if (-not $key -or -not $url) {
+        $missing = @(if (-not $key) { $p.KeyName }; if (-not $url) { $p.UrlKeyName }) -join ", "
+        $msg = "$ts  SKIP $($p.Name): secret(s) not found in Credential Manager: $missing"
         Add-Content -Path $LOG_FILE -Value $msg -Encoding UTF8
-        $failures.Add("$($p.Name): missing secret $($p.KeyName)")
+        $failures.Add("$($p.Name): missing secret(s) $missing")
         continue
     }
     try {
         # A real PostgREST call (not just a TCP/HTTP reachability check) - this is
         # what registers as project activity against Supabase's inactivity timer.
         $headers = @{ apikey = $key; Authorization = "Bearer $key" }
-        Invoke-WebRequest -Uri "$($p.Url)/rest/v1/" -Headers $headers -UseBasicParsing -TimeoutSec 20 | Out-Null
+        Invoke-WebRequest -Uri "$url/rest/v1/" -Headers $headers -UseBasicParsing -TimeoutSec 20 | Out-Null
         Add-Content -Path $LOG_FILE -Value "$ts  OK $($p.Name)" -Encoding UTF8
     } catch {
         $errMsg = $_.Exception.Message
