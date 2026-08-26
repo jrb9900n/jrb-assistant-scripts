@@ -8,7 +8,7 @@
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\launcher\save-other-org-supabase-secrets.ps1"
 
-Add-Type -TypeDefinition @"
+$credWriterSource = @"
 using System; using System.Runtime.InteropServices; using System.Text;
 public class CredWriter {
     [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)]
@@ -32,9 +32,18 @@ public class CredWriter {
     }
 }
 "@
+# Guarded like keepalive-supabase.ps1's Get-Secret: running this in the same
+# PowerShell session as any sibling save-*-secrets.ps1 (all of which define
+# an identical CredWriter the same way) would otherwise throw "type already
+# exists" and abort before saving anything - already hit once before, which
+# is why update-sa-proxy.ps1 had to rename its own copy to CredWriter2.
+if (-not ([System.Management.Automation.PSTypeName]'CredWriter').Type) {
+    Add-Type -TypeDefinition $credWriterSource
+}
 
 function Set-JRBSecret([string]$Name) {
-    $value = Read-Host "Enter value for $Name"
+    $value = (Read-Host "Enter value for $Name").Trim()
+    if ($Name -like "*_URL") { $value = $value.TrimEnd('/') }
     if ($value) {
         $ok = [CredWriter]::Save("JRBAgent:$Name", "JRBAgent", $value)
         if ($ok) { Write-Host "  Saved $Name" -ForegroundColor Green }

@@ -93,6 +93,8 @@ $failures = [System.Collections.Generic.List[string]]::new()
 foreach ($p in $projects) {
     $key = Get-Secret $p.KeyName
     $url = if ($p.Url) { $p.Url } else { Get-Secret $p.UrlKeyName }
+    if ($key) { $key = $key.Trim() }
+    if ($url) { $url = $url.Trim().TrimEnd('/') }
     if (-not $key -or -not $url) {
         $missing = @(if (-not $key) { $p.KeyName }; if (-not $url) { $p.UrlKeyName }) -join ", "
         $msg = "$ts  SKIP $($p.Name): secret(s) not found in Credential Manager: $missing"
