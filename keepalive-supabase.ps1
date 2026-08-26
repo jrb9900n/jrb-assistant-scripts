@@ -72,14 +72,20 @@ $ts         = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
 
 # Same Supabase projects used elsewhere in this repo (see CLAUDE.md's
 # Credentials section) - all free-tier, all at risk of auto-pause. jrb-history
-# (the "Old SA" 2015-Aug 2023 archive, a separate email/account from the other
-# two - see sa-history-match.js) has no fixed URL hardcoded anywhere in this
-# repo, so its URL is read from Credential Manager too, not hardcoded like the
-# other two.
+# ("JRB SA History" - the Old SA 2015-Aug 2023 archive) and jrb-database
+# ("JRB Database") both live under a separate Supabase org/account from the
+# other two and have no fixed URL hardcoded anywhere in this repo, so their
+# URLs are read from Credential Manager too, not hardcoded like the other two.
+#
+# This script only ever pings each project's bare /rest/v1/ root (a schema/
+# reachability check, not a data query) - it must never query actual tables
+# or rows in jrb-history/jrb-database, which belong to a different account
+# than the rest of this repo.
 $projects = @(
     @{ Name = "jrb-assistant"; Url = "https://znpahinyplccdyoekfeo.supabase.co"; KeyName = "SUPABASE_SERVICE_KEY" },
     @{ Name = "fleetops";      Url = "https://mzywmgesulyalevtzudw.supabase.co"; KeyName = "FLEETOPS_SUPABASE_SERVICE_KEY" },
-    @{ Name = "jrb-history";   UrlKeyName = "SUPABASE_HISTORY_URL";              KeyName = "SUPABASE_HISTORY_KEY" }
+    @{ Name = "jrb-history";   UrlKeyName = "SUPABASE_HISTORY_URL";              KeyName = "SUPABASE_HISTORY_KEY" },
+    @{ Name = "jrb-database";  UrlKeyName = "SUPABASE_JRBDB_URL";                 KeyName = "SUPABASE_JRBDB_KEY" }
 )
 
 $failures = [System.Collections.Generic.List[string]]::new()

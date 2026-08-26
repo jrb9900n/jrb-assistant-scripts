@@ -1,10 +1,12 @@
-# save-supabase-history-secrets.ps1
-# Run this in your own PowerShell window to store the "Old SA" history
-# Supabase project's URL and service key in Windows Credential Manager. Values
-# are prompted interactively and never pass through Claude Code / chat.
+# save-other-org-supabase-secrets.ps1
+# Run this in your own PowerShell window to store the URL + service key for
+# each Supabase project that lives under the other (non-J.R. Boehlke) org -
+# "JRB SA History" (Old SA, 2015-Aug 2023 archive) and "JRB Database" - in
+# Windows Credential Manager. Values are prompted interactively and never
+# pass through Claude Code / chat.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\launcher\save-supabase-history-secrets.ps1"
+#   powershell -ExecutionPolicy Bypass -File "C:\Users\Assistant\JRBAgent\launcher\save-other-org-supabase-secrets.ps1"
 
 Add-Type -TypeDefinition @"
 using System; using System.Runtime.InteropServices; using System.Text;
@@ -40,15 +42,25 @@ function Set-JRBSecret([string]$Name) {
     } else { Write-Host "  Skipped $Name" -ForegroundColor Yellow }
 }
 
-Write-Host "`nSupabase History (Old SA) - Credential Manager Setup" -ForegroundColor Cyan
-Write-Host "=========================================================`n"
+Write-Host "`nOther-Org Supabase Projects - Credential Manager Setup" -ForegroundColor Cyan
+Write-Host "============================================================`n"
+Write-Host "These credentials are ONLY used to ping each project's root REST endpoint"
+Write-Host "to keep it from auto-pausing - never to read or write any table/row data.`n"
 
-Write-Host "SUPABASE_HISTORY_URL - project URL for the Old SA (2015-Aug 2023) archive Supabase project, e.g. https://<ref>.supabase.co"
+Write-Host "--- JRB SA History (Old SA, 2015-Aug 2023 archive) ---"
+Write-Host "SUPABASE_HISTORY_URL - project URL, e.g. https://<ref>.supabase.co"
 Set-JRBSecret "SUPABASE_HISTORY_URL"
-
-Write-Host "`nSUPABASE_HISTORY_KEY - service role key for that same project"
+Write-Host "SUPABASE_HISTORY_KEY - service role key for that same project"
 Set-JRBSecret "SUPABASE_HISTORY_KEY"
 
-Write-Host "`nDone. These are now readable as JRBAgent:SUPABASE_HISTORY_URL / JRBAgent:SUPABASE_HISTORY_KEY."
-Write-Host "The keepalive-supabase.ps1 task will pick them up automatically on its next scheduled run (every 4 days) - no restart needed."
+Write-Host "`n--- JRB Database ---"
+Write-Host "SUPABASE_JRBDB_URL - project URL, e.g. https://<ref>.supabase.co"
+Set-JRBSecret "SUPABASE_JRBDB_URL"
+Write-Host "SUPABASE_JRBDB_KEY - service role key for that same project"
+Set-JRBSecret "SUPABASE_JRBDB_KEY"
+
+Write-Host "`nDone. These are now readable as JRBAgent:SUPABASE_HISTORY_URL / JRBAgent:SUPABASE_HISTORY_KEY"
+Write-Host "and JRBAgent:SUPABASE_JRBDB_URL / JRBAgent:SUPABASE_JRBDB_KEY."
+Write-Host "The keepalive-supabase.ps1 task will pick up whichever pairs are saved automatically on its"
+Write-Host "next scheduled run (every 4 days) - no restart needed."
 Write-Host "Tell Claude once this is saved - no need to share the actual values."
