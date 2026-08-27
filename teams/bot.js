@@ -537,6 +537,53 @@ async function processTeamsMessage(activity, sessionId) {
     logger.warn('Teams: resolvePendingEscalationReply check failed (non-fatal)', { err: err.message });
   }
 
+  // A reply to a pending code/repo/infra-write approval (see
+  // tools/impl/code-approval.js). Deliberately NOT run through
+  // isApprovalReply/runAgent like the two checks above -- confirmation here
+  // requires the exact 8-character code from the original request ("confirm
+  // a1b2c3d4", matching row.id.slice(0,8) exactly, never a shorter prefix --
+  // findPendingApproval also refuses an ambiguous partial match, but
+  // requiring the full code here is the first line of defense against
+  // acting on the wrong pending action), matched deterministically against
+  // the pending row, so execution can never be triggered by the model
+  // inferring "the user seems to be agreeing" from free-form text. Handles
+  // both this session's own pending action and a voice-originated one
+  // (Michael confirming from Teams what he asked for on a call) --
+  // code-approval.js's rows aren't scoped to a single sessionId lookup
+  // here, the code itself is the key.
+  const confirmMatch = /^\s*confirm\s+([a-f0-9]{8})\b/i.exec(userText);
+  const denyMatch = !confirmMatch && /^\s*(?:deny|cancel)\s+([a-f0-9]{8})\b/i.exec(userText);
+  if (confirmMatch || denyMatch) {
+    const code = (confirmMatch ?? denyMatch)[1];
+    try {
+      const { findPendingApproval, executeApprovedAction, denyPendingApproval } = await import('../tools/impl/code-approval.js');
+      const pending = await findPendingApproval(code);
+      if (!pending) {
+        await remember(`No pending confirmation found for code "${code}" — it may have already run, been denied, or expired.`);
+        return;
+      }
+      if (denyMatch) {
+        await denyPendingApproval(pending);
+        await remember(`Denied — won't run: ${pending.description}`);
+        return;
+      }
+      await remember(`Confirmed — running now: ${pending.description}`);
+      let result;
+      try {
+        result = await executeApprovedAction(pending);
+      } catch (err) {
+        await remember(`That failed: ${err.message}`);
+        return;
+      }
+      const resultText = typeof result === 'string' ? result : JSON.stringify(result);
+      await remember(`✅ Done: ${pending.description}\n\n${resultText.slice(0, 1500)}`);
+    } catch (err) {
+      logger.error('Teams: confirm/deny-code-action handling failed', { err: err.message });
+      await remember("Something went wrong handling that — check the logs.");
+    }
+    return;
+  }
+
   let intent = classifyIntent(userText);
   // The regex router only reaches 'general' when nothing else confidently
   // matched -- a cheap one-shot Haiku re-classification here catches
