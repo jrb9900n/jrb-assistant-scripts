@@ -37,11 +37,17 @@
 import { getTools } from '../tools/registry.js';
 import { logger } from '../core/logger.js';
 
-// The mailbox owner for draft_email on the voice channel. Sourced from the
-// same env var used by M365_USER_EMAIL / USER() in tools/impl/m365.js --
-// a single point of truth so a mailbox rename or domain migration only
-// requires changing the environment variable, not hunting magic strings.
-const VOICE_DRAFT_USER_EMAIL = process.env.M365_USER_EMAIL;
+// The mailbox voice-channel drafts land in. Deliberately NOT sourced from
+// M365_USER_EMAIL -- that env var IS the assistant's own mailbox address
+// (see USER() in tools/impl/m365.js), so reading it here would silently put
+// drafts right back in the assistant's mailbox, exactly the bug this
+// override exists to fix (confirmed live 2026-08-26: Michael asked
+// repeatedly on real calls for drafts in his own mailbox and never got
+// them). An automated review pass on this PR "fixed" this constant to read
+// M365_USER_EMAIL for consistency with USER() -- reverted; that's the same
+// regression with a plausible-sounding comment, not a real fix. If JRB's
+// domain ever changes, update this literal.
+const VOICE_DRAFT_USER_EMAIL = 'michael@jrboehlke.com';
 
 const VOICE_TOOL_NAMES = new Set([
   // Calendar
@@ -120,16 +126,17 @@ const VOICE_TOOL_NAMES = new Set([
 // If a tool's registry taskType isn't listed here it will be silently absent
 // from ANTHROPIC_TOOL_DEFS -- the LLM never sees its schema and calls never
 // happen. The startup check below catches this at boot rather than at
-// call-time.
+// call-time. Note: registry.js's TOOL_MAP has no 'fleet'/'finance'/'ads' keys
+// -- getTools() falls back to TOOL_MAP.general for an unknown name, so those
+// would silently just re-fetch the same (very wide) general bucket three
+// times over, not actually target FleetSharp/QB/Google Ads specifically.
+// 'crm' + 'report' already carry those tools' real taskTypes.
 const CANDIDATE_TOOLS = [
   ...getTools('calendar'),
   ...getTools('email'),
   ...getTools('crm'),
   ...getTools('report'),
   ...getTools('scheduling'),
-  ...getTools('fleet'),
-  ...getTools('finance'),
-  ...getTools('ads'),
   ...getTools('sharepoint'),
 ];
 const seen = new Set();
@@ -194,16 +201,10 @@ export async function handleVoiceToolCall(name, argsJsonString, context) {
   // mailbox, not the assistant's -- draft_email's tool schema doesn't expose
   // userEmail to this channel's model at all (see buildVoiceToolSchema), so
   // force it here rather than relying on prompt wording to get an LLM to
-  // remember a param it was never shown.
-  // The address is sourced from M365_USER_EMAIL (same env var used by USER()
-  // in tools/impl/m365.js) rather than a hardcoded string, so a mailbox
-  // rename or domain migration only requires updating the environment.
+  // remember a param it was never shown. See VOICE_DRAFT_USER_EMAIL's own
+  // comment above for why this is a literal, not an env var.
   if (name === 'draft_email') {
-    if (!VOICE_DRAFT_USER_EMAIL) {
-      logger.error('Voice bridge: M365_USER_EMAIL is not set -- draft_email will use the assistant mailbox default instead of the configured user mailbox');
-    } else {
-      input.userEmail = VOICE_DRAFT_USER_EMAIL;
-    }
+    input.userEmail = VOICE_DRAFT_USER_EMAIL;
   }
 
   const { dispatchTool } = await import('../tools/dispatcher.js');
