@@ -45,7 +45,19 @@ const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 // where the cheap model's shallower reasoning is an acceptable tradeoff.
 // 'marketing' (built 2026-08-25) drafts campaign/re-engagement content --
 // writing quality matters the same way it does for 'email'/'report'.
-const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix', 'general', 'calendar', 'dev_ambiguous', 'marketing']);
+// 'employee' (built 2026-08-24) is the non-Michael Teams requester path --
+// its system prompt gives a strict, narrow instruction ("never explain, just
+// call request_employee_approval") specifically so an unverified sender can
+// never talk the model into revealing private data or claiming a gated
+// action succeeded. Confirmed live 2026-08-27: omitted from this set, a
+// follow-up message in that same conversation fell to Haiku's keyword
+// heuristic (no complexity keyword tripped) and didn't follow that
+// instruction -- it fabricated its own ad hoc "prove your identity" demand
+// instead of calling the tool again, a challenge nothing in the codebase can
+// actually satisfy. This is exactly the failure mode 'general'/'calendar'/
+// 'dev_ambiguous' were added to prevent above, just missed for this
+// taskType since it shipped the same day as that investigation.
+const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix', 'general', 'calendar', 'dev_ambiguous', 'marketing', 'employee']);
 
 function routeModel(taskPrompt, forceModel, taskType) {
     if (forceModel) return forceModel;
