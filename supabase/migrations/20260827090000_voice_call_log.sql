@@ -40,11 +40,16 @@ create policy "voice_call_log: deny anon reads"
   to anon
   using (false);
 
+-- with check (false) is required alongside using (false) for INSERT/UPDATE
+-- coverage: Postgres ignores USING for INSERT operations and only evaluates
+-- WITH CHECK, so omitting it means this "for all" policy does not actually
+-- block anon INSERT statements.
 create policy "voice_call_log: deny anon writes"
   on public.voice_call_log
   for all
   to anon
-  using (false);
+  using (false)
+  with check (false);
 
 create policy "voice_call_log: deny authenticated reads"
   on public.voice_call_log
@@ -52,8 +57,13 @@ create policy "voice_call_log: deny authenticated reads"
   to authenticated
   using (false);
 
+-- with check (false) is required alongside using (false) for INSERT/UPDATE
+-- coverage: Postgres ignores USING for INSERT operations and only evaluates
+-- WITH CHECK, so omitting it means this "for all" policy does not actually
+-- block authenticated INSERT statements.
 create policy "voice_call_log: deny authenticated writes"
   on public.voice_call_log
   for all
   to authenticated
-  using (false);
+  using (false)
+  with check (false);
