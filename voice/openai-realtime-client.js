@@ -17,6 +17,7 @@ import WebSocket from 'ws';
 import { logger } from '../core/logger.js';
 import { matchSpokenPin } from './call-auth.js';
 import { buildVoiceToolSchema, handleVoiceToolCall } from './tool-bridge.js';
+import { loadRecentCallContext } from './call-memory.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime';
 const PIN_MAX_ATTEMPTS = 3;
@@ -132,6 +133,20 @@ export async function connectRealtimeSession({ session, hangUp }) {
       return;
     }
 
+    // The model's own spoken-output transcript, for voice/call-memory.js.
+    // Named by analogy with response.output_audio.delta (the raw-audio
+    // event this file already listens to above) -- output transcription has
+    // no separate opt-in the way input transcription does, so this should
+    // fire whenever output_modalities includes 'audio', but the exact event
+    // name hasn't been confirmed against a real call yet. If it's wrong,
+    // this branch just never matches (same silent-no-match fallthrough as
+    // any other unrecognized evt.type here) -- assistant-side transcript
+    // capture would silently no-op rather than break the call itself.
+    if (evt.type === 'response.output_audio_transcript.done' && evt.transcript && session.authState === 'verified') {
+      session.transcript?.push({ role: 'assistant', text: evt.transcript, at: new Date().toISOString() });
+      return;
+    }
+
     if (evt.type === 'response.done') {
       // Per OpenAI's own documented pattern, the function name only
       // reliably appears on the completed response's output items
@@ -188,7 +203,17 @@ export async function connectRealtimeSession({ session, hangUp }) {
   };
 }
 
-function handleTranscript(session, ws, transcript, hangUp) {
+async function handleTranscript(session, ws, transcript, hangUp) {
+  // Once verified, every subsequent transcribed caller utterance is a real
+  // conversation turn for voice/call-memory.js, not a PIN attempt -- record
+  // it and stop (the PIN logic below never runs again this call). Nothing
+  // reaches here pre-verification except spoken PIN attempts, which are
+  // deliberately never pushed to session.transcript (see session-state.js).
+  if (session.authState === 'verified') {
+    session.transcript?.push({ role: 'caller', text: transcript, at: new Date().toISOString() });
+    return;
+  }
+
   if (session.authState !== 'awaiting_pin') return;
 
   if (Date.now() > session.pinDeadline) {
@@ -200,9 +225,19 @@ function handleTranscript(session, ws, transcript, hangUp) {
   const storedPin = process.env.VOICE_CALL_PIN;
   if (matchSpokenPin(transcript, storedPin)) {
     session.authState = 'verified';
+    // Recent call/Teams history (memory.js's shared agent_memory, via
+    // call-memory.js) so a call picks up where the last conversation left
+    // off instead of starting from zero every time. Awaited before the
+    // session.update so it's part of the model's instructions from its very
+    // first post-PIN response, not raced in afterward.
+    const recentContext = await loadRecentCallContext().catch((err) => {
+      logger.warn('Voice bridge: loadRecentCallContext failed, continuing without it', { callId: session.callConnectionId, err: err.message });
+      return '';
+    });
+    const instructions = recentContext ? `${VOICE_SYSTEM_PROMPT}\n\n${recentContext}` : VOICE_SYSTEM_PROMPT;
     ws.send(JSON.stringify({
       type: 'session.update',
-      session: audioSessionConfig(VOICE_SYSTEM_PROMPT, buildVoiceToolSchema()),
+      session: audioSessionConfig(instructions, buildVoiceToolSchema()),
     }));
     logger.info('Voice bridge: caller PIN verified', { callId: session.callConnectionId });
     return;

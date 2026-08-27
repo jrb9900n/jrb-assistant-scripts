@@ -9,6 +9,7 @@ import { CallAutomationClient, StreamingData, createOutboundAudioData } from '@a
 import { logger } from '../core/logger.js';
 import { checkCallerAllowlist } from './call-auth.js';
 import { connectRealtimeSession } from './openai-realtime-client.js';
+import { finalizeCallMemory } from './call-memory.js';
 import * as sessions from './session-state.js';
 
 const PUBLIC_MEDIA_WSS = process.env.VOICE_PUBLIC_MEDIA_WSS || 'wss://agent.jrboehlke.com/voice-media';
@@ -169,6 +170,14 @@ export function attachAcsMediaSocket(ws, headers) {
     // but the stale entry (fromNumber, authState, etc.) never got evicted.
     session.openaiClient?.close();
     session.wsToAcs = null;
+    // Fire-and-forget: persists the transcript + Haiku summary (voice/
+    // call-memory.js). Not awaited -- this handler is a synchronous ws
+    // 'close' callback, and a slow Supabase/Anthropic call shouldn't hold up
+    // socket teardown. Reads session.transcript before sessions.remove()
+    // below clears the map entry it lives on.
+    finalizeCallMemory(session).catch((err) =>
+      logger.error('Voice bridge: call memory finalize failed', { callConnectionId, err: err.message })
+    );
     sessions.remove(callConnectionId);
   });
 

@@ -100,14 +100,15 @@ const EMAIL_TOOLS = [
   },
   {
     name: 'send_email',
-    description: 'Send an existing draft or a new email. Use draft_email first for review flows.',
+    description: 'Send an existing draft or a new email. Use draft_email first for review flows. If sending a draft_id, userEmail must match whichever mailbox that draft was created in.',
     input_schema: {
       type: 'object',
       properties: {
-        draft_id: { type: 'string', description: 'Draft ID to send (from draft_email)' },
-        to:       { type: 'array', items: { type: 'string' } },
-        subject:  { type: 'string' },
-        body:     { type: 'string' },
+        draft_id:  { type: 'string', description: 'Draft ID to send (from draft_email)' },
+        to:        { type: 'array', items: { type: 'string' } },
+        subject:   { type: 'string' },
+        body:      { type: 'string' },
+        userEmail: { type: 'string', description: 'Mailbox to send from. Omit for the assistant\'s own mailbox.' },
       },
       required: [],
     },
