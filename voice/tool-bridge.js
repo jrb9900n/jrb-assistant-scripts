@@ -13,15 +13,19 @@
 // Expanded 2026-08-26 per Michael's explicit request after a live call --
 // he asked (and the assistant had no tool for): SA/Dispatch Board, FieldOps/
 // FleetOps, QuickBooks, Google Ads, SharePoint. Added read-heavy tools from
-// each of those areas, still deliberately excluding the highest-risk write
-// paths for an unattended, PIN-only-authenticated phone channel:
-// book_time_with_michael (real Outlook invite to an arbitrary address),
-// sa_create_client/sa_create_estimate/sa_create_job/sa_set_billing_defaults/
-// sa_set_crackfill/tag-write tools (irreversible or higher-blast-radius SA
-// writes), and escalate_to_claude_code (still throws on this channel per the
-// original note above -- context.activity is never present). If Michael
-// wants any of those live on a call too, that's a deliberate follow-up ask,
-// not an oversight.
+// each of those areas.
+//
+// Expanded again same day: Michael explicitly asked for the higher-risk SA
+// write paths (client/estimate/job creation, billing defaults, tag config)
+// and book_time_with_michael too, after being told they were initially left
+// out. Those are now included -- see VOICE_SYSTEM_PROMPT's explicit
+// "confirm before committing" instruction, added alongside this expansion
+// specifically because these actions are consequential (a real Outlook
+// invite, a new SA client/estimate/job) and phone-line speech-to-text is
+// more error-prone than typed input, so a name/date/amount misheard by the
+// model is more likely here than on Teams/CLI. escalate_to_claude_code
+// remains excluded -- not a risk judgment call, it structurally throws on
+// this channel (dereferences context.activity, which voice never supplies).
 //
 // tools/dispatcher.js itself has no allowlist concept -- it will dispatch
 // any registered tool name regardless of caller. Restricting a voice call to
@@ -46,8 +50,9 @@ const VOICE_TOOL_NAMES = new Set([
   'get_email',
   'get_email_triage',
   'draft_email',
-  // SA / Dispatch Board (read + dispatch + append-only logging -- not
-  // client/estimate/job creation or billing/tag config)
+  // SA / Dispatch Board -- full set, including the higher-risk write paths
+  // (client/estimate/job creation, billing defaults, tag config) Michael
+  // explicitly asked to have added
   'sa_search_clients',
   'sa_fuzzy_match_client',
   'sa_get_client_profile',
@@ -61,6 +66,19 @@ const VOICE_TOOL_NAMES = new Set([
   'sa_list_resources',
   'sa_dispatch_job',
   'sa_update_route_order',
+  'sa_create_client',
+  'sa_search_service_types',
+  'sa_create_estimate',
+  'sa_create_job',
+  'sa_set_billing_defaults',
+  'sa_set_crackfill',
+  'sa_list_tag_categories',
+  'sa_list_tags',
+  'sa_get_client_tags',
+  'sa_add_tag_to_client',
+  'sa_remove_tag_from_client',
+  'sa_find_or_create_tag',
+  'sa_find_or_create_tag_category',
   // FieldOps (crew scheduling board)
   'get_crews',
   'get_waiting_list',
@@ -87,6 +105,9 @@ const VOICE_TOOL_NAMES = new Set([
   'read_sharepoint_file',
   'list_sharepoint_folder',
   'list_sharepoint_sites',
+  // Booking (real Outlook invite to an arbitrary address)
+  'book_time_with_michael',
+  'check_michael_availability',
 ]);
 
 const CANDIDATE_TOOLS = [
