@@ -34,6 +34,7 @@ import { createClient } from '@supabase/supabase-js';
 import * as marketingSegments  from './impl/marketing-segments.js';
 import * as marketingCampaigns from './impl/marketing-campaigns.js';
 import * as marketingAdsFlags  from './impl/marketing-ads-flags.js';
+import * as teamsRead   from './impl/teams-read.js';
 import { readFileSync } from 'node:fs';
 
 // Single hardcoded path to the shared marketing business-context doc (also
@@ -166,6 +167,12 @@ const HANDLERS = {
 
   // Teams
   send_teams_message:   ({ message }) => sendProactiveMessage(message).then(() => 'Teams message sent.'),
+
+  // Teams read (Michael's own chats/channels only — see tools/impl/teams-read.js header)
+  list_michael_teams_chats:    () => teamsRead.listMichaelChats(),
+  list_michael_teams_channels: () => teamsRead.listMichaelChannels(),
+  get_teams_chat_messages:     (i) => teamsRead.getChatMessages(i),
+  get_teams_channel_messages:  (i) => teamsRead.getChannelMessages(i),
 
   // Service Autopilot
   // maxScan raised well above searchClients' own conservative default (30) --
