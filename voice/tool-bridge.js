@@ -58,10 +58,14 @@ const VOICE_EXCLUDED_TOOL_NAMES = new Set([
 // override exists to fix (confirmed live 2026-08-26: Michael asked
 // repeatedly on real calls for drafts in his own mailbox and never got
 // them). An automated review pass on this PR "fixed" this constant to read
-// M365_USER_EMAIL for consistency with USER() -- reverted; that's the same
-// regression with a plausible-sounding comment, not a real fix. If JRB's
-// domain ever changes, update this literal.
-const VOICE_DRAFT_USER_EMAIL = 'michael@jrboehlke.com';
+// M365_USER_EMAIL for consistency with USER() -- reverted twice now (once
+// as an actual bot commit, once as a review-comment suggestion); that's the
+// same regression with a plausible-sounding justification each time, not a
+// real fix. A dedicated VOICE_DRAFT_USER_EMAIL env var lets Michael repoint
+// this without a deploy if it's ever needed -- but the fallback is this
+// literal, not M365_USER_EMAIL, so an unset env var still does the right
+// thing rather than reintroducing the bug a third time.
+const VOICE_DRAFT_USER_EMAIL = process.env.VOICE_DRAFT_USER_EMAIL || 'michael@jrboehlke.com';
 
 const CANDIDATE_TOOLS = BUSINESS_TASK_TYPES.flatMap((t) => getTools(t));
 const seen = new Set();

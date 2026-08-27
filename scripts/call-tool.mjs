@@ -78,16 +78,21 @@ else { $results | ConvertTo-Json -Compress }
 function loadCredentials() {
   const tmpFile = join(tmpdir(), `call-tool-creds-${Date.now()}-${Math.random().toString(36).slice(2)}.ps1`);
   writeFileSync(tmpFile, ENUMERATE_PS, 'utf8');
+  let out;
   try {
-    const out = execFileSync('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-File', tmpFile], {
+    out = execFileSync('powershell.exe', ['-ExecutionPolicy', 'Bypass', '-File', tmpFile], {
       timeout: 20_000,
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
     });
-    const parsed = JSON.parse(out.trim() || '[]');
-    return Array.isArray(parsed) ? parsed : [parsed];
   } finally {
     try { unlinkSync(tmpFile); } catch {}
+  }
+  try {
+    const parsed = JSON.parse(out.trim() || '[]');
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch (err) {
+    throw new Error(`Credential Manager enumeration returned unparseable output: ${err.message}\nRaw output: ${out.slice(0, 500)}`);
   }
 }
 
