@@ -37,6 +37,12 @@
 import { getTools } from '../tools/registry.js';
 import { logger } from '../core/logger.js';
 
+// The mailbox owner for draft_email on the voice channel. Sourced from the
+// same env var used by M365_USER_EMAIL / USER() in tools/impl/m365.js --
+// a single point of truth so a mailbox rename or domain migration only
+// requires changing the environment variable, not hunting magic strings.
+const VOICE_DRAFT_USER_EMAIL = process.env.M365_USER_EMAIL;
+
 const VOICE_TOOL_NAMES = new Set([
   // Calendar
   'list_calendar_events',
@@ -110,12 +116,21 @@ const VOICE_TOOL_NAMES = new Set([
   'check_michael_availability',
 ]);
 
+// CANDIDATE_TOOLS must cover every taskType used by any tool in VOICE_TOOL_NAMES.
+// If a tool's registry taskType isn't listed here it will be silently absent
+// from ANTHROPIC_TOOL_DEFS -- the LLM never sees its schema and calls never
+// happen. The startup check below catches this at boot rather than at
+// call-time.
 const CANDIDATE_TOOLS = [
   ...getTools('calendar'),
   ...getTools('email'),
   ...getTools('crm'),
   ...getTools('report'),
   ...getTools('scheduling'),
+  ...getTools('fleet'),
+  ...getTools('finance'),
+  ...getTools('ads'),
+  ...getTools('sharepoint'),
 ];
 const seen = new Set();
 const ANTHROPIC_TOOL_DEFS = CANDIDATE_TOOLS.filter((t) => {
@@ -123,6 +138,22 @@ const ANTHROPIC_TOOL_DEFS = CANDIDATE_TOOLS.filter((t) => {
   seen.add(t.name);
   return true;
 });
+
+// Warn at startup for any VOICE_TOOL_NAMES entry that wasn't matched by any
+// candidate tool. This makes the "silently omitted tool" failure mode loud
+// and boot-time rather than silent and call-time: if a tool is added to
+// VOICE_TOOL_NAMES but its registry taskType isn't in CANDIDATE_TOOLS above,
+// the server will log a clear warning the moment it starts.
+const matched = new Set(ANTHROPIC_TOOL_DEFS.map((t) => t.name));
+for (const name of VOICE_TOOL_NAMES) {
+  if (!matched.has(name)) {
+    logger.warn(
+      'voice/tool-bridge: tool listed in VOICE_TOOL_NAMES has no matching registry entry -- ' +
+      'its taskType may not be included in CANDIDATE_TOOLS; the LLM will never see this tool.',
+      { tool: name }
+    );
+  }
+}
 
 export const VOICE_ALLOWED_TOOLS = new Set(ANTHROPIC_TOOL_DEFS.map((t) => t.name));
 
@@ -164,8 +195,15 @@ export async function handleVoiceToolCall(name, argsJsonString, context) {
   // userEmail to this channel's model at all (see buildVoiceToolSchema), so
   // force it here rather than relying on prompt wording to get an LLM to
   // remember a param it was never shown.
+  // The address is sourced from M365_USER_EMAIL (same env var used by USER()
+  // in tools/impl/m365.js) rather than a hardcoded string, so a mailbox
+  // rename or domain migration only requires updating the environment.
   if (name === 'draft_email') {
-    input.userEmail = 'michael@jrboehlke.com';
+    if (!VOICE_DRAFT_USER_EMAIL) {
+      logger.error('Voice bridge: M365_USER_EMAIL is not set -- draft_email will use the assistant mailbox default instead of the configured user mailbox');
+    } else {
+      input.userEmail = VOICE_DRAFT_USER_EMAIL;
+    }
   }
 
   const { dispatchTool } = await import('../tools/dispatcher.js');
