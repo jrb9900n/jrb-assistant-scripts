@@ -29,6 +29,7 @@ import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { requestEmployeeApproval } from './impl/privacy-gate.js';
 import { requestEscalation } from './impl/claude-code-escalation.js';
+import { requiresApproval, requestCodeApproval } from './impl/code-approval.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 import { createClient } from '@supabase/supabase-js';
 import * as marketingSegments  from './impl/marketing-segments.js';
@@ -300,6 +301,21 @@ const HANDLERS = {
   }),
 };
 
+// Which channel a call came from, purely from the shape of its trusted
+// context object -- Teams always carries `activity`, voice always carries
+// `callId` (see teams/bot.js's runAgent() context and voice/tool-bridge.js's
+// handleVoiceToolCall() respectively). A CLI/MCP caller (Claude Code's own
+// scripts/call-tool.mjs, an ad hoc probe script) passes no context at all,
+// or one with neither shape -- that's an already-trusted, humanly-supervised
+// caller (see the "Identity/trust architecture" note in CLAUDE.md), not a
+// conversational agent loop acting on its own judgment, so it's exempt from
+// this gate entirely.
+function channelOf(context) {
+  if (context?.activity) return 'teams';
+  if (context?.callId) return 'voice';
+  return null;
+}
+
 /**
  * Dispatch a tool call to its implementation.
  * @param {string} toolName
@@ -309,13 +325,40 @@ const HANDLERS = {
  *   for where this originates. Most handlers ignore it; only ones that need
  *   to know something the model must never be trusted to state itself
  *   (like "who is actually asking") accept it.
+ * @param {object} [opts]
+ * @param {boolean} [opts.bypassApproval] - internal-only: set exclusively by
+ *   tools/impl/code-approval.js's executeApprovedAction() when a human has
+ *   already confirmed a pending action deterministically (see
+ *   teams/bot.js's "confirm <code>" intercept). Never reachable from a
+ *   tool_use call — core/agent.js's tool loop never passes a 4th argument.
  * @returns {Promise<any>}
  */
-export async function dispatchTool(toolName, input, context = null) {
+export async function dispatchTool(toolName, input, context = null, opts = {}) {
   const handler = HANDLERS[toolName];
   if (!handler) {
     throw new Error(`Unknown tool: ${toolName}`);
   }
+
+  // Code/repo/infra-write gate — see tools/impl/code-approval.js for the
+  // full rationale. auto_fix is deliberately exempt: it exists specifically
+  // for autonomous incident response (Teams' ops_alert path and the
+  // unattended self_heal_watcher cron), and gating it the same way would
+  // mean a real production outage waits on a Teams reply before the fix
+  // that's supposed to resolve it automatically can land. Today, both real
+  // auto_fix call sites (teams/bot.js's ops_alert branch, scheduler/cron.js's
+  // self_heal_watcher) pass no context at all, so they're already exempt via
+  // channelOf(context) returning null before this taskType check even runs
+  // — the explicit check exists so the exemption stays correct if a future
+  // change starts threading real Teams context (activity/sender) through
+  // that path too, not because it's load-bearing today.
+  if (!opts.bypassApproval && requiresApproval(toolName, input)) {
+    const channel = channelOf(context);
+    if (channel && context?.taskType !== 'auto_fix') {
+      logger.info('Dispatching tool: gated, requesting approval', { toolName, channel });
+      return requestCodeApproval(toolName, input, context, channel);
+    }
+  }
+
   logger.debug('Dispatching tool', { toolName, input });
   return handler(input, context);
 }
