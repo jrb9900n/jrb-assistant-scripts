@@ -71,6 +71,7 @@ for ($i = 0; $i -lt $count; $i++) {
     $results += [PSCustomObject]@{ name = $name; value = $blob }
 }
 [CredEnumCT]::CredFree($pCreds)
+if ($results.Count -eq 0) { Write-Output "[]"; exit 0 }
 if ($results.Count -eq 1) { Write-Output "[$($results | ConvertTo-Json -Compress)]" }
 else { $results | ConvertTo-Json -Compress }
 `;
@@ -88,6 +89,12 @@ function loadCredentials() {
   } finally {
     try { unlinkSync(tmpFile); } catch {}
   }
+  // Deliberately throws rather than degrading to "no credentials loaded"
+  // (a second review pass suggested exactly that -- rejected): this is an
+  // interactive diagnostic CLI, and silently continuing with an empty
+  // credential set would surface as a confusing, unrelated-looking failure
+  // deep inside whichever Graph/QBO/SA call happens to need the missing
+  // env var next, instead of a clear error at the actual point of failure.
   try {
     const parsed = JSON.parse(out.trim() || '[]');
     return Array.isArray(parsed) ? parsed : [parsed];
