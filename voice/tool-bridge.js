@@ -23,13 +23,16 @@
 // instruction, since phone-line speech-to-text is more error-prone than
 // typed input for consequential actions.
 //
-// Deliberately NOT pulled in: 'general' itself, which also carries
-// CODE_TOOLS/SEARCH_TOOLS/VERCEL_TOOLS (repo write access, GitHub, Vercel
-// deploys) -- a qualitatively different risk class (arbitrary code/infra
-// change vs. business data operations) for a channel gated only by a spoken
-// PIN. Add 'general' here (or a subset of its dev tools) only on a
-// deliberate, separate decision to extend voice that far, not as a side
-// effect of this "same tools as Teams" rule.
+// Extended again 2026-08-27, on an explicit, separate confirmation from
+// Michael (asked directly: business tools only, or also the dev/deploy
+// tools Teams' 'general' bucket and Claude Code already have -- he chose
+// full parity, understanding a PIN-gated open phone line can now trigger
+// real code/infra changes: run_script (arbitrary local script execution),
+// write_file, the full github_* set including github_merge_pr, and
+// vercel_api (redeploy/set_env/add_domain/etc.). Pulling 'general' in also
+// re-adds escalate_to_claude_code and everything already covered by the
+// business buckets above, but VOICE_EXCLUDED_TOOL_NAMES and the seen-based
+// dedup below handle both cases the same as always.
 //
 // tools/dispatcher.js itself has no allowlist concept -- it will dispatch
 // any registered tool name regardless of caller. Restricting a voice call to
@@ -42,8 +45,9 @@ import { getTools } from '../tools/registry.js';
 import { logger } from '../core/logger.js';
 
 // Business taskType buckets, matching what Teams' router draws from for
-// Michael's own conversations. Deliberately excludes 'general' (see header).
-const BUSINESS_TASK_TYPES = ['calendar', 'email', 'crm', 'report', 'scheduling', 'sharepoint'];
+// Michael's own conversations, plus 'general' (dev/deploy tools -- see
+// header comment on the 2026-08-27 extension).
+const BUSINESS_TASK_TYPES = ['calendar', 'email', 'crm', 'report', 'scheduling', 'sharepoint', 'general'];
 
 // Tools that exist in the registry but are structurally incompatible with
 // this channel -- not a risk judgment call, a technical one.
