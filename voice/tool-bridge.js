@@ -46,7 +46,16 @@ import { logger } from '../core/logger.js';
 
 // Business taskType buckets, matching what Teams' router draws from for
 // Michael's own conversations, plus 'general' (dev/deploy tools -- see
-// header comment on the 2026-08-27 extension).
+// header comment on the 2026-08-27 extension). This deny-list rebuild
+// landed the same day a separate session's PR #349 hand-added exactly the
+// 4 Teams-read tool names (tools/impl/teams-read.js, TOOL_MAP.general via
+// merged PR #348) to the old, now-deleted VOICE_TOOL_NAMES allow-list --
+// merging main here conflicted on that basis. Resolved in favor of this
+// file's deny-list structure: since it already pulls the entire 'general'
+// bucket (see the 2026-08-27 dev-tool-parity extension below), the 4
+// Teams-read tools arrive automatically with no separate list to maintain,
+// making #349's explicit addition redundant rather than something to
+// reconcile line-by-line. Confirmed live after this merge -- see commit.
 const BUSINESS_TASK_TYPES = ['calendar', 'email', 'crm', 'report', 'scheduling', 'sharepoint', 'general'];
 
 // Tools that exist in the registry but are structurally incompatible with

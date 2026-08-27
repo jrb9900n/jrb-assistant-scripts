@@ -1406,6 +1406,57 @@ const CALENDAR_CONFLICT_TOOLS = [
   },
 ];
 
+// Read-only access to Michael's Teams chats/channels (tools/impl/teams-read.js,
+// built 2026-08-27 — Chat.Read.All/ChannelMessage.Read.All/Team.ReadBasic.All/
+// Channel.ReadBasic.All admin-consented by Michael the same day). The
+// underlying app-only Graph credential is tenant-wide by nature — it COULD
+// read any employee's Teams messages — so teams-read.js's own allowlist
+// functions (computed fresh per call, never cached) are what actually
+// narrows every one of these calls to Michael's own conversations; that
+// enforcement lives there, not here. This TOOL_MAP placement is a SEPARATE,
+// complementary boundary: added to 'general' ONLY. Do not add it to
+// 'employee' (would hand a non-Michael Teams requester a tool that reads
+// Michael's private conversations — the exact leak EMPLOYEE_TOOLS/TOOL_MAP.
+// employee above exists to prevent) or 'auto_fix' (unattended runs have no
+// live Teams round-trip to ask Michael anything about what it finds).
+const TEAMS_READ_TOOLS = [
+  {
+    name: 'list_michael_teams_chats',
+    description: "List Michael's 1:1 and group Teams chats (id, topic, chat type, last-updated time). Call this first to find a chatId before calling get_teams_chat_messages — do not guess or invent a chatId.",
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'list_michael_teams_channels',
+    description: "List the Teams channels Michael belongs to, across every team he's joined (teamId, team name, channelId, channel name). Call this first to find a teamId/channelId before calling get_teams_channel_messages — do not guess or invent these IDs.",
+    input_schema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'get_teams_chat_messages',
+    description: "Get recent messages from one of Michael's Teams chats. chatId must come from a prior list_michael_teams_chats call — an arbitrary or guessed chatId will be rejected.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        chatId: { type: 'string', description: 'A chat id returned by list_michael_teams_chats.' },
+        limit: { type: 'number', description: 'Max messages to return, 1-50. Defaults to 20.' },
+      },
+      required: ['chatId'],
+    },
+  },
+  {
+    name: 'get_teams_channel_messages',
+    description: "Get recent messages from a Teams channel Michael belongs to. teamId/channelId must come from a prior list_michael_teams_channels call — arbitrary or guessed IDs will be rejected.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        teamId: { type: 'string', description: 'A team id returned by list_michael_teams_channels.' },
+        channelId: { type: 'string', description: 'A channel id returned by list_michael_teams_channels.' },
+        limit: { type: 'number', description: 'Max messages to return, 1-50. Defaults to 20.' },
+      },
+      required: ['teamId', 'channelId'],
+    },
+  },
+];
+
 const TOOL_MAP = {
   email:      [...EMAIL_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...ESCALATION_TOOLS],
@@ -1473,7 +1524,7 @@ const TOOL_MAP = {
   // refuses to execute — see tools/impl/marketing-ads-flags.js's header.
   // It cannot create/modify a campaign or spend directly.
   marketing:  [...SA_TOOLS.filter(t => t.name.includes('tag')), ...EMAIL_TOOLS.filter(t => t.name !== 'send_email' && t.name !== 'send_draft_reply'), ...TEAMS_TOOLS, ...MARKETING_TOOLS, ...ESCALATION_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...TEAMS_READ_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
 };
 
 // Fail loudly at load time, not silently at call time, if a future rename
