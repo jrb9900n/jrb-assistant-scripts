@@ -34,9 +34,19 @@ const VOICE_TOOL_NAMES = new Set([
   'get_email',
   'get_email_triage',
   'draft_email',
+  // Teams read (tools/impl/teams-read.js) -- added 2026-08-27 so Michael can
+  // ask about Teams messages on a call, matching the same access he already
+  // has via Teams bot and Claude Code. Only these 4 names, not the rest of
+  // TOOL_MAP.general -- pulled from getTools('general') below since that's
+  // the only taskType bucket TEAMS_READ_TOOLS lives in, same filter-by-name
+  // pattern as calendar/email above.
+  'list_michael_teams_chats',
+  'list_michael_teams_channels',
+  'get_teams_chat_messages',
+  'get_teams_channel_messages',
 ]);
 
-const CANDIDATE_TOOLS = [...getTools('calendar'), ...getTools('email')];
+const CANDIDATE_TOOLS = [...getTools('calendar'), ...getTools('email'), ...getTools('general')];
 const seen = new Set();
 const ANTHROPIC_TOOL_DEFS = CANDIDATE_TOOLS.filter((t) => {
   if (!VOICE_TOOL_NAMES.has(t.name) || seen.has(t.name)) return false;
