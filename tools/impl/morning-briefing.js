@@ -2,7 +2,7 @@
 // Generates the daily 7:30 AM morning briefing for Michael Reardon.
 //
 // Output:
-//   teamsMessage  — short punchy Teams message (plain text, under 40 lines)
+//   teamsMessage  — short punchy Teams message (Teams markdown, under 40 lines)
 //   emailSubject  — subject for the email version
 //   emailBody     — full HTML email with tables and detail
 
@@ -226,49 +226,60 @@ function followupTable(rows) {
   </table>`;
 }
 
-// ── Teams message (plain text, short) ────────────────────────────────────────
+// ── Teams message (real markdown — Teams renders **bold**/bullets/---, but
+// collapses runs of plain spaces, so hierarchy has to come from markdown
+// syntax, not indentation) ─────────────────────────────────────────────────
+
+// Email subjects/names/intents are external, uncontrolled text -- a stray
+// markdown metacharacter (an unmatched '*' in a subject line, a leading '#'
+// or '-') can garble formatting for the rest of the message, since the whole
+// teamsMessage ships as one Activity.text blob. Escape before interpolating.
+function escapeMd(text) {
+  return text == null ? '' : String(text).replace(/([\\*_`\[\]])/g, '\\$1');
+}
 
 function buildTeamsMessage(stats, calendar, followups) {
   const dateStr = formatDateLong();
-  const lines = [`📬 Morning Brief — ${dateStr}`, ''];
+  const lines = [`📬 **Morning Brief — ${dateStr}**`, ''];
 
-  // Email summary
-  lines.push(`📧 Inbox (last 24h): ${stats.total} emails`);
-  if (stats.needsReply.length) lines.push(`   🔴 Needs a Reply: ${stats.needsReply.length}`);
-  if (stats.fyi.length)        lines.push(`   🟢 FYI: ${stats.fyi.length}`);
-  if (stats.marketing.length)  lines.push(`   ⚪ Marketing: ${stats.marketing.length}`);
+  // Email summary — one line, since indented sub-bullets rendered as
+  // flush-left noise once Teams collapsed the leading spaces.
+  const summaryParts = [`📧 **Inbox (last 24h):** ${stats.total} emails`];
+  if (stats.needsReply.length) summaryParts.push(`🔴 ${stats.needsReply.length} need a reply`);
+  if (stats.fyi.length)        summaryParts.push(`🟢 ${stats.fyi.length} FYI`);
+  if (stats.marketing.length)  summaryParts.push(`⚪ ${stats.marketing.length} marketing`);
+  lines.push(summaryParts.join(' · '));
 
-  // Needs-a-reply detail (first 5)
+  // Needs-a-reply detail (first 5) — subject/description on one bullet each,
+  // since a separate "→" sub-line has no bullet-nesting to visually attach it
+  // to its parent once rendered.
   if (stats.needsReply.length) {
-    lines.push('');
-    lines.push('🔴 Needs a Reply:');
+    lines.push('', '**🔴 Needs a Reply**');
     for (const e of stats.needsReply.slice(0, 5)) {
-      const name = e.from_name || e.from_address || '?';
+      const name = escapeMd(e.from_name || e.from_address || '?');
+      const subject = escapeMd(e.subject ?? '(no subject)');
       const draft = e.draft_id ? ' ✍️' : '';
-      lines.push(`  • [${name}] ${e.subject ?? '(no subject)'}${draft}`);
-      if (e.intent) lines.push(`    → ${e.intent}`);
+      const intent = e.intent ? ` — ${escapeMd(e.intent)}` : '';
+      lines.push(`- **[${name}]** ${subject}${draft}${intent}`);
     }
-    if (stats.needsReply.length > 5) lines.push(`  … and ${stats.needsReply.length - 5} more`);
+    if (stats.needsReply.length > 5) lines.push(`- … and ${stats.needsReply.length - 5} more`);
   }
 
   // Calendar
   if (calendar.length) {
-    lines.push('');
-    lines.push('📅 Today:');
+    lines.push('', '**📅 Today**');
     for (const e of calendar) {
-      lines.push(`  • ${formatTime(e.start)} — ${e.subject}`);
+      lines.push(`- ${formatTime(e.start)} — ${escapeMd(e.subject)}`);
     }
   } else {
-    lines.push('');
-    lines.push('📅 Today: No meetings scheduled');
+    lines.push('', '**📅 Today:** No meetings scheduled');
   }
 
   // Follow-ups
   if (followups.length) {
-    lines.push('');
-    lines.push(`🔄 Follow-ups Overdue (${followups.length}):`);
+    lines.push('', `**🔄 Follow-ups Overdue (${followups.length})**`);
     for (const f of followups.slice(0, 5)) {
-      lines.push(`  • ${f.subject} — sent ${f.days}d ago, no reply`);
+      lines.push(`- ${escapeMd(f.subject)} — sent ${f.days}d ago, no reply`);
     }
   }
 
@@ -277,14 +288,11 @@ function buildTeamsMessage(stats, calendar, followups) {
     .flatMap(e => e.action_items ?? [])
     .slice(0, 5);
   if (actionItems.length) {
-    lines.push('');
-    lines.push('⚡ Action Items:');
-    for (const item of actionItems) lines.push(`  • ${item}`);
+    lines.push('', '**⚡ Action Items**');
+    for (const item of actionItems) lines.push(`- ${escapeMd(item)}`);
   }
 
-  lines.push('');
-  lines.push('─────────────────────────────────');
-  lines.push('Full detail in your morning email.');
+  lines.push('', '---', 'Full detail in your morning email.');
 
   return lines.join('\n');
 }
