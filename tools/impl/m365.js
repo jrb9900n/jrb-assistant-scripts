@@ -141,26 +141,32 @@ export async function getEmail({ email_id, userEmail } = {}) {
   };
 }
 
-export async function draftEmail({ to, subject, body, cc = [] }) {
+export async function draftEmail({ to, subject, body, cc = [], userEmail } = {}) {
+  const user = userEmail ?? USER();
   const message = {
     subject,
     body: { contentType: 'HTML', content: withSignOff(body) },
     toRecipients: to.map(a => ({ emailAddress: { address: a } })),
     ccRecipients: cc.map(a => ({ emailAddress: { address: a } })),
   };
-  const data = await graph('POST', `/users/${USER()}/messages`, message);
-  logger.info('Email drafted', { id: data.id, subject });
+  const data = await graph('POST', `/users/${user}/messages`, message);
+  logger.info('Email drafted', { id: data.id, subject, user });
   return { draft_id: data.id, subject, message: 'Draft created — not sent.' };
 }
 
-export async function sendEmail({ draft_id, to, subject, body, contentType = 'HTML', attachments = [] }) {
+export async function sendEmail({ draft_id, to, subject, body, contentType = 'HTML', attachments = [], userEmail } = {}) {
+  // Must match whichever mailbox the draft_id actually lives in -- draftEmail()
+  // now also takes userEmail (e.g. voice forces michael@jrboehlke.com), and a
+  // mismatch here 404s ("draft not found") rather than sending the wrong
+  // mailbox's copy, since Graph's /messages/{id}/send is mailbox-scoped.
+  const user = userEmail ?? USER();
   if (draft_id) {
-    await graph('POST', `/users/${USER()}/messages/${encodeURIComponent(draft_id)}/send`);
+    await graph('POST', `/users/${user}/messages/${encodeURIComponent(draft_id)}/send`);
     return { sent: true, draft_id };
   }
 
   if (attachments.length === 0) {
-    await graph('POST', `/users/${USER()}/sendMail`, {
+    await graph('POST', `/users/${user}/sendMail`, {
       message: {
         subject: subject ?? '',
         body: { contentType, content: body },
@@ -173,7 +179,7 @@ export async function sendEmail({ draft_id, to, subject, body, contentType = 'HT
 
   // With attachments: create draft, upload each via upload session (raw bytes, no
   // base64 JSON encoding), then send. This avoids Exchange corruption of large binaries.
-  const draft = await graph('POST', `/users/${USER()}/messages`, {
+  const draft = await graph('POST', `/users/${user}/messages`, {
     subject: subject ?? '',
     body: { contentType, content: body },
     toRecipients: to.map(a => ({ emailAddress: { address: a } })),
@@ -185,7 +191,7 @@ export async function sendEmail({ draft_id, to, subject, body, contentType = 'HT
       const buf = Buffer.isBuffer(a.content) ? a.content : Buffer.from(a.content, 'base64');
       const session = await graph(
         'POST',
-        `/users/${USER()}/messages/${draftId}/attachments/createUploadSession`,
+        `/users/${user}/messages/${draftId}/attachments/createUploadSession`,
         { AttachmentItem: { attachmentType: 'file', name: a.name, size: buf.length, contentType: a.contentType } }
       );
       // uploadUrl is pre-authenticated — do NOT add Authorization header
@@ -199,10 +205,10 @@ export async function sendEmail({ draft_id, to, subject, body, contentType = 'HT
       });
       logger.info('Attachment uploaded via session', { name: a.name, bytes: buf.length });
     }
-    await graph('POST', `/users/${USER()}/messages/${draftId}/send`);
+    await graph('POST', `/users/${user}/messages/${draftId}/send`);
     return { sent: true };
   } catch (err) {
-    try { await graph('DELETE', `/users/${USER()}/messages/${draftId}`); } catch {}
+    try { await graph('DELETE', `/users/${user}/messages/${draftId}`); } catch {}
     throw err;
   }
 }

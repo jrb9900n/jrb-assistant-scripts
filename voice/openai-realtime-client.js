@@ -17,6 +17,7 @@ import WebSocket from 'ws';
 import { logger } from '../core/logger.js';
 import { matchSpokenPin } from './call-auth.js';
 import { buildVoiceToolSchema, handleVoiceToolCall } from './tool-bridge.js';
+import { loadRecentCallContext } from './call-memory.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime';
 const PIN_MAX_ATTEMPTS = 3;
@@ -30,9 +31,24 @@ If a spoken PIN attempt is wrong, ask them to repeat it -- do not guess or make 
 const VOICE_SYSTEM_PROMPT = `You are JRB's executive assistant (for Michael Reardon, J.R. Boehlke LLC),
 speaking with Michael live on the phone. Be concise and conversational -- this is a live voice call,
 not a chat window, so keep responses short and natural to say out loud. You can read/update Michael's
-calendar, resolve block-schedule conflicts, and read/search/triage/draft his email using the tools
-available to you. Always check the calendar before claiming a time is free or busy. If asked to do
-something outside your available tools, say so plainly rather than pretending to have done it.`;
+calendar, book real meetings, resolve block-schedule conflicts, read/search/triage/draft his email,
+look up, dispatch, and create SA (ServiceAutopilot) clients/estimates/jobs and manage their billing
+defaults and tags, read the crew/FieldOps scheduling board, look up FleetOps vehicle locations and
+mileage, query QuickBooks, pull Google Ads performance, search SharePoint, and -- same as Teams and
+Claude Code -- read/write code and scripts on this machine, commit and push to GitHub, open and merge
+Pull Requests, and manage Vercel deployments, using the tools available to you. Always check the
+calendar before claiming a time is free or busy. Email drafts you create are always placed in
+Michael's own mailbox, not the assistant's, so he can review and send them himself.
+
+Before calling a tool that creates, books, or changes something real -- a calendar invite, a new SA
+client/estimate/job, a billing or tag change, dispatching a job, running a script, writing or pushing
+code, opening or merging a Pull Request, or touching a Vercel deployment -- read back the key details
+(name, date/time, amount, client, file/branch/repo, what a script or deploy will actually do) and get
+a clear yes from Michael first. This matters even more for code/infra actions than business ones --
+they're harder to casually undo. Phone audio is also more error-prone to transcribe than typed text,
+so a misheard name or date is more likely here than in a text channel; confirming out loud costs one
+sentence and avoids acting on a mistake. Plain lookups/reads don't need this. If asked to do something
+outside your available tools, say so plainly rather than pretending to have done it.`;
 
 function audioSessionConfig(instructions, tools) {
   const session = {
@@ -43,7 +59,20 @@ function audioSessionConfig(instructions, tools) {
     audio: {
       input: {
         format: { type: 'audio/pcm', rate: 24000 },
-        turn_detection: { type: 'server_vad' },
+        // Untuned server_vad (bare defaults: threshold 0.5, prefix_padding_ms
+        // 300, silence_duration_ms 500) proved far too sensitive on a real
+        // phone line -- confirmed live 2026-08-26: every evening call that
+        // day logged dozens of "skipping tool calls from a non-completed
+        // response" (status cancelled/failed) back-to-back, the assistant's
+        // spoken responses barely ever finishing, while the one earlier
+        // quieter-environment call that day was fine. Raised threshold
+        // (less sensitive to line noise/low-level sound) and
+        // silence_duration_ms (requires a longer pause before treating it as
+        // end-of-turn, so a brief cough/road noise doesn't trigger a
+        // false turn-end mid-response) without disabling barge-in entirely --
+        // Michael still needs to be able to interrupt for a real phone-call
+        // feel.
+        turn_detection: { type: 'server_vad', threshold: 0.6, prefix_padding_ms: 300, silence_duration_ms: 650 },
         // Input transcription is opt-in -- without this, the caller's speech
         // is never transcribed at all, and handleTranscript() below (the
         // entire PIN gate) would never fire on a real call.
@@ -107,6 +136,20 @@ export async function connectRealtimeSession({ session, hangUp }) {
       return;
     }
 
+    // The model's own spoken-output transcript, for voice/call-memory.js.
+    // Named by analogy with response.output_audio.delta (the raw-audio
+    // event this file already listens to above) -- output transcription has
+    // no separate opt-in the way input transcription does, so this should
+    // fire whenever output_modalities includes 'audio', but the exact event
+    // name hasn't been confirmed against a real call yet. If it's wrong,
+    // this branch just never matches (same silent-no-match fallthrough as
+    // any other unrecognized evt.type here) -- assistant-side transcript
+    // capture would silently no-op rather than break the call itself.
+    if (evt.type === 'response.output_audio_transcript.done' && evt.transcript && session.authState === 'verified') {
+      session.transcript?.push({ role: 'assistant', text: evt.transcript, at: new Date().toISOString() });
+      return;
+    }
+
     if (evt.type === 'response.done') {
       // Per OpenAI's own documented pattern, the function name only
       // reliably appears on the completed response's output items
@@ -163,7 +206,17 @@ export async function connectRealtimeSession({ session, hangUp }) {
   };
 }
 
-function handleTranscript(session, ws, transcript, hangUp) {
+async function handleTranscript(session, ws, transcript, hangUp) {
+  // Once verified, every subsequent transcribed caller utterance is a real
+  // conversation turn for voice/call-memory.js, not a PIN attempt -- record
+  // it and stop (the PIN logic below never runs again this call). Nothing
+  // reaches here pre-verification except spoken PIN attempts, which are
+  // deliberately never pushed to session.transcript (see session-state.js).
+  if (session.authState === 'verified') {
+    session.transcript?.push({ role: 'caller', text: transcript, at: new Date().toISOString() });
+    return;
+  }
+
   if (session.authState !== 'awaiting_pin') return;
 
   if (Date.now() > session.pinDeadline) {
@@ -175,9 +228,19 @@ function handleTranscript(session, ws, transcript, hangUp) {
   const storedPin = process.env.VOICE_CALL_PIN;
   if (matchSpokenPin(transcript, storedPin)) {
     session.authState = 'verified';
+    // Recent call/Teams history (memory.js's shared agent_memory, via
+    // call-memory.js) so a call picks up where the last conversation left
+    // off instead of starting from zero every time. Awaited before the
+    // session.update so it's part of the model's instructions from its very
+    // first post-PIN response, not raced in afterward.
+    const recentContext = await loadRecentCallContext().catch((err) => {
+      logger.warn('Voice bridge: loadRecentCallContext failed, continuing without it', { callId: session.callConnectionId, err: err.message });
+      return '';
+    });
+    const instructions = recentContext ? `${VOICE_SYSTEM_PROMPT}\n\n${recentContext}` : VOICE_SYSTEM_PROMPT;
     ws.send(JSON.stringify({
       type: 'session.update',
-      session: audioSessionConfig(VOICE_SYSTEM_PROMPT, buildVoiceToolSchema()),
+      session: audioSessionConfig(instructions, buildVoiceToolSchema()),
     }));
     logger.info('Voice bridge: caller PIN verified', { callId: session.callConnectionId });
     return;

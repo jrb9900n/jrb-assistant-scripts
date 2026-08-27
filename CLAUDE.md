@@ -623,7 +623,7 @@ Key names: `ANTHROPIC_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_KEY`, `M365_TE
 
 Pending (see Multi-Company QuickBooks Support section): `QB_REFRESH_TOKEN_PROPCO`, `QB_REALM_ID_PROPCO` — for JRB Granville Propco's QBO connection, reusing the same `QB_CLIENT_ID`/`QB_CLIENT_SECRET` app. Not yet added to `start-agent.ps1`'s env injection (requires Michael's go-ahead per the launcher-edit autonomy rule) or populated in Credential Manager (populated automatically by the `/qb-reauth?company=propco` OAuth flow, signed in as `michael@jrboehlke.com`, once the launcher change lands).
 
-Note: `FLEETOPS_SUPABASE_URL` is hardcoded in `start-agent.ps1` (not a Credential Manager secret).
+Note: `FLEETOPS_SUPABASE_URL`, `SUPABASE_URL`, and `M365_USER_EMAIL` are hardcoded literals in `start-agent.ps1` (not Credential Manager secrets) despite `SUPABASE_URL` being listed in the Key names line above alongside real Credential Manager entries -- confirmed live 2026-08-27 while building `scripts/call-tool.mjs` (a plain `enumerateJRBCredentials()`-style Credential Manager dump has no `SUPABASE_URL` entry at all; the real Credential Manager keys for Supabase are `SUPABASE_SERVICE_KEY` plus unrelated `SUPABASE_JRBDB_URL`/`SUPABASE_JRBDB_KEY`/`SUPABASE_HISTORY_URL`/`SUPABASE_HISTORY_KEY` entries for other projects).
 
 ### Credential backup, healthcheck, and restore (built 2026-08-17)
 

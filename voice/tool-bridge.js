@@ -1,17 +1,38 @@
-// voice/tool-bridge.js — curated tool subset for the live voice channel.
+// voice/tool-bridge.js — tool access for the live voice channel.
 //
-// Deliberately narrow per the brief: calendar read/write + conflict
-// resolution, plus email list/search/get/triage/draft -- nothing more. An
-// earlier version of this file spread whole registry.js taskType arrays
-// (TOOL_MAP.calendar/.email) unfiltered, which silently rode along with
-// tools well outside that documented scope (book_time_with_michael sends a
-// real Outlook invite to an arbitrary address; escalate_to_claude_code
-// dereferences context.activity, which this channel never supplies, and
-// would throw). Pulling by explicit name from registry.js's tool arrays
-// (not re-declaring schemas) keeps this in sync with the real definitions
-// while staying exactly as narrow as the brief -- expand VOICE_TOOL_NAMES
-// deliberately later based on what Michael actually asks for on real calls,
-// per the brief's own explicit non-goal.
+// History: started deliberately narrow (calendar + email only), then grew
+// through two rounds of hand-picked additions as Michael asked for specific
+// capabilities on real calls (SA/Dispatch Board, FieldOps/FleetOps,
+// QuickBooks, Google Ads, SharePoint, then the higher-risk SA writes and
+// book_time_with_michael). That hand-curated-allowlist shape stopped being
+// the right one once Michael asked, in so many words, for voice/Teams/Claude
+// Code to all have the same tools -- a fixed name list drifts out of sync
+// with registry.js by construction (add a tool to SA_TOOLS, forget to also
+// add it here, and it's silently missing from voice with no error).
+//
+// Rebuilt 2026-08-27 as a DENY-list over registry.js's own "business"
+// taskType buckets instead: pull every tool from calendar/email/crm/report/
+// scheduling/sharepoint (the same buckets Teams' own intent router draws
+// from for Michael's conversations), and exclude only what's actually
+// broken on this channel, not what merely seemed risky. Currently that's
+// just escalate_to_claude_code -- it dereferences context.activity, which
+// voice never supplies, and throws. Everything else Teams' business
+// taskTypes can do, voice can now do too, including the write paths
+// (SA client/estimate/job creation, billing/tag config, book_time_with_michael)
+// -- see VOICE_SYSTEM_PROMPT's explicit "confirm before committing"
+// instruction, since phone-line speech-to-text is more error-prone than
+// typed input for consequential actions.
+//
+// Extended again 2026-08-27, on an explicit, separate confirmation from
+// Michael (asked directly: business tools only, or also the dev/deploy
+// tools Teams' 'general' bucket and Claude Code already have -- he chose
+// full parity, understanding a PIN-gated open phone line can now trigger
+// real code/infra changes: run_script (arbitrary local script execution),
+// write_file, the full github_* set including github_merge_pr, and
+// vercel_api (redeploy/set_env/add_domain/etc.). Pulling 'general' in also
+// re-adds escalate_to_claude_code and everything already covered by the
+// business buckets above, but VOICE_EXCLUDED_TOOL_NAMES and the seen-based
+// dedup below handle both cases the same as always.
 //
 // tools/dispatcher.js itself has no allowlist concept -- it will dispatch
 // any registered tool name regardless of caller. Restricting a voice call to
@@ -23,53 +44,46 @@
 import { getTools } from '../tools/registry.js';
 import { logger } from '../core/logger.js';
 
-const VOICE_TOOL_NAMES = new Set([
-  'list_calendar_events',
-  'create_calendar_event',
-  'update_calendar_event',
-  'delete_calendar_event',
-  'resolve_calendar_conflict',
-  'list_emails',
-  'search_emails',
-  'get_email',
-  'get_email_triage',
-  'draft_email',
-  // Teams read (tools/impl/teams-read.js) -- added 2026-08-27 so Michael can
-  // ask about Teams messages on a call, matching the same access he already
-  // has via Teams bot and Claude Code. Only these 4 names, not the rest of
-  // TOOL_MAP.general -- pulled explicitly via TEAMS_READ_TOOLS below.
-  'list_michael_teams_chats',
-  'list_michael_teams_channels',
-  'get_teams_chat_messages',
-  'get_teams_channel_messages',
+// Business taskType buckets, matching what Teams' router draws from for
+// Michael's own conversations, plus 'general' (dev/deploy tools -- see
+// header comment on the 2026-08-27 extension). This deny-list rebuild
+// landed the same day a separate session's PR #349 hand-added exactly the
+// 4 Teams-read tool names (tools/impl/teams-read.js, TOOL_MAP.general via
+// merged PR #348) to the old, now-deleted VOICE_TOOL_NAMES allow-list --
+// merging main here conflicted on that basis. Resolved in favor of this
+// file's deny-list structure: since it already pulls the entire 'general'
+// bucket (see the 2026-08-27 dev-tool-parity extension below), the 4
+// Teams-read tools arrive automatically with no separate list to maintain,
+// making #349's explicit addition redundant rather than something to
+// reconcile line-by-line. Confirmed live after this merge -- see commit.
+const BUSINESS_TASK_TYPES = ['calendar', 'email', 'crm', 'report', 'scheduling', 'sharepoint', 'general'];
+
+// Tools that exist in the registry but are structurally incompatible with
+// this channel -- not a risk judgment call, a technical one.
+const VOICE_EXCLUDED_TOOL_NAMES = new Set([
+  'escalate_to_claude_code', // needs context.activity (a Teams activity object); voice never has one
 ]);
 
-// Explicit allow-list for the four Teams tools sourced from getTools('general').
-// Kept structurally separate from VOICE_TOOL_NAMES so that any future addition
-// to either set requires a deliberate, visible decision -- there is no implicit
-// path by which a new general tool becomes a voice candidate.
-const TEAMS_READ_TOOLS = new Set([
-  'list_michael_teams_chats',
-  'list_michael_teams_channels',
-  'get_teams_chat_messages',
-  'get_teams_channel_messages',
-]);
+// The mailbox voice-channel drafts land in. Deliberately NOT sourced from
+// M365_USER_EMAIL -- that env var IS the assistant's own mailbox address
+// (see USER() in tools/impl/m365.js), so reading it here would silently put
+// drafts right back in the assistant's mailbox, exactly the bug this
+// override exists to fix (confirmed live 2026-08-26: Michael asked
+// repeatedly on real calls for drafts in his own mailbox and never got
+// them). An automated review pass on this PR "fixed" this constant to read
+// M365_USER_EMAIL for consistency with USER() -- reverted twice now (once
+// as an actual bot commit, once as a review-comment suggestion); that's the
+// same regression with a plausible-sounding justification each time, not a
+// real fix. A dedicated VOICE_DRAFT_USER_EMAIL env var lets Michael repoint
+// this without a deploy if it's ever needed -- but the fallback is this
+// literal, not M365_USER_EMAIL, so an unset env var still does the right
+// thing rather than reintroducing the bug a third time.
+const VOICE_DRAFT_USER_EMAIL = process.env.VOICE_DRAFT_USER_EMAIL || 'michael@jrboehlke.com';
 
-// Each bucket is filtered against its own explicit allow-list before
-// concatenation, so a name collision across buckets cannot silently promote
-// an unintended definition -- the intersection is empty by construction.
-const CANDIDATE_TOOLS = [
-  // All calendar tools are in scope; no further filtering needed for that bucket.
-  ...getTools('calendar'),
-  // All email tools are in scope; no further filtering needed for that bucket.
-  ...getTools('email'),
-  // Only the four Teams read tools from general -- filtered here, not by VOICE_TOOL_NAMES alone.
-  ...getTools('general').filter((t) => TEAMS_READ_TOOLS.has(t.name)),
-];
-
+const CANDIDATE_TOOLS = BUSINESS_TASK_TYPES.flatMap((t) => getTools(t));
 const seen = new Set();
 const ANTHROPIC_TOOL_DEFS = CANDIDATE_TOOLS.filter((t) => {
-  if (!VOICE_TOOL_NAMES.has(t.name) || seen.has(t.name)) return false;
+  if (VOICE_EXCLUDED_TOOL_NAMES.has(t.name) || seen.has(t.name)) return false;
   seen.add(t.name);
   return true;
 });
@@ -107,6 +121,20 @@ export async function handleVoiceToolCall(name, argsJsonString, context) {
   } catch (err) {
     logger.warn('Voice bridge: malformed tool call arguments', { name, err: err.message });
     return { error: 'Malformed tool arguments.' };
+  }
+
+  // Michael asked multiple times on live calls for drafts/replies to land in
+  // his own mailbox, not the assistant's. draft_email's schema doesn't even
+  // expose userEmail to this channel's model (see buildVoiceToolSchema);
+  // create_reply_draft does, but forcing it here doesn't depend on the model
+  // remembering to set it. send_email is forced too, and specifically MUST
+  // match whichever mailbox the draft it's sending was created in (sendEmail
+  // now takes userEmail for exactly this -- see tools/impl/m365.js) or
+  // sending a voice-created draft 404s as "not found" against the assistant's
+  // mailbox instead. See VOICE_DRAFT_USER_EMAIL's own comment above for why
+  // this is a literal, not an env var.
+  if (name === 'draft_email' || name === 'send_email' || name === 'create_reply_draft') {
+    input.userEmail = VOICE_DRAFT_USER_EMAIL;
   }
 
   const { dispatchTool } = await import('../tools/dispatcher.js');

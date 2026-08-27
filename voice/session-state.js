@@ -19,6 +19,11 @@ function create(callConnectionId, initial = {}) {
     pinDeadline: Date.now() + 60_000,
     wsToAcs: null,
     openaiClient: null,
+    // Raw call transcript for voice/call-memory.js -- populated only once
+    // authState reaches 'verified' (see openai-realtime-client.js's
+    // handleTranscript), so a spoken PIN attempt never lands in here.
+    startedAt: new Date().toISOString(),
+    transcript: [],
   };
   sessions.set(callConnectionId, state);
   return state;
