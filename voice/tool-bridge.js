@@ -37,16 +37,36 @@ const VOICE_TOOL_NAMES = new Set([
   // Teams read (tools/impl/teams-read.js) -- added 2026-08-27 so Michael can
   // ask about Teams messages on a call, matching the same access he already
   // has via Teams bot and Claude Code. Only these 4 names, not the rest of
-  // TOOL_MAP.general -- pulled from getTools('general') below since that's
-  // the only taskType bucket TEAMS_READ_TOOLS lives in, same filter-by-name
-  // pattern as calendar/email above.
+  // TOOL_MAP.general -- pulled explicitly via TEAMS_READ_TOOLS below.
   'list_michael_teams_chats',
   'list_michael_teams_channels',
   'get_teams_chat_messages',
   'get_teams_channel_messages',
 ]);
 
-const CANDIDATE_TOOLS = [...getTools('calendar'), ...getTools('email'), ...getTools('general')];
+// Explicit allow-list for the four Teams tools sourced from getTools('general').
+// Kept structurally separate from VOICE_TOOL_NAMES so that any future addition
+// to either set requires a deliberate, visible decision -- there is no implicit
+// path by which a new general tool becomes a voice candidate.
+const TEAMS_READ_TOOLS = new Set([
+  'list_michael_teams_chats',
+  'list_michael_teams_channels',
+  'get_teams_chat_messages',
+  'get_teams_channel_messages',
+]);
+
+// Each bucket is filtered against its own explicit allow-list before
+// concatenation, so a name collision across buckets cannot silently promote
+// an unintended definition -- the intersection is empty by construction.
+const CANDIDATE_TOOLS = [
+  // All calendar tools are in scope; no further filtering needed for that bucket.
+  ...getTools('calendar'),
+  // All email tools are in scope; no further filtering needed for that bucket.
+  ...getTools('email'),
+  // Only the four Teams read tools from general -- filtered here, not by VOICE_TOOL_NAMES alone.
+  ...getTools('general').filter((t) => TEAMS_READ_TOOLS.has(t.name)),
+];
+
 const seen = new Set();
 const ANTHROPIC_TOOL_DEFS = CANDIDATE_TOOLS.filter((t) => {
   if (!VOICE_TOOL_NAMES.has(t.name) || seen.has(t.name)) return false;
