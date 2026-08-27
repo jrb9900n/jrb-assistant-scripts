@@ -87,7 +87,15 @@ function loadCredentials() {
       maxBuffer: 10 * 1024 * 1024,
     });
   } finally {
-    try { unlinkSync(tmpFile); } catch {}
+    try {
+      unlinkSync(tmpFile);
+    } catch (unlinkErr) {
+      // Deletion failure leaves a credential-containing script on disk.
+      // Log a clear warning so this never silently passes unnoticed.
+      process.stderr.write(
+        `[call-tool] WARNING: failed to delete temporary credential script "${tmpFile}": ${unlinkErr.message}\n`
+      );
+    }
   }
   // Deliberately throws rather than degrading to "no credentials loaded"
   // (a second review pass suggested exactly that -- rejected): this is an
