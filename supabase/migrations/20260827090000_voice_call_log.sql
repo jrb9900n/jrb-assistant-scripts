@@ -24,3 +24,36 @@ create table if not exists public.voice_call_log (
 create index if not exists voice_call_log_started_idx
   on public.voice_call_log (started_at desc);
 alter table public.voice_call_log enable row level security;
+
+-- The application exclusively accesses this table via the service role key,
+-- which bypasses RLS. No client-side (anon/authenticated) access is
+-- intended -- voice call transcripts are internal operational records, not
+-- user-facing data. The policies below make this intent explicit and ensure
+-- that if the wrong key is ever used by accident, all access is denied
+-- rather than silently succeeding or silently returning empty.
+--
+-- If a future feature needs authenticated reads (e.g. a dashboard), add a
+-- scoped SELECT policy here at that time.
+create policy "voice_call_log: deny anon reads"
+  on public.voice_call_log
+  for select
+  to anon
+  using (false);
+
+create policy "voice_call_log: deny anon writes"
+  on public.voice_call_log
+  for all
+  to anon
+  using (false);
+
+create policy "voice_call_log: deny authenticated reads"
+  on public.voice_call_log
+  for select
+  to authenticated
+  using (false);
+
+create policy "voice_call_log: deny authenticated writes"
+  on public.voice_call_log
+  for all
+  to authenticated
+  using (false);

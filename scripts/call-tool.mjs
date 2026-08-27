@@ -71,6 +71,7 @@ for ($i = 0; $i -lt $count; $i++) {
     $results += [PSCustomObject]@{ name = $name; value = $blob }
 }
 [CredEnumCT]::CredFree($pCreds)
+if ($results.Count -eq 0) { Write-Output "[]"; exit 0 }
 if ($results.Count -eq 1) { Write-Output "[$($results | ConvertTo-Json -Compress)]" }
 else { $results | ConvertTo-Json -Compress }
 `;
@@ -84,7 +85,17 @@ function loadCredentials() {
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
     });
-    const parsed = JSON.parse(out.trim() || '[]');
+    let parsed;
+    try {
+      parsed = JSON.parse(out.trim() || '[]');
+    } catch (parseErr) {
+      // PowerShell wrote something to stdout that isn't valid JSON (e.g. a
+      // partial error message, a BOM-prefixed fragment). Treat as no
+      // credentials found rather than propagating an opaque parse exception
+      // with no context to the caller.
+      process.stderr.write(`call-tool: credential enumeration returned non-JSON output; continuing with no credentials loaded. Parse error: ${parseErr.message}\n`);
+      parsed = [];
+    }
     return Array.isArray(parsed) ? parsed : [parsed];
   } finally {
     try { unlinkSync(tmpFile); } catch {}
