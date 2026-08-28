@@ -971,9 +971,22 @@ export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {})
 // Returns text unchanged if it already ends with "Michael" (case-insensitive, trailing
 // punctuation allowed); otherwise appends it as a default sign-off. Applied to all
 // drafted message bodies (new drafts and replies) per Michael's standing preference.
+//
+// Body text here is HTML, not plain text — a sign-off is usually wrapped in a tag
+// (e.g. "...<p>Michael</p>"), so trailing whitespace alone isn't enough to see past
+// to the actual text. Strip trailing whitespace/&nbsp;/closing HTML tags one layer
+// at a time before testing, so "<p>Michael</p>" is recognized the same as "Michael".
+// Confirmed live 2026-08-27: without this, callers whose body already ended in
+// "...Michael</p>" (the common case) still got a second "<br><br>Michael<br>"
+// appended, since the old check only matched bare text ending in "Michael".
 function withSignOff(text) {
-  const trimmed = (text || '').trim();
-  if (/michael[.,!]?\s*$/i.test(trimmed)) return text;
+  let trimmed = text || '';
+  let prev;
+  do {
+    prev = trimmed;
+    trimmed = trimmed.replace(/(&nbsp;|\s)+$/i, '').replace(/<\/[a-zA-Z][^>]*>\s*$/, '');
+  } while (trimmed !== prev);
+  if (/michael[.,!]?$/i.test(trimmed)) return text;
   return `${text}<br><br>Michael<br>`;
 }
 
