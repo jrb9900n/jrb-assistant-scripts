@@ -1380,6 +1380,14 @@ const SCHEDULED_TASKS = [
     // 1:30 AM nightly — refresh sa_waiting_list from SA and prune completed/invoiced jobs
     schedule: '30 1 * * *',
     name: 'sa_waiting_list_sync',
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // confirmed live 2026-08-28: sa_sync_log/sa_waiting_list.extracted_at show this task
+    // silently never fired once in the 8/20-8/28 window (every other task at :00/:30
+    // registered in this file fired every night without fail), while data went stale by
+    // 7-10 days. This once-a-day task gets exactly one chance to hit its target second;
+    // the SA browser work this process does elsewhere is the kind of event-loop stall
+    // that eats that one chance. Read-only refresh, safe to catch up on.
+    recoverMissedExecutions: true,
     run: async () => {
       const { syncWaitingList } = await import('../tools/impl/serviceautopilot.js');
       const result = await syncWaitingList();
@@ -1433,6 +1441,12 @@ const SCHEDULED_TASKS = [
     // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
     schedule: '0 1 * * *',
     name: 'sa_nightly_sync',
+    // Same node-cron missed-tick bug as sa_waiting_list_sync above / weekly_finance_report
+    // below — confirmed live 2026-08-28 via sa_sync_log: this task silently never fired
+    // once in the 8/20-8/28 window while every other :00/:30 task in this file fired
+    // nightly without fail, leaving sa_jobs 10 days stale with zero error logged. Spawns
+    // a separate script; safe to catch up on a missed night.
+    recoverMissedExecutions: true,
     run: () => new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['sa-nightly-sync.js'], {
         cwd: 'C:\\Users\\Assistant\\BTA Reporting',
