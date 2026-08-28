@@ -176,14 +176,13 @@ const HANDLERS = {
   get_teams_channel_messages:  (i) => teamsRead.getChannelMessages(i),
 
   // Service Autopilot
-  // maxScan raised well above searchClients' own conservative default (30) --
-  // SA's server-side name filter is a confirmed no-op (see searchClients'
-  // own comment), so a real conversational search needs to page through a
-  // meaningful chunk of the actual account population to have any real
-  // chance of finding an account that isn't in SA's "recent clients" list.
-  // Fixed here rather than exposed in the tool schema so every LLM-driven
-  // search gets this without depending on the model remembering to ask for it.
-  sa_search_clients:       (i) => sa.searchClients({ ...i, maxScan: 3000 }),
+  // SA's server-side name filter is a confirmed no-op (see searchClients' own
+  // comment), so a real conversational search needs to check the actual account
+  // population, not SA's "recent clients" list. searchClients' maxScan-bounded
+  // partial scan (even at maxScan:3000, this call's old value) still misses real
+  // accounts -- confirmed live 2026-08-28 against SA's ~10,300-account population.
+  // searchClientsFull scans the whole roster (cached) instead of guessing a cutoff.
+  sa_search_clients:       (i) => sa.searchClientsFull(i),
   sa_create_client:        (i) => sa.createClient(i),
   sa_add_note:             (i) => sa.addNote(i),
   sa_search_service_types: (i) => sa.searchServiceTypes(i),

@@ -154,6 +154,8 @@ let _page                = null;
 let _sessionExpiry       = 0;
 let _loginPromise        = null; // deduplicate concurrent login attempts
 let _incapsulaBackoffUntil = 0;  // epoch ms; refuse SA calls until this clears
+let _accountRosterCache    = null; // last full getAllSAAccounts() pull, for searchClientsFull
+let _accountRosterCachedAt = 0;    // epoch ms
 
 // Closes the live SA browser session, if any. Exported so cron.js can call this
 // from a process-exit handler — a live Chromium instance kept open for up to
@@ -769,6 +771,37 @@ export async function searchClients({ name, limit = 10, maxScan = 30 }) {
     startRow += pageSize;
   }
   return matches;
+}
+
+const ACCOUNT_ROSTER_TTL_MS = 10 * 60_000;
+
+/**
+ * Full-roster name search — the reliable alternative to searchClients' maxScan-bounded
+ * partial scan.
+ *
+ * Confirmed live 2026-08-28: even at maxScan:3000 (what sa_search_clients and
+ * scheduling-visits.js both already request), searchClients still misses real, active
+ * accounts — reproduced directly with "Palzewicz" returning 0 matches at maxScan:3000
+ * despite 2 real live client records existing, out of SA's ~10,300-account population.
+ * SortedColumns' actual sort key (`{FieldName:'', ...}`) doesn't correlate with recency
+ * or anything else useful for prioritizing a partial scan, so any fixed maxScan below
+ * the full account count will keep missing accounts that happen to sort past the
+ * cutoff — this isn't a tunable threshold, it's a structural gap in the partial-scan
+ * approach. This scans the entire live roster instead (one getAllSAAccounts pass,
+ * ~30-40s, cached for ACCOUNT_ROSTER_TTL_MS so a multi-name lookup or a conversation
+ * with several follow-up searches doesn't re-pull it every time) and matches
+ * client-side, same as searchClients.
+ */
+export async function searchClientsFull({ name, limit = 10 }) {
+  const now = Date.now();
+  if (!_accountRosterCache || now - _accountRosterCachedAt > ACCOUNT_ROSTER_TTL_MS) {
+    _accountRosterCache = await getAllSAAccounts({ max: 20000 });
+    _accountRosterCachedAt = Date.now();
+  }
+  const term = name.toLowerCase();
+  return _accountRosterCache
+    .filter(a => (a.name || '').toLowerCase().includes(term))
+    .slice(0, limit);
 }
 
 /**
