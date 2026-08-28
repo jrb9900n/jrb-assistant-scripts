@@ -1380,7 +1380,7 @@ const SCHEDULED_TASKS = [
     // 1:30 AM nightly — refresh sa_waiting_list from SA and prune completed/invoiced jobs
     schedule: '30 1 * * *',
     name: 'sa_waiting_list_sync',
-    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check below —
+    // Same node-cron missed-tick bug as weekly_finance_report/qb_health_check above —
     // confirmed live 2026-08-28: sa_sync_log/sa_waiting_list.extracted_at show this task
     // silently never fired once in the 8/20-8/28 window (every other task at :00/:30
     // registered in this file fired every night without fail), while data went stale by
@@ -1389,6 +1389,21 @@ const SCHEDULED_TASKS = [
     // that eats that one chance. Read-only refresh, safe to catch up on.
     recoverMissedExecutions: true,
     run: async () => {
+      // sa_nightly_sync (1:00 AM, immediately above) does its own independent SA login
+      // and also writes sa_waiting_list. Normally 30 min apart, but both tasks now have
+      // recoverMissedExecutions — a restart landing after both were missed would replay
+      // them back-to-back instead of staggered, and concurrent SA sessions have already
+      // caused a real production incident here (the 2026-08-19/20 backfill run: a
+      // concurrent SA probe tripped Incapsula's bot-detection and set a shared 45-min
+      // backoff that silently failed ~9,926 in-flight rows). Same
+      // wait-then-poll-with-cap pattern as bta_qb_revenue_report waiting on
+      // qb_weekly_sync's lock, below.
+      const nightlySyncLock = join(tmpdir(), 'jrb-scheduler-sa_nightly_sync.lock');
+      await waitForLockToAppear(nightlySyncLock);
+      const waitStart = Date.now();
+      while (existsSync(nightlySyncLock) && Date.now() - waitStart < 10 * 60_000) {
+        await new Promise(r => setTimeout(r, 5000));
+      }
       const { syncWaitingList } = await import('../tools/impl/serviceautopilot.js');
       const result = await syncWaitingList();
       logger.info('sa_waiting_list_sync complete', result);
@@ -1441,30 +1456,40 @@ const SCHEDULED_TASKS = [
     // 1 AM nightly — run all SA syncs (waiting list + scheduled jobs)
     schedule: '0 1 * * *',
     name: 'sa_nightly_sync',
-    // Same node-cron missed-tick bug as sa_waiting_list_sync above / weekly_finance_report
-    // below — confirmed live 2026-08-28 via sa_sync_log: this task silently never fired
+    // Same node-cron missed-tick bug as sa_waiting_list_sync / weekly_finance_report
+    // above — confirmed live 2026-08-28 via sa_sync_log: this task silently never fired
     // once in the 8/20-8/28 window while every other :00/:30 task in this file fired
     // nightly without fail, leaving sa_jobs 10 days stale with zero error logged. Spawns
     // a separate script; safe to catch up on a missed night.
     recoverMissedExecutions: true,
-    run: () => new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['sa-nightly-sync.js'], {
-        cwd: 'C:\\Users\\Assistant\\BTA Reporting',
-        env: { ...process.env },
-        stdio: ['ignore', 'pipe', 'pipe'],
-        timeout: 600_000,
-      });
-      let out = '';
-      let err = '';
-      child.stdout.on('data', d => { out += d; });
-      child.stderr.on('data', d => { err += d; });
-      child.on('close', code => {
-        logger.info('sa_nightly_sync complete', { code, output: out.slice(-2000) });
-        if (err) logger.warn('sa_nightly_sync stderr', { stderr: err.slice(-1000) });
-        code === 0 ? resolve() : reject(new Error(`sa-nightly-sync.js exited ${code}`));
-      });
-      child.on('error', reject);
-    }),
+    run: () => {
+      // Holds the lock sa_waiting_list_sync (1:30 AM, above) waits on — see that task's
+      // comment for why: recoverMissedExecutions on both tasks means a restart could
+      // otherwise replay them concurrently instead of staggered, and concurrent SA
+      // sessions have already caused a real production incident in this codebase.
+      if (!acquireRunLock('sa_nightly_sync', 12 * 60_000)) {
+        logger.warn('sa_nightly_sync: skipped — already running (lock held)');
+        return Promise.resolve();
+      }
+      return new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, ['sa-nightly-sync.js'], {
+          cwd: 'C:\\Users\\Assistant\\BTA Reporting',
+          env: { ...process.env },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 600_000,
+        });
+        let out = '';
+        let err = '';
+        child.stdout.on('data', d => { out += d; });
+        child.stderr.on('data', d => { err += d; });
+        child.on('close', code => {
+          logger.info('sa_nightly_sync complete', { code, output: out.slice(-2000) });
+          if (err) logger.warn('sa_nightly_sync stderr', { stderr: err.slice(-1000) });
+          code === 0 ? resolve() : reject(new Error(`sa-nightly-sync.js exited ${code}`));
+        });
+        child.on('error', reject);
+      }).finally(() => releaseRunLock('sa_nightly_sync'));
+    },
   },
   {
     // Every 30 minutes — check SA connectivity, alert Michael on first failure and on recovery
