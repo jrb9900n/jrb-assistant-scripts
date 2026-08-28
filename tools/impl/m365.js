@@ -145,7 +145,7 @@ export async function draftEmail({ to, subject, body, cc = [], userEmail } = {})
   const user = userEmail ?? USER();
   const message = {
     subject,
-    body: { contentType: 'HTML', content: withSignOff(body) },
+    body: { contentType: 'HTML', content: wrapForExchangeFont(withSignOff(body)) },
     toRecipients: to.map(a => ({ emailAddress: { address: a } })),
     ccRecipients: cc.map(a => ({ emailAddress: { address: a } })),
   };
@@ -169,7 +169,7 @@ export async function sendEmail({ draft_id, to, subject, body, contentType = 'HT
     await graph('POST', `/users/${user}/sendMail`, {
       message: {
         subject: subject ?? '',
-        body: { contentType, content: body },
+        body: { contentType, content: /^html$/i.test(contentType) ? wrapForExchangeFont(body) : body },
         toRecipients: to.map(a => ({ emailAddress: { address: a } })),
       },
       saveToSentItems: false,
@@ -181,7 +181,7 @@ export async function sendEmail({ draft_id, to, subject, body, contentType = 'HT
   // base64 JSON encoding), then send. This avoids Exchange corruption of large binaries.
   const draft = await graph('POST', `/users/${user}/messages`, {
     subject: subject ?? '',
-    body: { contentType, content: body },
+    body: { contentType, content: /^html$/i.test(contentType) ? wrapForExchangeFont(body) : body },
     toRecipients: to.map(a => ({ emailAddress: { address: a } })),
   });
   const draftId = draft.id;
@@ -977,6 +977,24 @@ function withSignOff(text) {
   return `${text}<br><br>Michael<br>`;
 }
 
+// Same font stack/size already proven live for reply drafts (see createReplyDraft below).
+const EXCHANGE_COMPOSE_STYLE = 'font-family: Calibri, Arial, Helvetica, sans-serif; font-size: 11pt; color: rgb(0, 0, 0);';
+
+// Outlook only reliably honors an inline font style when it's applied at the <body>
+// level of a real HTML document — a bare fragment (e.g. `<div style="...">...</div>`
+// with no surrounding <html><body>) renders in the mailbox's default compose font
+// instead (confirmed live 2026-08-28: a plain draftEmail() call rendered in Aptos 12,
+// the M365 tenant default, despite an explicit Calibri/11pt inline style on the outer
+// div). Wrapping in a real <html><body style="..."> document fixes this — the same
+// fix already proven live for reply drafts below, just never applied to plain new
+// drafts/sends. A no-op for callers that already supply a full document (e.g.
+// commission-report.js's own <html>-templated body) — detected via the presence of
+// a <body> tag, so their existing styling is never double-wrapped or overridden.
+function wrapForExchangeFont(html) {
+  if (/<body[^>]*>/i.test(html || '')) return html;
+  return `<html><body style="${EXCHANGE_COMPOSE_STYLE}">${html}</body></html>`;
+}
+
 // Creates a draft reply in Michael's mailbox, preserving the email thread.
 // Returns the draft message ID so it can be sent later or reviewed in Outlook.
 //
@@ -1018,7 +1036,7 @@ export async function createReplyDraft({ userEmail, email_id, body } = {}) {
   // compose-area inline style (Calibri 12pt, black). Without this wrapper, new text
   // renders in Outlook's default display font, visually mismatched against the Calibri
   // attribution block Exchange generates below the separator.
-  const styledReplyText = `<div style="font-family: Calibri, Arial, Helvetica, sans-serif; font-size: 11pt; color: rgb(0, 0, 0);">${withSignOff(body)}</div>`;
+  const styledReplyText = `<div style="${EXCHANGE_COMPOSE_STYLE}">${withSignOff(body)}</div>`;
 
   let combinedContent;
   if (existingContent.trim()) {
