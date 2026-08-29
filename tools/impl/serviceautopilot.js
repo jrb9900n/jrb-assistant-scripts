@@ -7,6 +7,13 @@ import net from 'net';
 import tls from 'tls';
 import { fileURLToPath } from 'url';
 import { logger } from '../../core/logger.js';
+// Circular-ish import: sa-phone-cache.js itself imports getAllSAAccounts/
+// getSAClientDetails from this file, but only calls them from inside its own
+// function bodies (never at module-eval time), so this is safe under ESM's
+// live-binding circular-import handling -- both modules finish initializing
+// before either function is ever actually invoked. Confirmed via a plain
+// import test (see PR notes) before relying on it here.
+import { findPhoneMatchesInCache } from './sa-phone-cache.js';
 
 const SA_BASE    = 'https://my.serviceautopilot.com';
 const EMPTY_GUID = '00000000-0000-0000-0000-000000000000';
@@ -948,54 +955,18 @@ function normalizeEmailList(raw) {
 // lockout risk for what should be a quick pre-create check.
 const DUPLICATE_PHONE_CONFIRM_CAP = 15;
 
-// Bounds the *phone-only* fallback below (no email/address/name given at
-// all). Re-confirmed live 2026-08-29, more exhaustively than the note above:
-// dumped every raw key V2AccountList_Query returns across a live sample (full
-// key list, not just the fields mapSAAccount happens to extract) -- there is
-// no phone field under any name. Also checked the dispatch board's bulk list
-// endpoint (WebServices/ScheduledWorkWs.asmx/Query, ~144 real live jobs) on
-// the theory crews might need phone for route calls -- same result, full key
-// dump has no phone field there either (only a `HasEmail` boolean). This is a
-// genuine, structural gap across every bulk/list SA endpoint found so far,
-// not a mapping bug -- phone only ever comes back from a *per-client* detail
-// call (GetClientInfo / GetCustomerDataAsync, both confirmed live to return
-// real phone data on real accounts).
-//
-// A phone-only dedup check therefore has no way to search all ~10,300
-// accounts cheaply. But the realistic risk for an unattended lead pipeline
-// isn't an arbitrary old account -- it's a duplicate of something created
-// RECENTLY (the same lead resubmitting a form, a callback reaching an
-// already-created record). mapSAAccount's `createdDate` (from
-// ClientSince/LeadSince, present on every roster row even though phone isn't)
-// lets this fallback scan just the N most-recently-created accounts via a
-// bounded set of live GetClientInfo calls, instead of giving up outright.
-// Confirmed live: the 30/60/90-day-old account counts are 12/164/228 out of
-// 10,291 total, so a fixed count cap (rather than a date window, which could
-// spike unboundedly during a real onboarding burst) keeps this a predictable,
-// bounded cost regardless of how many accounts were recently created.
-//
-// Re-checked again 2026-08-29 after Michael named the exact field names
-// (CellPhone/HomePhone/WorkPhone/OtherPhone) as a specific lead to chase.
-// Those names are real -- GetClientInfo's full raw response was dumped (all
-// 113 keys) and contains exactly HomePhone/CellPhone/WorkPhone/OtherPhone
-// (plus PreferredPhoneID), matching Michael's casing precisely. But a fresh
-// live V2AccountList_Query pull that same day still had zero "phone"-matching
-// keys (case-insensitive grep across all 50 returned keys), and neither did
-// four speculative request-body mutations tried against the live endpoint --
-// CustomFields:[the four names] (CustomFields is SA's user-defined
-// CustomField1-6 mechanism, not a general column selector -- confirmed from
-// the live client-side ClientList.js source itself), Settings.SelectedColumns,
-// Settings.Columns, and a top-level Fields array -- all four came back with
-// the identical 50-key shape, no phone key gained. The live
-// /scripts/ClientList.js bundle (the actual client-side code that builds this
-// exact V2AccountList_Query request and renders its response, fetched fresh
-// that day, not a stale archived copy) contains zero occurrences of the
-// substring "phone" anywhere in 171KB of source. Conclusion stands: this is a
-// hardcoded, fixed server-side response shape with no hidden request
-// parameter to unlock phone data, not an undiscovered configuration option --
-// the bounded recent-scan fallback below is the right permanent approach, not
-// a placeholder pending a better answer.
-const PHONE_ONLY_RECENT_SCAN_CAP = 50;
+// Historical note on the phone-only fallback below: extensive live probing
+// (2026-08-29, see git history on this comment block for the full
+// investigation) confirmed no bulk/list SA endpoint carries phone data under
+// any name or request-body variation -- phone only ever comes back from a
+// per-client GetClientInfo/GetCustomerDataAsync call. That's why a phone-only
+// dedup check (no email/address/name to narrow the search) can't cheaply
+// scan the full ~10,300-account population live. This originally fell back
+// to a bounded scan of just the most-recently-created accounts
+// (PHONE_ONLY_RECENT_SCAN_CAP = 50); as of PR #362 that fallback is
+// superseded by findPhoneMatchesInCache() below, which checks the full
+// cached population (sa_client_phone_cache, refreshed daily) in one query
+// instead of a live-scanned recent slice.
 
 /**
  * Checks SA for a likely-existing client/lead before a new one gets created,
@@ -1006,14 +977,14 @@ const PHONE_ONLY_RECENT_SCAN_CAP = 50;
  * live GetClientInfo confirmations against whatever email/address/name
  * already surfaced as candidates (see DUPLICATE_PHONE_CONFIRM_CAP above).
  *
- * A phone-only check (no email/address/name given) can't scan the full
- * ~10,300-account population -- no bulk SA endpoint carries phone at all (see
- * PHONE_ONLY_RECENT_SCAN_CAP's comment for what was actually tried live).
- * Instead of returning "unsupported" and doing nothing, this bounds the scan
- * to the PHONE_ONLY_RECENT_SCAN_CAP most-recently-created accounts (by
- * ClientSince/LeadSince) -- covers the realistic case (a duplicate of
- * something created recently) at a predictable cost, and says so plainly via
- * the returned `note` when it can't guarantee full-population coverage.
+ * A phone-only check (no email/address/name given) can't scan SA live for the
+ * full ~10,300-account population -- no bulk SA endpoint carries phone at all
+ * (see the historical note above this function's constants for what was
+ * actually tried live). Instead it queries the sa_client_phone_cache table
+ * (tools/impl/sa-phone-cache.js, PR #362) via findPhoneMatchesInCache(),
+ * which covers every account the daily backfill/incremental cron has cached
+ * -- effectively the full population, refreshed at most a day stale -- and
+ * says so via the returned `note`.
  *
  * Confidence rules (mirrors the lesson already learned the hard way in the SA
  * Client Categorization HOA-dedup work -- see CLAUDE.md's "Address alone is
@@ -1087,26 +1058,34 @@ export async function findDuplicateClient({ email = '', phone = '', address = ''
   let phoneCoverageNote = null;
   if (normPhone) {
     if (candidates.size === 0) {
-      // No email/address/name to narrow the search -- fall back to a bounded
-      // scan of the most-recently-created accounts (see
-      // PHONE_ONLY_RECENT_SCAN_CAP's comment for why this is the practical
-      // substitute for a full-population phone search, which no bulk SA
-      // endpoint supports).
-      const recentSorted = roster
-        .filter(a => a.createdDate)
-        .sort((a, b) => (a.createdDate < b.createdDate ? 1 : a.createdDate > b.createdDate ? -1 : 0))
-        .slice(0, PHONE_ONLY_RECENT_SCAN_CAP);
-      for (const a of recentSorted) {
-        try {
-          const candidatePhone = await getSAClientPhone(a.clientId);
-          if (normalizePhoneDigits(candidatePhone) === normPhone) {
-            addCandidate(a, 'phone');
-          }
-        } catch (e) {
-          logger.warn('SA findDuplicateClient: phone-only recent-scan lookup failed', { clientId: a.clientId, error: e.message });
+      // No email/address/name to narrow the search. Previously this fell back
+      // to a bounded scan of the most-recently-created accounts
+      // (PHONE_ONLY_RECENT_SCAN_CAP) since no bulk SA endpoint carries phone
+      // data and a full ~10,300-account live scan was too slow/Incapsula-risky
+      // to run inline. That bounded fallback is superseded now that PR #362's
+      // sa_client_phone_cache table exists -- findPhoneMatchesInCache() checks
+      // the FULL cached population in one Supabase query instead of just the
+      // last PHONE_ONLY_RECENT_SCAN_CAP accounts created.
+      const { matches: cacheMatches, totalCached } = await findPhoneMatchesInCache({ phone });
+      for (const m of cacheMatches) {
+        const account = roster.find(a => a.clientId === m.clientId);
+        if (account) {
+          addCandidate(account, 'phone');
+        } else {
+          // Cached client no longer appears in the current roster pull (e.g.
+          // deleted/merged in SA since the cache last refreshed) -- still a
+          // real signal worth surfacing, just without roster address/email.
+          candidates.set(m.clientId, {
+            clientId: m.clientId,
+            name: m.name,
+            address: '',
+            email: '',
+            isLead: null,
+            matchedOn: new Set(['phone']),
+          });
         }
       }
-      phoneCoverageNote = `Phone-only check: no email/address/name given to narrow the search, so only the ${recentSorted.length} most-recently-created SA accounts (out of ~${roster.length} total) were checked against this phone number -- not the full population. Provide email, address, or a name for full-population coverage instead.`;
+      phoneCoverageNote = `Phone-only check: no email/address/name given to narrow the search, so this matched against the full SA phone cache (${totalCached} cached accounts) instead of a live per-account scan. The cache refreshes via the sa_phone_cache_incremental daily cron (capped at 300 accounts/run) and may lag a brand-new account by up to a day -- provide email, address, or a name for a fully real-time check.`;
     } else {
       const toCheck = [...candidates.values()].slice(0, DUPLICATE_PHONE_CONFIRM_CAP);
       if (candidates.size > DUPLICATE_PHONE_CONFIRM_CAP) {
