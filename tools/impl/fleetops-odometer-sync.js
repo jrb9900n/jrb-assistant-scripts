@@ -144,12 +144,17 @@ export async function runOdometerSync() {
     return result;
   } catch (err) {
     logger.error('fleetops_odometer_sync failed', { err: err.message });
-    await fleetops.from('odometer_sync_log').insert({
-      assets_synced: 0,
-      assets_skipped: 0,
-      readings_written: 0,
-      error_message: err.message,
-    }).catch(() => {});
+    // The Supabase query builder is thenable but doesn't implement a real
+    // .catch() method — chaining .catch() directly on it throws
+    // "insert(...).catch is not a function" instead of swallowing the error.
+    try {
+      await fleetops.from('odometer_sync_log').insert({
+        assets_synced: 0,
+        assets_skipped: 0,
+        readings_written: 0,
+        error_message: err.message,
+      });
+    } catch {}
     throw err;
   }
 }
