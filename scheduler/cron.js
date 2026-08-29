@@ -1508,8 +1508,25 @@ const SCHEDULED_TASKS = [
     schedule: '0 2 * * *',
     name: 'sa_estimate_line_sync',
     recoverMissedExecutions: true,
-    run: () => {
-      if (!acquireRunLock('sa_estimate_line_sync', 20 * 60_000)) {
+    run: async () => {
+      // Same wait-then-poll-with-cap pattern as sa_waiting_list_sync waiting on
+      // sa_nightly_sync's lock, above -- recoverMissedExecutions on all three tasks
+      // means a restart could otherwise replay them concurrently instead of staggered,
+      // and concurrent SA browser sessions have already caused a real production
+      // incident in this codebase. sa_waiting_list_sync itself holds no lock of its
+      // own to wait on (confirmed in this file), so sa_nightly_sync's lock is the
+      // only one available to guard against here.
+      const nightlySyncLock = join(tmpdir(), 'jrb-scheduler-sa_nightly_sync.lock');
+      await waitForLockToAppear(nightlySyncLock);
+      const waitStart = Date.now();
+      while (existsSync(nightlySyncLock) && Date.now() - waitStart < 12 * 60_000) {
+        await new Promise(r => setTimeout(r, 5000));
+      }
+
+      // TTL covers both chained children's 15-min timeouts plus overhead -- must exceed
+      // the worst-case combined runtime, or a recoverMissedExecutions catch-up could see
+      // this lock as stale mid-run and start a second overlapping instance.
+      if (!acquireRunLock('sa_estimate_line_sync', 35 * 60_000)) {
         logger.warn('sa_estimate_line_sync: skipped — already running (lock held)');
         return Promise.resolve();
       }
