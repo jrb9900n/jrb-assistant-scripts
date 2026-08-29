@@ -973,6 +973,28 @@ const DUPLICATE_PHONE_CONFIRM_CAP = 15;
 // 10,291 total, so a fixed count cap (rather than a date window, which could
 // spike unboundedly during a real onboarding burst) keeps this a predictable,
 // bounded cost regardless of how many accounts were recently created.
+//
+// Re-checked again 2026-08-29 after Michael named the exact field names
+// (CellPhone/HomePhone/WorkPhone/OtherPhone) as a specific lead to chase.
+// Those names are real -- GetClientInfo's full raw response was dumped (all
+// 113 keys) and contains exactly HomePhone/CellPhone/WorkPhone/OtherPhone
+// (plus PreferredPhoneID), matching Michael's casing precisely. But a fresh
+// live V2AccountList_Query pull that same day still had zero "phone"-matching
+// keys (case-insensitive grep across all 50 returned keys), and neither did
+// four speculative request-body mutations tried against the live endpoint --
+// CustomFields:[the four names] (CustomFields is SA's user-defined
+// CustomField1-6 mechanism, not a general column selector -- confirmed from
+// the live client-side ClientList.js source itself), Settings.SelectedColumns,
+// Settings.Columns, and a top-level Fields array -- all four came back with
+// the identical 50-key shape, no phone key gained. The live
+// /scripts/ClientList.js bundle (the actual client-side code that builds this
+// exact V2AccountList_Query request and renders its response, fetched fresh
+// that day, not a stale archived copy) contains zero occurrences of the
+// substring "phone" anywhere in 171KB of source. Conclusion stands: this is a
+// hardcoded, fixed server-side response shape with no hidden request
+// parameter to unlock phone data, not an undiscovered configuration option --
+// the bounded recent-scan fallback below is the right permanent approach, not
+// a placeholder pending a better answer.
 const PHONE_ONLY_RECENT_SCAN_CAP = 50;
 
 /**
