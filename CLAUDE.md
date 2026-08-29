@@ -712,15 +712,19 @@ Confirmed working live 2026-08-24: reading `support@jrboehlke.com` via `listEmai
 
 ---
 
-## CardDAV Contact Server (built 2026-05-21)
+## CardDAV Contact Server (built 2026-05-21, augmented with SA clients/leads 2026-08-29)
 
-Replaces Outlook contact sync. Serves QBO customers + vendors as a read-only CardDAV addressbook at `https://agent.jrboehlke.com/carddav/`. Employees add it as a native Contacts account on iOS/Android — contacts appear in the phone dialer. Revoking a credential instantly cuts access; contacts disappear from the phone on the next sync.
+Replaces Outlook contact sync. Serves QBO customers + vendors, augmented with ServiceAutopilot (SA) clients and leads, as a read-only CardDAV addressbook at `https://agent.jrboehlke.com/carddav/`. Employees add it as a native Contacts account on iOS/Android — contacts appear in the phone dialer. Revoking a credential instantly cuts access; contacts disappear from the phone on the next sync.
+
+**Why SA is included, not just QBO**: QBO only has people who've actually been billed. SA has the much broader universe of leads/prospects who've never been invoiced — a field employee getting a call from a lead still in the sales pipeline previously couldn't have that call resolve to a name. Decision confirmed with Michael 2026-08-29: augment, not replace — QBO's vendor contacts (which SA has no equivalent of) stay exactly as they were.
 
 ### How it works
 - Per-employee tokens stored in Supabase `carddav_credentials` table (jrb-assistant project)
-- QBO contacts fetched via QB API and cached 2 hours; cache refreshes on next sync request
-- vCard 3.0 format; UID format `JRB-CUSTOMER-{Id}@jrboehlke.com` / `JRB-VENDOR-{Id}@jrboehlke.com`
-- CATEGORIES field = `JRB Customer` or `JRB Vendor` (creates groups on iOS)
+- QBO contacts fetched via QB API; SA clients/leads fetched via `getAllSAAccounts()` (`serviceautopilot.js`); both cached 2 hours, cache refreshes on next sync request
+- **SA phone numbers come from the `sa_client_phone_cache` table** (`tools/impl/sa-phone-cache.js` — a daily backfill/incremental cron caching every SA client/lead's `GetClientInfo` phone fields, since no bulk SA endpoint carries phone data), loaded in bulk via `getAllCachedPhones()` — one Supabase query covering the full ~10,300-account SA population. This replaced an earlier live, per-account `GetClientInfo` loop capped at the first 150 SA-only contacts per cache refresh; every SA-only contact now gets a phone lookup, not just the first 150, and refreshing CardDAV no longer adds per-account load to the shared SA browser session. SA address/city/state/zip still comes from the bulk account roster (the phone cache table has no address columns) — accepted trade-off of possibly being one refresh cycle behind a very recent SA address edit, in exchange for not needing a live per-account call at all.
+- **Cross-source dedupe**: `groupCandidates()` unions QBO customer/vendor and SA client/lead records into one merged vCard when they share a phone number, an email address, or a normalized 2+-word name — the same class of signal `findDuplicateClient()` (`serviceautopilot.js`, SA lead-source/dedup system) uses for its own confidence tiers. A person or business that's both a QBO customer and an SA client/lead becomes one vCard combining every phone/email/address found across all matched records, not two separate contacts. When a merged group includes any QBO record, the existing QBO-sourced category (`JRB Customer`/`JRB Vendor`) wins — QBO is the authoritative billed-relationship source; only a group made up entirely of SA records gets the new SA-only categories below.
+- vCard 3.0 format; UID format `JRB-CUSTOMER-{Id}@jrboehlke.com` / `JRB-VENDOR-{Id}@jrboehlke.com` / `JRB-SA-{clientId}@jrboehlke.com`
+- CATEGORIES field = `JRB Customer`, `JRB Vendor`, `JRB SA Client` (SA-only, not a lead), or `JRB SA Lead` (SA-only, still in the sales pipeline) — the last two create their own iOS contact groups, mirroring the existing `JRB Customer`/`JRB Vendor` naming convention
 
 ### Setup on iOS
 Settings → Contacts → Accounts → Add Account → Other → Add CardDAV Account

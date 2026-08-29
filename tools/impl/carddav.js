@@ -10,7 +10,8 @@ import crypto from 'crypto';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { getQBAccessToken } from './qb-token.js';
-import { getAllSAAccounts, getSAClientDetails } from './serviceautopilot.js';
+import { getAllSAAccounts } from './serviceautopilot.js';
+import { getAllCachedPhones } from './sa-phone-cache.js';
 import { fetchEmployeeDirectory } from './m365.js';
 
 const QB_BASE = () => `https://quickbooks.api.intuit.com/v3/company/${process.env.QB_REALM_ID}`;
@@ -88,13 +89,16 @@ function normalizePhone(p) {
   return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
 }
 
-async function getContacts() {
+// Exported (in addition to being called internally by handleCardDAV) so it can be
+// exercised directly in tests with the external I/O (QBO/SA/Supabase/Graph) mocked
+// at the module boundary, without needing a live SA browser session or QBO tokens.
+export async function getContacts() {
   if (_cache && Date.now() - _cacheTime < CACHE_TTL) return _cache;
 
   logger.info('CardDAV: refreshing contact cache');
-  let customers, vendors, saAccounts, qboEmployees, empDirectory;
+  let customers, vendors, saAccounts, qboEmployees, empDirectory, saPhoneCache;
   try {
-    [customers, vendors, saAccounts, qboEmployees, empDirectory] = await Promise.all([
+    [customers, vendors, saAccounts, qboEmployees, empDirectory, saPhoneCache] = await Promise.all([
       fetchQBOEntities('Customer'),
       fetchQBOEntities('Vendor'),
       getAllSAAccounts().catch(err => {
@@ -108,6 +112,16 @@ async function getContacts() {
       fetchEmployeeDirectory().catch(err => {
         logger.warn('CardDAV: Employee Directory fetch failed — employees will appear without directory phones', { err: err.message });
         return [];
+      }),
+      // sa_client_phone_cache (built by PR #362) replaces the old live,
+      // capped-at-150 per-account GetClientInfo loop below with one bulk
+      // Supabase query covering the full SA account population. Degrades to
+      // an empty Map (not a thrown error) on failure — SA-only contacts then
+      // fall back to the bulk roster's own single collapsed phone field,
+      // same as an account the cache hasn't reached yet.
+      getAllCachedPhones().catch(err => {
+        logger.warn('CardDAV: SA phone cache load failed — SA-only contacts will fall back to bulk-roster phone data', { err: err.message });
+        return new Map();
       }),
     ]);
   } catch (err) {
@@ -193,90 +207,49 @@ async function getContacts() {
 
   // SA-only contacts: in SA but not matched to any active QBO customer by name.
   // SA's QboID sync is not configured, so we name-match instead of ID-match.
-  // SA bulk list has no phone fields — requires per-account GetClientInfo.
-  // Leads are prioritized first so they always make it within the fetch cap.
+  // (A name-based non-match here doesn't mean "never merged with QBO" —
+  // groupCandidates below also unions by phone/email/name across every
+  // candidate, so an SA account that slips past this filter under a
+  // different display name can still land in the same merged vCard as its
+  // QBO counterpart if a phone or email matches.)
   const qboNormalizedNames = new Set(customers.map(c => normalizeName(c.DisplayName || '')));
   const saOnlyRaw = saAccounts
-    .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)) && !c.type.toLowerCase().includes('closed'))
-    .sort((a, b) => (b.isLead ? 1 : 0) - (a.isLead ? 1 : 0));
+    .filter(c => c.name && !qboNormalizedNames.has(normalizeName(c.name)) && !c.type.toLowerCase().includes('closed'));
 
-  // Fetch per-account phone numbers for the top N SA-only contacts (leads first).
-  // SA bulk list phone fields are often empty — GetClientInfo gives the definitive number.
-  // Contacts beyond the cap fall back to the bulk-list phone (if populated) or appear
-  // address-only. No contact is silently excluded just because it's past position N.
-  const PHONE_FETCH_CAP = 150;
-  const PHONE_CONCURRENCY = 5;
-  const saOnlyForPhones = saOnlyRaw.slice(0, PHONE_FETCH_CAP);
-  // saDetailById tracks every account that was attempted via GetClientInfo so the outer map
-  // can distinguish "API returned no data" from "account was never fetched" and apply
-  // bulk-list fallbacks only to beyond-cap accounts.
-  // GetClientInfo returns both phone AND address in one call — no extra API cost.
-  const saDetailById = new Map();
-  try {
-    for (let i = 0; i < saOnlyForPhones.length; i += PHONE_CONCURRENCY) {
-      const batch = saOnlyForPhones.slice(i, i + PHONE_CONCURRENCY);
-      const batchResults = await Promise.all(
-        batch.map(async c => {
-          try {
-            const detail = await getSAClientDetails(c.clientId);
-            return [c.clientId, {
-              homePhone:  detail.homePhone  || null,
-              cellPhone:  detail.cellPhone  || null,
-              workPhone:  detail.workPhone  || null,
-              otherPhone: detail.otherPhone || null,
-              address: detail.address || null, city: detail.city, state: detail.state, zip: detail.zip,
-            }];
-          } catch {
-            // API error — fall back to bulk-list data; bulk collapses to one phone so put it in homePhone
-            return [c.clientId, {
-              homePhone: c.phone || null, cellPhone: null, workPhone: null, otherPhone: null,
-              address: c.address || null, city: c.city, state: c.state, zip: c.zip,
-            }];
-          }
-        })
-      );
-      for (const [id, detail] of batchResults) saDetailById.set(id, detail); // Store null phone/addr to mark "fetched"
-    }
-  } catch (err) {
-    logger.warn('CardDAV: SA detail fetch failed, using bulk-list data only', { err: err.message });
-    // Preserve any API-fetched entries; add bulk data only for unfetched accounts.
-    for (const c of saOnlyForPhones) {
-      if (!saDetailById.has(c.clientId)) {
-        saDetailById.set(c.clientId, {
-          homePhone: c.phone || null, cellPhone: null, workPhone: null, otherPhone: null,
-          address: c.address || null, city: c.city, state: c.state, zip: c.zip,
-        });
-      }
-    }
-  }
-
-  // All SA-only contacts, not just those within the phone-fetch cap.
-  // Within-cap: API phone+address (may be null/empty); beyond-cap: bulk-list data.
-  // API address takes priority over bulk-list address when both exist.
-  // These no longer get silently dropped when a phone matches a QBO contact — instead
-  // they're fed into the same merge pool as QBO customers/vendors below, so any phone,
-  // address, or email SA has that QBO doesn't gets folded into the merged contact
-  // instead of being discarded.
+  // Phone source: sa_client_phone_cache (bulk-loaded above via
+  // getAllCachedPhones), built by the daily backfill/incremental cron in
+  // tools/impl/sa-phone-cache.js — a single Supabase query already covering
+  // the full ~10,300-account population, replacing the old live, capped
+  // (150 accounts/refresh) per-account GetClientInfo loop this file used to
+  // run on every 2-hour cache refresh. Every SA-only contact gets a cache
+  // lookup now, not just the first 150 — the one real limitation is cache
+  // staleness: an account created after the last incremental cron run
+  // (daily, 300 accounts/run) simply isn't in the Map yet and falls back to
+  // the bulk roster's own single collapsed phone field below, same as
+  // before.
+  //
+  // Address: sourced entirely from the bulk roster (saAccounts) rather than
+  // a live per-account call — the cache table has no address columns, and
+  // fetching address via a fresh GetClientInfo call per contact would
+  // reintroduce the exact live-SA-load problem the phone cache exists to
+  // remove. The bulk roster's Address1/City/State/Zip are the same
+  // underlying SA record, just possibly a refresh cycle behind if an
+  // account's address changed very recently.
   const saCandidates = saOnlyRaw
     .map(c => {
-      const detail = saDetailById.get(c.clientId);
-      const apiAddr = detail?.address || null;
-      // API returns all four phone fields; bulk list collapses to one phone.
-      // Fall back to bulk-list phone (in homePhone slot) when API returned no phones at all —
-      // covers beyond-cap accounts (detail undefined) and accounts whose phones are only in
-      // SA's Phone1/PhoneNumber fields that GetClientInfo doesn't check.
-      const homePhone  = detail?.homePhone  || null;
-      const cellPhone  = detail?.cellPhone  || null;
-      const workPhone  = detail?.workPhone  || null;
-      const otherPhone = detail?.otherPhone || null;
+      const cached = saPhoneCache.get(c.clientId);
+      const homePhone  = cached?.homePhone  || null;
+      const cellPhone  = cached?.cellPhone  || null;
+      const workPhone  = cached?.workPhone  || null;
+      const otherPhone = cached?.otherPhone || null;
+      // Bulk-roster fallback only when the cache has nothing for this account at all
+      // (not yet backfilled) — same "collapse to homePhone slot" convention the old
+      // per-account fallback used, since the roster only carries one phone field.
       const effectiveHomePhone = homePhone || (!(cellPhone || workPhone || otherPhone) ? (c.phone || null) : null);
       return {
         ...c,
         homePhone: effectiveHomePhone, cellPhone, workPhone, otherPhone,
-        address: apiAddr || c.address || null,
-        city:    apiAddr ? detail.city : c.city,
-        state:   apiAddr ? detail.state : c.state,
-        zip:     apiAddr ? detail.zip : c.zip,
+        address: c.address || null, city: c.city, state: c.state, zip: c.zip,
       };
     })
     .filter(c => {
@@ -311,6 +284,7 @@ async function getContacts() {
     vendors: vendorCandidates.length,
     saCandidates: saCandidates.length,
     saOnlyRaw: saOnlyRaw.length,
+    saPhoneCacheSize: saPhoneCache.size,
     mergedContacts: mergedVcards.length,
     employees: employeeVcards.length,
   });
@@ -391,7 +365,13 @@ function makeSaCandidate(client) {
     .filter(([number]) => number)
     .map(([number, telType]) => ({ number, telType }));
   const addresses = client.address ? [{ Line1: client.address, City: client.city, State: client.state, Zip: client.zip }] : [];
-  return { key: `sa:${client.clientId}`, source: 'sa', id: client.clientId, givenName, familyName, personName, displayName: raw, companyName, phones, emails: [], addresses };
+  // mapSAAccount (serviceautopilot.js) carries Email straight off the bulk roster —
+  // populating it here (previously always []) lets groupCandidates below match this
+  // SA account against a QBO customer/vendor by email, not just phone/name. isLead
+  // feeds mergeCandidateGroup's category choice ("JRB SA Client" vs "JRB SA Lead")
+  // for a group that ends up with no QBO customer/vendor member at all.
+  const emails = client.email ? [client.email] : [];
+  return { key: `sa:${client.clientId}`, source: 'sa', id: client.clientId, givenName, familyName, personName, displayName: raw, companyName, phones, emails, addresses, isLead: !!client.isLead };
 }
 
 // Union-find so any number of candidates chained together by a shared phone number or
@@ -405,12 +385,24 @@ class UnionFind {
 function groupCandidates(candidates) {
   const uf = new UnionFind(candidates.length);
   const byPhone = new Map();
+  const byEmail = new Map();
   const byName = new Map();
   candidates.forEach((cand, i) => {
     for (const { number } of cand.phones) {
       const n = normalizePhone(number);
       if (n.length < 7) continue;
       if (byPhone.has(n)) uf.union(i, byPhone.get(n)); else byPhone.set(n, i);
+    }
+    // Email is as strong an identity signal as phone (same confidence tier
+    // findDuplicateClient uses in serviceautopilot.js) — added so an SA
+    // client/lead whose display name doesn't match its QBO counterpart (a
+    // legal-name variant, a nickname, a "Last, First" vs. company-name
+    // mismatch) can still merge into the same vCard via a shared email,
+    // rather than only ever merging on phone or an exact name match.
+    for (const e of cand.emails) {
+      const key = e.toLowerCase();
+      if (!key) continue;
+      if (byEmail.has(key)) uf.union(i, byEmail.get(key)); else byEmail.set(key, i);
     }
     // Require 2+ words before matching by name — a single generic token ("Kevin") is too
     // common to safely identify one real-world entity and would merge unrelated customers
@@ -472,8 +464,19 @@ function mergeCandidateGroup(members) {
     if (a?.Line1 && !seenAddr.has(a.Line1)) { seenAddr.add(a.Line1); addresses.push(a); }
   }
 
+  // A merged group that includes any QBO customer/vendor record keeps the existing
+  // "JRB Customer"/"JRB Vendor" grouping (QBO is the billed-relationship source of
+  // truth) — this only differs for a group made up entirely of SA candidates, i.e. a
+  // lead/client SA knows about that has never been invoiced in QBO at all. Those get
+  // their own category, mirroring the existing "JRB Customer"/"JRB Vendor" naming
+  // convention: "JRB SA Client" for an active SA client, "JRB SA Lead" for a
+  // still-in-pipeline lead. If the group somehow mixes an SA client and an SA lead
+  // (e.g. two duplicate SA records for the same person merged by phone/email), the
+  // client status wins — an active client relationship is the more specific fact.
   const category = sorted.some(m => m.source === 'customer') ? 'JRB Customer'
     : sorted.some(m => m.source === 'vendor') ? 'JRB Vendor'
+    : sorted.some(m => m.source === 'sa' && !m.isLead) ? 'JRB SA Client'
+    : sorted.some(m => m.source === 'sa' && m.isLead) ? 'JRB SA Lead'
     : 'JRB Customer';
 
   // Lists every source record folded into this contact — makes it possible to trace,

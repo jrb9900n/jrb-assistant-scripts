@@ -280,3 +280,54 @@ export async function findPhoneMatchesInCache({ phone, ttlDays = PHONE_CACHE_TTL
   logger.info('sa-phone-cache: phone match query complete', { normPhone, matchCount: matches.length, totalCached });
   return { matches, totalCached, ttlDays };
 }
+
+/**
+ * Bulk-loads the entire sa_client_phone_cache table into a Map keyed by
+ * clientId — built for tools/impl/carddav.js's SA-contact augmentation
+ * (CardDAV addressbook), which previously sourced SA phone numbers via a
+ * live, capped (PHONE_FETCH_CAP=150), rate-limited per-account
+ * GetClientInfo loop on every 2-hour cache refresh. That loop is exactly
+ * the kind of per-account live SA call this cache exists to replace — one
+ * paginated Supabase query here covers the full ~10,300-account population
+ * instead of just the newest/first 150.
+ *
+ * Same pagination pattern as findPhoneMatchesInCache (PostgREST defaults to
+ * capping unbounded selects, so this pages through in 1000-row chunks).
+ * Comfortably fits in memory at this table's current size; revisit with a
+ * targeted `.in('client_id', ids)` query instead if the population grows
+ * enough to make a full-table load impractical.
+ *
+ * Returns a Map<clientId, {clientName, homePhone, cellPhone, workPhone,
+ * otherPhone, preferredPhoneId, fetchedAt}>. A clientId absent from the
+ * returned Map simply hasn't been cached yet (new since the last backfill/
+ * incremental run) — callers should fall back to whatever phone data their
+ * own bulk source already has, not treat this as an error.
+ */
+export async function getAllCachedPhones() {
+  const map = new Map();
+  const pageSize = 1000;
+  let from = 0;
+  for (;;) {
+    const { data, error } = await supabase
+      .from(TABLE)
+      .select('client_id, client_name, home_phone, cell_phone, work_phone, other_phone, preferred_phone_id, fetched_at')
+      .range(from, from + pageSize - 1);
+    if (error) throw new Error(`sa-phone-cache: getAllCachedPhones Supabase error: ${error.message}`);
+    if (!data || data.length === 0) break;
+    for (const row of data) {
+      map.set(row.client_id, {
+        clientName: row.client_name || '',
+        homePhone: row.home_phone || '',
+        cellPhone: row.cell_phone || '',
+        workPhone: row.work_phone || '',
+        otherPhone: row.other_phone || '',
+        preferredPhoneId: row.preferred_phone_id || '',
+        fetchedAt: row.fetched_at,
+      });
+    }
+    if (data.length < pageSize) break;
+    from += pageSize;
+  }
+  logger.info('sa-phone-cache: bulk phone cache load complete', { cachedCount: map.size });
+  return map;
+}
