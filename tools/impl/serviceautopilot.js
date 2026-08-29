@@ -948,6 +948,33 @@ function normalizeEmailList(raw) {
 // lockout risk for what should be a quick pre-create check.
 const DUPLICATE_PHONE_CONFIRM_CAP = 15;
 
+// Bounds the *phone-only* fallback below (no email/address/name given at
+// all). Re-confirmed live 2026-08-29, more exhaustively than the note above:
+// dumped every raw key V2AccountList_Query returns across a live sample (full
+// key list, not just the fields mapSAAccount happens to extract) -- there is
+// no phone field under any name. Also checked the dispatch board's bulk list
+// endpoint (WebServices/ScheduledWorkWs.asmx/Query, ~144 real live jobs) on
+// the theory crews might need phone for route calls -- same result, full key
+// dump has no phone field there either (only a `HasEmail` boolean). This is a
+// genuine, structural gap across every bulk/list SA endpoint found so far,
+// not a mapping bug -- phone only ever comes back from a *per-client* detail
+// call (GetClientInfo / GetCustomerDataAsync, both confirmed live to return
+// real phone data on real accounts).
+//
+// A phone-only dedup check therefore has no way to search all ~10,300
+// accounts cheaply. But the realistic risk for an unattended lead pipeline
+// isn't an arbitrary old account -- it's a duplicate of something created
+// RECENTLY (the same lead resubmitting a form, a callback reaching an
+// already-created record). mapSAAccount's `createdDate` (from
+// ClientSince/LeadSince, present on every roster row even though phone isn't)
+// lets this fallback scan just the N most-recently-created accounts via a
+// bounded set of live GetClientInfo calls, instead of giving up outright.
+// Confirmed live: the 30/60/90-day-old account counts are 12/164/228 out of
+// 10,291 total, so a fixed count cap (rather than a date window, which could
+// spike unboundedly during a real onboarding burst) keeps this a predictable,
+// bounded cost regardless of how many accounts were recently created.
+const PHONE_ONLY_RECENT_SCAN_CAP = 50;
+
 /**
  * Checks SA for a likely-existing client/lead before a new one gets created,
  * using independent signals instead of trusting SA's own broken name search
@@ -955,10 +982,16 @@ const DUPLICATE_PHONE_CONFIRM_CAP = 15;
  * cached full account roster (getFreshAccountRoster/getAllSAAccounts) except
  * phone, which the roster doesn't carry at all -- phone gets a bounded set of
  * live GetClientInfo confirmations against whatever email/address/name
- * already surfaced as candidates (see DUPLICATE_PHONE_CONFIRM_CAP above). A
- * phone-only check (no email/address/name given) can't be done at all without
- * scanning every account individually -- returns a clear "unsupported" result
- * instead of silently doing nothing.
+ * already surfaced as candidates (see DUPLICATE_PHONE_CONFIRM_CAP above).
+ *
+ * A phone-only check (no email/address/name given) can't scan the full
+ * ~10,300-account population -- no bulk SA endpoint carries phone at all (see
+ * PHONE_ONLY_RECENT_SCAN_CAP's comment for what was actually tried live).
+ * Instead of returning "unsupported" and doing nothing, this bounds the scan
+ * to the PHONE_ONLY_RECENT_SCAN_CAP most-recently-created accounts (by
+ * ClientSince/LeadSince) -- covers the realistic case (a duplicate of
+ * something created recently) at a predictable cost, and says so plainly via
+ * the returned `note` when it can't guarantee full-population coverage.
  *
  * Confidence rules (mirrors the lesson already learned the hard way in the SA
  * Client Categorization HOA-dedup work -- see CLAUDE.md's "Address alone is
@@ -976,8 +1009,10 @@ const DUPLICATE_PHONE_CONFIRM_CAP = 15;
  *   - 'none': no candidates found at all.
  *
  * Returns { isDuplicate, confidence, matches: [{clientId, name, address,
- * email, isLead, matchedOn}] }. Never throws for "not found" -- only throws
- * if literally no identifying field was passed at all.
+ * email, isLead, matchedOn}], note? }. `note` is only present when the phone
+ * check couldn't cover the full account population (see above). Never throws
+ * for "not found" -- only throws if literally no identifying field was passed
+ * at all.
  */
 export async function findDuplicateClient({ email = '', phone = '', address = '', city = '', zip = '', firstName = '', lastName = '', companyName = '' } = {}) {
   const normEmails = normalizeEmailList(email);
@@ -1027,14 +1062,29 @@ export async function findDuplicateClient({ email = '', phone = '', address = ''
     }
   }
 
-  let phoneUnsupported = false;
+  let phoneCoverageNote = null;
   if (normPhone) {
     if (candidates.size === 0) {
-      // No email/address/name to narrow the search -- a phone-only check
-      // would require an individual GetClientInfo call per SA account
-      // (10,000+), which isn't practical. Report this explicitly rather than
-      // silently returning "not a duplicate".
-      phoneUnsupported = true;
+      // No email/address/name to narrow the search -- fall back to a bounded
+      // scan of the most-recently-created accounts (see
+      // PHONE_ONLY_RECENT_SCAN_CAP's comment for why this is the practical
+      // substitute for a full-population phone search, which no bulk SA
+      // endpoint supports).
+      const recentSorted = roster
+        .filter(a => a.createdDate)
+        .sort((a, b) => (a.createdDate < b.createdDate ? 1 : a.createdDate > b.createdDate ? -1 : 0))
+        .slice(0, PHONE_ONLY_RECENT_SCAN_CAP);
+      for (const a of recentSorted) {
+        try {
+          const candidatePhone = await getSAClientPhone(a.clientId);
+          if (normalizePhoneDigits(candidatePhone) === normPhone) {
+            addCandidate(a, 'phone');
+          }
+        } catch (e) {
+          logger.warn('SA findDuplicateClient: phone-only recent-scan lookup failed', { clientId: a.clientId, error: e.message });
+        }
+      }
+      phoneCoverageNote = `Phone-only check: no email/address/name given to narrow the search, so only the ${recentSorted.length} most-recently-created SA accounts (out of ~${roster.length} total) were checked against this phone number -- not the full population. Provide email, address, or a name for full-population coverage instead.`;
     } else {
       const toCheck = [...candidates.values()].slice(0, DUPLICATE_PHONE_CONFIRM_CAP);
       if (candidates.size > DUPLICATE_PHONE_CONFIRM_CAP) {
@@ -1075,7 +1125,7 @@ export async function findDuplicateClient({ email = '', phone = '', address = ''
     isDuplicate: matches.length > 0,
     confidence,
     matches,
-    ...(phoneUnsupported ? { note: 'phone-only duplicate check not supported -- SA\'s bulk account roster has no phone field, and scanning every account individually is impractical. Provide email, address, or a name so there\'s a candidate set to confirm phone against.' } : {}),
+    ...(phoneCoverageNote ? { note: phoneCoverageNote } : {}),
   };
 }
 
@@ -2694,6 +2744,14 @@ function mapSAAccount(a) {
     qboId:    a.QboID || a.QboId || '',
     isLead:   a.Type === 'Lead',
     type:     a.Type || '',
+    // ISO "YYYY-MM-DD" (string-sortable) or null. V2AccountList_Query's raw
+    // response carries ClientSince/LeadSince even though it carries no phone
+    // field at all -- used by findDuplicateClient's phone-only fallback to
+    // bound a live per-account phone scan to the most-recently-created
+    // accounts instead of the full ~10,300-account population. Confirmed live
+    // 2026-08-29: both fields are populated (often identically) on real
+    // accounts of either Type.
+    createdDate: parseSaMdy(a.ClientSince) || parseSaMdy(a.LeadSince) || null,
   };
 }
 
