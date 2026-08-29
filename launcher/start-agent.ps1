@@ -142,6 +142,13 @@ $secrets = @{
     "VOICE_CALL_PIN"           = Get-Secret "VOICE_CALL_PIN"
     "VOICE_ALLOWED_CALLER_IDS" = Get-Secret "VOICE_ALLOWED_CALLER_IDS"
     "GOOGLE_MAPS_API_KEY"  = Get-Secret "GOOGLE_MAPS_API_KEY"
+    # FleetSharp GPS/telematics (odometer sync + read tools + Transport Report) -
+    # credentials existed in Credential Manager but were never injected here,
+    # so the live scheduler process could never actually log in. See
+    # tools/impl/fleetsharp.js.
+    "FLEETSHARP_URL"       = Get-Secret "FLEETSHARP_URL"
+    "FLEETSHARP_EMAIL"     = Get-Secret "FLEETSHARP_EMAIL"
+    "FLEETSHARP_PASSWORD"  = Get-Secret "FLEETSHARP_PASSWORD"
     # Google Ads reporting (read-only) - reuses the google-ads-agent project's
     # already-authorized OAuth grant, migrated into Credential Manager rather
     # than requesting a new one. See tools/impl/google-ads.js.
