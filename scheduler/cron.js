@@ -1505,6 +1505,17 @@ const SCHEDULED_TASKS = [
     // estimate rows that already exist in `estimates` -- without a header refresh running
     // first, any estimate created after this task ships would never get its line items
     // pulled either, silently. Both steps upsert/insert idempotently and are safe to re-run.
+    //
+    // 14-current-sa-estimate-lines.js also re-checks every estimate with at least one
+    // non-terminal (not Won/Lost) line item on every run, not just brand-new estimates --
+    // otherwise a status change on an old estimate (e.g. a 45-day-old pending quote
+    // finally marked Won) would never be captured after its first pull. This means the
+    // line-item step's real runtime depends on how much of the pipeline is still open,
+    // not just how many estimates are new -- expect it to run considerably longer than a
+    // pure new-estimate diff, especially for the first several nights after this shipped
+    // (2026-08-29) while the initial backlog of open quotes gets checked down. Worth
+    // watching actual run duration against sa_client_classification_incremental's 4:30 AM
+    // start if this task is ever seen running unusually long.
     schedule: '0 2 * * *',
     name: 'sa_estimate_line_sync',
     recoverMissedExecutions: true,
@@ -1523,27 +1534,42 @@ const SCHEDULED_TASKS = [
         await new Promise(r => setTimeout(r, 5000));
       }
 
-      // TTL covers both chained children's 15-min timeouts plus overhead -- must exceed
-      // the worst-case combined runtime, or a recoverMissedExecutions catch-up could see
-      // this lock as stale mid-run and start a second overlapping instance.
-      if (!acquireRunLock('sa_estimate_line_sync', 35 * 60_000)) {
+      // TTL covers both chained children's timeouts plus overhead -- must exceed the
+      // worst-case combined runtime, or a recoverMissedExecutions catch-up could see this
+      // lock as stale mid-run and start a second overlapping instance. The line-items
+      // child's own timeout is deliberately generous (2h) given the re-check-until-resolved
+      // behavior documented above -- a hard 15-min cap would routinely kill it mid-run
+      // rather than let it actually catch status changes on older open estimates.
+      if (!acquireRunLock('sa_estimate_line_sync', 150 * 60_000)) {
         logger.warn('sa_estimate_line_sync: skipped — already running (lock held)');
         return Promise.resolve();
       }
-      const runChild = (script, cwd, env) => new Promise((resolve, reject) => {
+      const runChild = (script, cwd, env, timeoutMs = 900_000) => new Promise((resolve, reject) => {
         const child = spawn(process.execPath, [script], {
           cwd,
           env: { ...process.env, ...env },
           stdio: ['ignore', 'pipe', 'pipe'],
-          timeout: 900_000,
         });
         let out = '';
         let err = '';
+        let timedOut = false;
+        // Not spawn()'s own `timeout` option -- that only SIGTERMs the node process itself,
+        // never any Chromium subprocess it launched via playwright-core, so a timed-out
+        // 14-current-sa-estimate-lines.js could leave an orphaned SA browser session alive
+        // right as the lock releases -- the same class of concurrent-session incident this
+        // task's comments already warn about. taskkill /t kills the whole process tree,
+        // same pattern already used for the scheduler's own self-dedup at the top of this file.
+        const killTimer = setTimeout(() => {
+          timedOut = true;
+          try { execSync(`taskkill /f /t /pid ${child.pid}`, { encoding: 'utf8', timeout: 5000 }); } catch {}
+        }, timeoutMs);
         child.stdout.on('data', d => { out += d; });
         child.stderr.on('data', d => { err += d; });
         child.on('close', code => {
-          logger.info(`sa_estimate_line_sync: ${script} complete`, { code, output: out.slice(-2000) });
+          clearTimeout(killTimer);
+          logger.info(`sa_estimate_line_sync: ${script} complete`, { code, output: out.slice(-2000), timedOut });
           if (err) logger.warn(`sa_estimate_line_sync: ${script} stderr`, { stderr: err.slice(-1000) });
+          if (timedOut) return reject(new Error(`${script} timed out after ${timeoutMs}ms and was killed`));
           code === 0 ? resolve() : reject(new Error(`${script} exited ${code}`));
         });
         child.on('error', reject);
@@ -1554,7 +1580,7 @@ const SCHEDULED_TASKS = [
         SUPABASE_FLEETOPS_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
         IMPORT_ESTIMATOR_ID:   '09ecaf4e-4b96-472b-aba5-526f26ad0eeb', // michael@jrboehlke.com
       })
-        .then(() => runChild('extract\\14-current-sa-estimate-lines.js', 'C:\\Users\\Assistant\\sa-history', {}))
+        .then(() => runChild('extract\\14-current-sa-estimate-lines.js', 'C:\\Users\\Assistant\\sa-history', {}, 120 * 60_000))
         .finally(() => releaseRunLock('sa_estimate_line_sync'));
     },
   },
@@ -2645,6 +2671,19 @@ ${EA_REPLY_STYLE}`;
     name: 'sa_client_classification_incremental',
     run: async () => {
       try {
+        // sa_estimate_line_sync (2 AM) now re-checks every open estimate on every run, not
+        // just new ones (added 2026-08-29), which can push its worst-case runtime out to
+        // 4:30 AM -- exactly this task's start time. No prior coordination existed between
+        // this task and any of the 1-2 AM SA jobs since it was scheduled off that cluster
+        // specifically to avoid contention; that assumption no longer holds against
+        // sa_estimate_line_sync's new, much wider timeout. Same wait-then-poll-with-cap
+        // pattern as sa_waiting_list_sync waiting on sa_nightly_sync's lock, above.
+        const estimateLineSyncLock = join(tmpdir(), 'jrb-scheduler-sa_estimate_line_sync.lock');
+        await waitForLockToAppear(estimateLineSyncLock);
+        const waitStart = Date.now();
+        while (existsSync(estimateLineSyncLock) && Date.now() - waitStart < 150 * 60_000) {
+          await new Promise(r => setTimeout(r, 5000));
+        }
         const { runIncrementalClassification } = await import('../tools/impl/sa-client-classification.js');
         const result = await runIncrementalClassification();
         if (result.classified > 0) {
