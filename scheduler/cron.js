@@ -1492,6 +1492,73 @@ const SCHEDULED_TASKS = [
     },
   },
   {
+    // 2 AM nightly — current-SA estimate sync: refresh headers, then pull per-service
+    // line items for any estimate not yet covered. Staggered after sa_nightly_sync (1 AM)
+    // and sa_waiting_list_sync (1:30 AM) — see those tasks' comments on why concurrent SA
+    // browser sessions from this codebase have caused real incidents before.
+    //
+    // Estimate headers (jrb-jobs `estimates` table) had NO scheduled refresh at all before
+    // this task — import-current-to-jrb.js/import-current-sa.ps1 existed but were manual-only
+    // (confirmed 2026-08-29: no Task Scheduler entry, no cron.js entry, no Vercel cron in
+    // jrb-jobs). The header refresh is chained in front of the line-item pull for a concrete
+    // reason, not just tidiness: 14-current-sa-estimate-lines.js only pulls line items for
+    // estimate rows that already exist in `estimates` -- without a header refresh running
+    // first, any estimate created after this task ships would never get its line items
+    // pulled either, silently. Both steps upsert/insert idempotently and are safe to re-run.
+    schedule: '0 2 * * *',
+    name: 'sa_estimate_line_sync',
+    recoverMissedExecutions: true,
+    run: async () => {
+      // Same wait-then-poll-with-cap pattern as sa_waiting_list_sync waiting on
+      // sa_nightly_sync's lock, above -- recoverMissedExecutions on all three tasks
+      // means a restart could otherwise replay them concurrently instead of staggered,
+      // and concurrent SA browser sessions have already caused a real production
+      // incident in this codebase. sa_waiting_list_sync itself holds no lock of its
+      // own to wait on (confirmed in this file), so sa_nightly_sync's lock is the
+      // only one available to guard against here.
+      const nightlySyncLock = join(tmpdir(), 'jrb-scheduler-sa_nightly_sync.lock');
+      await waitForLockToAppear(nightlySyncLock);
+      const waitStart = Date.now();
+      while (existsSync(nightlySyncLock) && Date.now() - waitStart < 12 * 60_000) {
+        await new Promise(r => setTimeout(r, 5000));
+      }
+
+      // TTL covers both chained children's 15-min timeouts plus overhead -- must exceed
+      // the worst-case combined runtime, or a recoverMissedExecutions catch-up could see
+      // this lock as stale mid-run and start a second overlapping instance.
+      if (!acquireRunLock('sa_estimate_line_sync', 35 * 60_000)) {
+        logger.warn('sa_estimate_line_sync: skipped — already running (lock held)');
+        return Promise.resolve();
+      }
+      const runChild = (script, cwd, env) => new Promise((resolve, reject) => {
+        const child = spawn(process.execPath, [script], {
+          cwd,
+          env: { ...process.env, ...env },
+          stdio: ['ignore', 'pipe', 'pipe'],
+          timeout: 900_000,
+        });
+        let out = '';
+        let err = '';
+        child.stdout.on('data', d => { out += d; });
+        child.stderr.on('data', d => { err += d; });
+        child.on('close', code => {
+          logger.info(`sa_estimate_line_sync: ${script} complete`, { code, output: out.slice(-2000) });
+          if (err) logger.warn(`sa_estimate_line_sync: ${script} stderr`, { stderr: err.slice(-1000) });
+          code === 0 ? resolve() : reject(new Error(`${script} exited ${code}`));
+        });
+        child.on('error', reject);
+      });
+
+      return runChild('import-current-to-jrb.js', 'C:\\Users\\Assistant\\sa-history', {
+        SUPABASE_FLEETOPS_URL: process.env.FLEETOPS_SUPABASE_URL,
+        SUPABASE_FLEETOPS_KEY: process.env.FLEETOPS_SUPABASE_SERVICE_KEY,
+        IMPORT_ESTIMATOR_ID:   '09ecaf4e-4b96-472b-aba5-526f26ad0eeb', // michael@jrboehlke.com
+      })
+        .then(() => runChild('extract\\14-current-sa-estimate-lines.js', 'C:\\Users\\Assistant\\sa-history', {}))
+        .finally(() => releaseRunLock('sa_estimate_line_sync'));
+    },
+  },
+  {
     // Every 30 minutes — check SA connectivity, alert Michael on first failure and on recovery
     schedule: '*/30 * * * *',
     name: 'sa_connectivity_check',
