@@ -2694,6 +2694,31 @@ ${EA_REPLY_STYLE}`;
       }
     },
   },
+  {
+    // Daily 5:00 AM - going-forward companion to the one-time historical SA
+    // phone cache backfill (2026-08-29, tools/impl/sa-phone-cache.js). Catches
+    // clients created since the backfill (never cached) and refreshes anything
+    // past PHONE_CACHE_TTL_DAYS, capped at 300/run as a safety ceiling -- same
+    // shape as sa_client_classification_incremental just above, scheduled 30
+    // min after it (both touch the shared SA browser session; staggering
+    // avoids the two contending for it back-to-back).
+    schedule: '0 5 * * *',
+    name: 'sa_phone_cache_incremental',
+    run: async () => {
+      try {
+        const { runPhoneCacheIncremental } = await import('../tools/impl/sa-phone-cache.js');
+        const result = await runPhoneCacheIncremental();
+        if (result.upserted > 0 || result.failed.length > 0) {
+          logger.info('sa_phone_cache_incremental: complete', result);
+        }
+        if (result.incapsulaBackoffHit) {
+          logger.warn('sa_phone_cache_incremental: stopped early on Incapsula backoff, will resume next run', result);
+        }
+      } catch (err) {
+        logger.warn('sa_phone_cache_incremental: run failed', { err: err.message });
+      }
+    },
+  },
 ];
 
 // â”€â”€ Dev task detection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

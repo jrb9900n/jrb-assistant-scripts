@@ -2423,16 +2423,21 @@ export async function getSAClientPhone(clientId) {
  * Fetch phone AND address for a single SA account via GetClientInfo in one call.
  * Same endpoint as getSAClientPhone; returns the full contact detail needed for CardDAV vCards.
  * Returns { phone, address, city, state, zip } — empty strings where SA has no data.
+ *
+ * preferredPhoneId added 2026-08-29 for the SA phone cache backfill
+ * (tools/impl/sa-phone-cache.js) — additive only, existing callers (carddav.js)
+ * destructure only the fields they need and are unaffected.
  */
 export async function getSAClientDetails(clientId) {
   const res = await post('/WebServices/ClientEditOverlayWs.asmx/GetClientInfo', { ClientID: clientId }, 'ClientView.aspx');
   const d = res.data?.d;
-  if (!d) return { homePhone: '', cellPhone: '', workPhone: '', otherPhone: '', address: '', city: '', state: '', zip: '' };
+  if (!d) return { homePhone: '', cellPhone: '', workPhone: '', otherPhone: '', preferredPhoneId: '', address: '', city: '', state: '', zip: '' };
   return {
     homePhone:  d.HomePhone  || '',
     cellPhone:  d.CellPhone  || '',
     workPhone:  d.WorkPhone  || '',
     otherPhone: d.OtherPhone || '',
+    preferredPhoneId: d.PreferredPhoneID || '',
     address:    d.Address    || '',
     city:       d.City       || '',
     state:      d.State || d.StateAbbr || '',
