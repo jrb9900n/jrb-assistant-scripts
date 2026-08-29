@@ -58,6 +58,36 @@ const TICKET_CATEGORIES = {
   ACCOUNT_ISSUE:    '9fc6647e-0f19-4b30-8c5f-00bdf75b5938',
 };
 
+// SA "Source" dropdown on the client edit form (ClientEditOverlay.js's
+// self.CustomerSourceID / self.ListCustomerSource, saved as the client record's
+// CustomerSourceID field). Reverse-engineered 2026-08-29 the same way as
+// STATE_IDS/TICKET_CATEGORIES: the un-minified companion bundle
+// /scripts/ClientEditOverlay.js shows the dropdown is populated by
+// self.GetCustomerSourceList(), which calls /WebServices/ListsWs.asmx/GetSourcesList
+// (body shape `{Data:{SearchString:'', BlankEntry:true}}`, matching every other
+// autocomplete-style list call in that file). Confirmed live by calling that
+// endpoint directly against the production account — this is the company's
+// actual, currently-configured value set, not a guess.
+//
+// IMPORTANT: there is no "Website" option in Michael's account as of this date.
+// The closest existing values are SEARCH_ENGINE or OTHER. Before wiring up the
+// website-contact-form lead pipeline this map is meant to support, either (a)
+// have Michael add a real "Website" source via SA Settings -> CRM -> Customer
+// Sources and add its GUID here, or (b) deliberately pick one of the existing
+// values (SEARCH_ENGINE reads closest, OTHER is the safe fallback) and document
+// that choice — do not fabricate a GUID that doesn't exist in the account.
+const CUSTOMER_SOURCE_IDS = {
+  ALTA_VISTA:        'db22ade8-9efe-40cc-b440-6b12208fbc31',
+  CUSTOMER_REFERRAL: '9f7dc089-0bc9-4fb7-8238-d7b72455bdd8',
+  DOOR_HANGER:       '82441163-2dc6-41be-87d0-7be23810c43b',
+  GOOGLE_ADWORDS:    '0955814a-a54b-4fd7-bbac-0fcf89b68377',
+  OTHER:             '6dd7428e-47ae-4a45-b7f4-a553d496b502',
+  POSTCARD:          '36977442-71e9-46ec-ae7c-602ac5f7773a',
+  SEARCH_ENGINE:     'b22a73eb-ebe6-496a-84e1-037185962d67',
+  WOLF_PAVING:       'ec504a10-0ac3-4793-a491-a8ffd6de12a8',
+  YELLOW_PAGES:      'df8a48ae-b670-4fa3-ba35-47bbe7fe83ef',
+};
+
 // JRB SA billing defaults — discovered 2026-05-22 via GetSalesTaxCodeListWithParams
 const JRB_TAX_CODE_ID = 'c432e644-6f8f-4a78-b52f-ef93f05abf4e'; // "Tax" code
 
@@ -833,6 +863,222 @@ export async function searchClientsFull({ name, limit = 10 }) {
     .slice(0, limit);
 }
 
+// ── Duplicate-client safety net ──────────────────────────────────────────────
+//
+// Michael's explicit standing rule (the reason this whole section exists):
+// "For anything that touches SA, you will need to check to make sure there is
+// not a duplicate client or lead entry -- checking things like address, email,
+// phone number, etc and ensuring that a client is not accidentally
+// duplicated." A website-lead pipeline runs unattended, so it cannot rely on
+// SA's own name search (searchClients/searchClientsFull) alone -- that filter
+// is a confirmed server-side no-op (see searchClientsFull's own comment above)
+// and only ever matches on name, never email/phone/address.
+//
+// Known limitation, not fixed here: findDuplicateClient()/createClientSafe()
+// are check-then-act, not atomic -- there's no server-side unique constraint
+// or distributed lock to enforce this against. Two calls landing close enough
+// together (both reading the roster before either's createClient() call
+// invalidates the cache) could each pass the check and both create a record
+// for the same lead. Acceptable for now given the expected call pattern (one
+// lead at a time from a single pipeline, not a burst of concurrent creates),
+// but worth revisiting with a real lock/queue if that assumption changes.
+
+/**
+ * Digit-only phone normalization. Strips +1 country code and any non-digit
+ * characters, storing as a 10-digit string. Shared by createClient (so a
+ * client's own stored phone is normalized the same way) and
+ * findDuplicateClient (so an incoming phone is compared apples-to-apples
+ * against phone data fetched from SA).
+ */
+function normalizePhoneDigits(phone) {
+  const digits = (phone || '').replace(/\D/g, '');
+  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+}
+
+/**
+ * Case/whitespace/punctuation-insensitive address comparison key, plus
+ * collapsing the handful of common street-suffix and directional
+ * abbreviations SA data uses inconsistently (e.g. "123 Main St" vs "123 Main
+ * Street", "N Main St" vs "North Main St") so those aren't treated as
+ * different addresses. Deliberately simple -- not a full USPS
+ * address-standardization pass, per the "don't over-engineer" scope for this.
+ */
+const ADDRESS_TOKEN_MAP = {
+  street: 'st', avenue: 'ave', road: 'rd', drive: 'dr', lane: 'ln',
+  court: 'ct', boulevard: 'blvd', circle: 'cir', place: 'pl', terrace: 'ter',
+  parkway: 'pkwy', highway: 'hwy', trail: 'trl', square: 'sq',
+  north: 'n', south: 's', east: 'e', west: 'w',
+};
+function normalizeAddress(address) {
+  if (!address) return '';
+  return address
+    .toLowerCase()
+    .replace(/[.,#]/g, '')
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(tok => ADDRESS_TOKEN_MAP[tok] || tok)
+    .join(' ')
+    .trim();
+}
+
+/** Case/whitespace/punctuation-insensitive name comparison key. */
+function normalizeName(name) {
+  if (!name) return '';
+  return name.toLowerCase().replace(/[.,]/g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * SA's Email field sometimes holds more than one address joined by ";"/","
+ * (see getClientEmail's own comment on malformed Email values) -- split
+ * defensively so a duplicate check doesn't miss a match sitting behind a
+ * second address on the SA side.
+ */
+function normalizeEmailList(raw) {
+  return (raw || '').split(/[;,]/).map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
+// Bounds how many roster candidates get a live per-account phone lookup (SA's
+// bulk account-list response has no phone field at all -- confirmed live
+// 2026-08-29 against 2,004 real accounts, 0 had a non-empty phone from
+// getAllSAAccounts, matching what getSAClientPhone's own comment already
+// said). Phone confirmation therefore only ever runs against whatever
+// candidate set the cheap roster-level signals (email/address/name) already
+// narrowed down to, never as an independent full-roster scan -- that would be
+// 10,000+ sequential GetClientInfo calls, far too slow and a real Incapsula-
+// lockout risk for what should be a quick pre-create check.
+const DUPLICATE_PHONE_CONFIRM_CAP = 15;
+
+/**
+ * Checks SA for a likely-existing client/lead before a new one gets created,
+ * using independent signals instead of trusting SA's own broken name search
+ * (see searchClientsFull's comment). Every signal is checked against the
+ * cached full account roster (getFreshAccountRoster/getAllSAAccounts) except
+ * phone, which the roster doesn't carry at all -- phone gets a bounded set of
+ * live GetClientInfo confirmations against whatever email/address/name
+ * already surfaced as candidates (see DUPLICATE_PHONE_CONFIRM_CAP above). A
+ * phone-only check (no email/address/name given) can't be done at all without
+ * scanning every account individually -- returns a clear "unsupported" result
+ * instead of silently doing nothing.
+ *
+ * Confidence rules (mirrors the lesson already learned the hard way in the SA
+ * Client Categorization HOA-dedup work -- see CLAUDE.md's "Address alone is
+ * deliberately not enough" note, where condo unit owners legitimately share
+ * one building's street address with the HOA's own record):
+ *   - 'high': an exact email match, OR a confirmed phone match, OR 2+
+ *     independent signals agreeing on the same candidate (e.g. name+address).
+ *     Strong identity signals or corroborated weak ones -- highest confidence.
+ *   - 'medium': exactly one weaker signal alone (address-only, or name-only).
+ *     Real false-positive patterns exist for both (shared-building addresses;
+ *     common person/business names) but Michael was explicit that missing a
+ *     real duplicate is not acceptable for an unattended pipeline, so this is
+ *     still reported as isDuplicate:true -- a false-positive block just costs
+ *     one human glance, a missed duplicate corrupts the CRM.
+ *   - 'none': no candidates found at all.
+ *
+ * Returns { isDuplicate, confidence, matches: [{clientId, name, address,
+ * email, isLead, matchedOn}] }. Never throws for "not found" -- only throws
+ * if literally no identifying field was passed at all.
+ */
+export async function findDuplicateClient({ email = '', phone = '', address = '', city = '', zip = '', firstName = '', lastName = '', companyName = '' } = {}) {
+  const normEmails = normalizeEmailList(email);
+  const normPhone  = normalizePhoneDigits(phone);
+  const normAddr   = normalizeAddress(address);
+  const normZip    = (zip || '').trim();
+  const nameForMatch = companyName || `${firstName} ${lastName}`.trim();
+  const normName   = normalizeName(nameForMatch);
+
+  if (!normEmails.length && !normPhone && !normAddr && !normName) {
+    throw new Error('SA findDuplicateClient: provide at least one of email, phone, address, or firstName/lastName/companyName to check against');
+  }
+
+  const roster = await getFreshAccountRoster();
+
+  const candidates = new Map(); // clientId -> { ...fields, matchedOn: Set }
+  function addCandidate(a, signal) {
+    if (!candidates.has(a.clientId)) {
+      candidates.set(a.clientId, {
+        clientId: a.clientId,
+        name: a.name,
+        address: [a.address, a.city, a.state, a.zip].filter(Boolean).join(', '),
+        email: a.email,
+        isLead: a.isLead,
+        matchedOn: new Set(),
+      });
+    }
+    candidates.get(a.clientId).matchedOn.add(signal);
+  }
+
+  if (normEmails.length) {
+    for (const a of roster) {
+      const rosterEmails = normalizeEmailList(a.email);
+      if (rosterEmails.some(e => normEmails.includes(e))) addCandidate(a, 'email');
+    }
+  }
+  if (normAddr) {
+    for (const a of roster) {
+      if (normalizeAddress(a.address) === normAddr && (!normZip || (a.zip || '').trim() === normZip)) {
+        addCandidate(a, 'address');
+      }
+    }
+  }
+  if (normName) {
+    for (const a of roster) {
+      if (normalizeName(a.name) === normName) addCandidate(a, 'name');
+    }
+  }
+
+  let phoneUnsupported = false;
+  if (normPhone) {
+    if (candidates.size === 0) {
+      // No email/address/name to narrow the search -- a phone-only check
+      // would require an individual GetClientInfo call per SA account
+      // (10,000+), which isn't practical. Report this explicitly rather than
+      // silently returning "not a duplicate".
+      phoneUnsupported = true;
+    } else {
+      const toCheck = [...candidates.values()].slice(0, DUPLICATE_PHONE_CONFIRM_CAP);
+      if (candidates.size > DUPLICATE_PHONE_CONFIRM_CAP) {
+        logger.warn('SA findDuplicateClient: candidate set larger than the phone-confirmation cap, checking only the first N', {
+          total: candidates.size, checked: DUPLICATE_PHONE_CONFIRM_CAP,
+        });
+      }
+      for (const c of toCheck) {
+        try {
+          const candidatePhone = await getSAClientPhone(c.clientId);
+          if (normalizePhoneDigits(candidatePhone) === normPhone) {
+            candidates.get(c.clientId).matchedOn.add('phone');
+          }
+        } catch (e) {
+          logger.warn('SA findDuplicateClient: phone confirmation lookup failed', { clientId: c.clientId, error: e.message });
+        }
+      }
+    }
+  }
+
+  const matches = [...candidates.values()].map(c => ({
+    clientId: c.clientId,
+    name: c.name,
+    address: c.address,
+    email: c.email,
+    isLead: c.isLead,
+    matchedOn: [...c.matchedOn],
+  }));
+
+  let confidence = 'none';
+  for (const m of matches) {
+    const hasStrongSignal = m.matchedOn.includes('email') || m.matchedOn.includes('phone');
+    if (hasStrongSignal || m.matchedOn.length >= 2) { confidence = 'high'; break; }
+    if (m.matchedOn.length === 1) confidence = 'medium';
+  }
+
+  return {
+    isDuplicate: matches.length > 0,
+    confidence,
+    matches,
+    ...(phoneUnsupported ? { note: 'phone-only duplicate check not supported -- SA\'s bulk account roster has no phone field, and scanning every account individually is impractical. Provide email, address, or a name so there\'s a candidate set to confirm phone against.' } : {}),
+  };
+}
+
 /**
  * Create a new client in SA.
  * companyName: use for business clients (overrides ClientName to company name).
@@ -840,9 +1086,7 @@ export async function searchClientsFull({ name, limit = 10 }) {
  * Returns { clientId, name }
  */
 export async function createClient({ firstName, lastName, companyName = '', address = '', city = '', state = '', zip = '', email = '', phone = '' }) {
-  // Strip +1 country code and any non-digit characters, then store as 10-digit string.
-  const digits = (phone || '').replace(/\D/g, '');
-  const normalizedPhone = digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+  const normalizedPhone = normalizePhoneDigits(phone);
 
   const clientName = companyName ? companyName : `${firstName} ${lastName}`;
   const stateAbbr = (state || 'WI').toUpperCase();
@@ -890,6 +1134,89 @@ export async function createClient({ firstName, lastName, companyName = '', addr
   // pre-creation roster, find nothing, and let a caller create a real duplicate.
   _accountRosterCache = null;
   return { clientId: id, name };
+}
+
+/**
+ * Safe, source-attributed client/lead creation -- the version an unattended
+ * pipeline (e.g. website contact-form leads) should actually call, never
+ * createClient() directly. Runs findDuplicateClient() first and refuses to
+ * create anything if a likely match turns up; only on a clean check does it
+ * call createClient(), then records the lead source two ways:
+ *   - the native CustomerSourceID field, via the same GetClientInfo ->
+ *     override -> SaveClient round trip setClientBillingDefaults/
+ *     saveClientFields already use elsewhere in this file (AddClientLead has
+ *     no field for this, confirmed from its own payload shape above)
+ *   - a "Lead Source: <label>" client tag, via the existing tag primitives --
+ *     the native Source field is real but not very discoverable in SA's UI,
+ *     so the tag makes it visible on the client's own Tags panel too
+ *
+ * `leadSource` is a key into CUSTOMER_SOURCE_IDS (e.g. 'SEARCH_ENGINE',
+ * 'OTHER') -- see that constant's own comment for why there's currently no
+ * 'WEBSITE' entry. Case-insensitive and space/underscore-insensitive ('search
+ * engine' matches SEARCH_ENGINE); an unrecognized key skips the native
+ * field (logged) but still applies the tag with whatever label was passed, so
+ * a real value isn't silently lost while CUSTOMER_SOURCE_IDS catches up.
+ *
+ * Returns one of:
+ *   { created: true, clientId, name, leadSourceApplied }
+ *   { created: false, duplicate: <findDuplicateClient's return> }
+ * -- never creates a duplicate silently. Callers (and any human reviewing a
+ * `created: false` result) should look at `duplicate.confidence` and
+ * `duplicate.matches[].matchedOn` to judge whether it's a real duplicate or a
+ * false positive worth overriding by calling createClient() directly.
+ */
+export async function createClientSafe({ firstName, lastName, companyName = '', address = '', city = '', state = '', zip = '', email = '', phone = '', leadSource = '' } = {}) {
+  const dup = await findDuplicateClient({ email, phone, address, city, zip, firstName, lastName, companyName });
+  if (dup.isDuplicate) {
+    logger.warn('SA createClientSafe: refusing to create — likely duplicate found', {
+      confidence: dup.confidence, matchCount: dup.matches.length,
+    });
+    return { created: false, duplicate: dup };
+  }
+
+  const { clientId, name } = await createClient({ firstName, lastName, companyName, address, city, state, zip, email, phone });
+
+  let leadSourceApplied = null;
+  if (leadSource) {
+    const sourceId = CUSTOMER_SOURCE_IDS[String(leadSource).toUpperCase().trim().replace(/\s+/g, '_')];
+    if (sourceId) {
+      try {
+        // Not using saveClientFields's `expect` param here: it does a flat
+        // verify[field] comparison, but GetClientInfo never returns a flat
+        // CustomerSourceID -- only CustomerSourceInfo.Value (same
+        // Field vs. FieldInfo.Value split as StateID/StateInfo.Value
+        // elsewhere in this file). Confirmed live 2026-08-29: passing
+        // expect:{CustomerSourceID: sourceId} always "failed" (verify.
+        // CustomerSourceID read back undefined) even on a save that had
+        // actually succeeded, because it was comparing against a key that
+        // doesn't exist in GetClientInfo's response shape. Check the real
+        // nested field instead, and only warn (don't throw) on a mismatch --
+        // losing lead-source attribution isn't worth failing the whole
+        // client creation over.
+        const verify = await saveClientFields({ clientId, overrides: { CustomerSourceID: sourceId } });
+        if (verify?.CustomerSourceInfo?.Value !== sourceId) {
+          logger.warn('SA createClientSafe: CustomerSourceID did not verify after save', {
+            clientId, sourceId, verifiedValue: verify?.CustomerSourceInfo?.Value,
+          });
+        }
+      } catch (e) {
+        logger.warn('SA createClientSafe: failed to set native CustomerSourceID', { clientId, leadSource, error: e.message });
+      }
+    } else {
+      logger.warn('SA createClientSafe: leadSource not found in CUSTOMER_SOURCE_IDS — native Source field left unset', {
+        leadSource, known: Object.keys(CUSTOMER_SOURCE_IDS),
+      });
+    }
+    try {
+      const category = await findOrCreateTagCategory({ name: 'Lead Source' });
+      await addTagToClientByName({ clientId, tagName: `Lead Source: ${leadSource}`, categoryId: category.categoryId });
+      leadSourceApplied = leadSource;
+    } catch (e) {
+      logger.warn('SA createClientSafe: failed to apply Lead Source tag', { clientId, leadSource, error: e.message });
+    }
+  }
+
+  return { created: true, clientId, name, leadSourceApplied };
 }
 
 /**
@@ -1106,8 +1433,25 @@ export async function saveClientFields({ clientId, overrides = {}, expect = {} }
     AccountNumber: d.AccountNumber || '', SubscriptionType: d.SubscriptionType || 0,
     BillingDate: parseSaDate(d.BillingDate), AutoCharge: d.AutoCharge || false,
     BillingNotes: d.BillingNotes || '', PaymentMethodID: d.PaymentMethodInfo?.Value || EMPTY_GUID,
-    SalesTaxRefID: d.SalesTaxInfo?.Value || EMPTY_GUID,
-    SalesTaxCodeID: d.SalesTaxCodeInfo?.Value || EMPTY_GUID,
+    // SA rejects ANY SaveClient call with empty tax fields ("Please select a
+    // sales tax reference"/"Please select a tax code") -- confirmed live
+    // 2026-08-29 calling this on a client created moments earlier, whose own
+    // GetClientInfo still read back the LITERAL EMPTY_GUID STRING for both
+    // (SA hadn't applied its own account-level tax defaults to the record
+    // yet). Note this is a real, non-empty string ("000...0000"), not
+    // undefined/null/'' -- a plain `|| fallback` does NOT catch it (confirmed
+    // live: an earlier version of this fix used exactly that and still 400'd
+    // with the same two errors, because `'00000000-...' || x` short-circuits
+    // to the left side). Must explicitly compare against EMPTY_GUID. Falls
+    // back to the same JRB defaults setClientBillingDefaults uses; never
+    // overrides a real existing value, only fills the gap when SA's own
+    // read-back is the empty-GUID placeholder.
+    SalesTaxRefID: (d.SalesTaxInfo?.Value && d.SalesTaxInfo.Value !== EMPTY_GUID)
+      ? d.SalesTaxInfo.Value
+      : (JRB_TAX_REF_BY_CITY[(d.City || '').toLowerCase().trim()] || JRB_TAX_REF_DEFAULT),
+    SalesTaxCodeID: (d.SalesTaxCodeInfo?.Value && d.SalesTaxCodeInfo.Value !== EMPTY_GUID)
+      ? d.SalesTaxCodeInfo.Value
+      : JRB_TAX_CODE_ID,
     InvoiceFrequencyID: d.InvoiceFrequencyInfo?.Value || EMPTY_GUID,
     StandardTermID: d.StandardTermInfo?.Value || EMPTY_GUID,
     SendInvoiceBy: d.SendInvoiceBy || 'Email',
