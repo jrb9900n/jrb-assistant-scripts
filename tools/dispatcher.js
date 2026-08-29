@@ -35,6 +35,8 @@ import { createClient } from '@supabase/supabase-js';
 import * as marketingSegments  from './impl/marketing-segments.js';
 import * as marketingCampaigns from './impl/marketing-campaigns.js';
 import * as marketingAdsFlags  from './impl/marketing-ads-flags.js';
+import * as websiteChanges  from './impl/website-changes.js';
+import * as websiteContent  from './impl/website-content.js';
 import * as teamsRead   from './impl/teams-read.js';
 import { readFileSync } from 'node:fs';
 
@@ -226,6 +228,14 @@ const HANDLERS = {
       return `Business context document is unavailable (${err.code === 'ENOENT' ? 'file not found' : err.message} at ${MARKETING_CONTEXT_PATH}). Do not guess at services/positioning/geography — flag this to Michael and ask him to confirm before proposing anything that depends on it.`;
     }
   },
+
+  // seo-advisor / website change approval queue (built 2026-08-29) — see
+  // tools/impl/website-changes.js. update_website_change_proposal_status is
+  // deliberately NOT wired up here — see that function's own comment.
+  propose_website_change:        (i) => websiteChanges.proposeWebsiteChange(i),
+  list_website_change_proposals: (i) => websiteChanges.listWebsiteChangeProposals(i),
+  get_website_change_proposal:   (i) => websiteChanges.getWebsiteChangeProposal(i),
+  get_website_page_content:      (i) => websiteContent.getWebsitePageContent(i),
 
   // Read-only, safe for anyone -- only ever surfaces free/busy windows, never
   // subjects/tiers/reasons.

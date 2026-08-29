@@ -59,6 +59,26 @@ const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 // taskType since it shipped the same day as that investigation.
 const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix', 'general', 'calendar', 'dev_ambiguous', 'marketing', 'employee']);
 
+// Maps the shorthand model aliases stored in agent_library.model ('sonnet' |
+// 'haiku' | null, see agents/library.js's AgentDefinition typedef) to the
+// real Anthropic model ID strings routeModel/anthropic.messages.create()
+// actually need. Exported specifically for agents/library.js's
+// runSavedAgent(), which used to pass the alias straight through as
+// runAgent()'s `model` (forceModel) param -- routeModel returns forceModel
+// verbatim when it's truthy (see below), so a saved agent with model:
+// 'sonnet' sent the literal string "sonnet" to the Anthropic API as the
+// `model` field and 404'd on every call. Any value already spelled as a real
+// model ID (or anything else routeModel/the caller wants to force verbatim)
+// passes through unchanged; null/undefined passes through as undefined so
+// routeModel falls back to its normal taskType/keyword-based routing instead
+// of forcing anything.
+export function resolveModelAlias(alias) {
+  if (!alias) return undefined;
+  if (alias === 'sonnet') return SONNET;
+  if (alias === 'haiku') return HAIKU;
+  return alias;
+}
+
 function routeModel(taskPrompt, forceModel, taskType) {
     if (forceModel) return forceModel;
     if (SONNET_TASK_TYPES.has(taskType)) return SONNET;

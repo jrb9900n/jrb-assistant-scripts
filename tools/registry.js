@@ -1127,6 +1127,74 @@ const MARKETING_TOOLS = [
   },
 ];
 
+// Website change approval-queue tools (built 2026-08-29 for the seo-advisor
+// persona — see tools/impl/website-changes.js's header for the full design
+// rationale). Deliberately no tool here ever writes to the live site — every
+// proposed change lands in website_change_proposals for Michael to review
+// with a before/after view during his Monday marketing review, mirroring
+// how MARKETING_TOOLS above can propose a campaign but never send/execute
+// one directly. update_website_change_proposal_status intentionally has NO
+// tool entry here at all (see that function's own comment in
+// tools/impl/website-changes.js) — moving a proposal to approved/applied is
+// Michael's call, not something exposed for the propose-only persona to
+// invoke on itself.
+const WEBSITE_TOOLS = [
+  {
+    name: 'propose_website_change',
+    description: 'Propose a change to a jrboehlke.com page — a new SEO title, meta description, structured-data value, header, or content edit. Writes a row to the website_change_proposals approval queue for Michael\'s Monday marketing review; does NOT touch the live site. Always include a specific rationale and an expected-impact note, and the exact old and new values (leave old_value blank only if genuinely unknown, and say so).',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pageUrl:  { type: 'string', description: 'The exact page URL this change applies to, e.g. "https://jrboehlke.com/services/sealcoating"' },
+        fieldName: { type: 'string', description: 'What is being changed, e.g. "seo_title", "meta_description", "h1", "structured_data:aggregateRating", "body_content:intro_paragraph", "alt_text"' },
+        oldValue: { type: 'string', description: 'The current live value, if known — leave unset and say so in notes if you could not verify it' },
+        newValue: { type: 'string', description: 'The exact proposed replacement value' },
+        rationale: { type: 'string', description: 'Why this specific change — reference the actual page/business context, not generic SEO advice' },
+        expectedImpact: { type: 'string', description: 'What you expect this to improve (search relevance, click-through rate, structured-data eligibility, content freshness) and how confident you are' },
+        screenshotBefore: { type: 'string', description: 'Supabase Storage path/URL for a before screenshot, if one was captured — otherwise omit' },
+        screenshotAfter:  { type: 'string', description: 'Supabase Storage path/URL for an after/mockup screenshot, if one was captured — otherwise omit' },
+        requestedBy: { type: 'string', description: 'Which persona/agent is proposing this — defaults to "seo-advisor"' },
+        notes: { type: 'string', description: 'Any additional context, caveats, or ambiguity worth flagging to Michael' },
+      },
+      required: ['pageUrl', 'fieldName', 'newValue', 'rationale'],
+    },
+  },
+  {
+    name: 'list_website_change_proposals',
+    description: 'List website change proposals from the approval queue, optionally filtered by status or page URL. Call this before proposing a new change for a page, so you don\'t re-propose something already pending, approved, or recently rejected.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', description: 'Filter by status: proposed, approved, rejected, or applied' },
+        pageUrl: { type: 'string', description: 'Filter by a substring match on the page URL' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'get_website_change_proposal',
+    description: 'Fetch one website change proposal\'s full record by id, including its current status and any review notes.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Proposal id from propose_website_change or list_website_change_proposals' },
+      },
+      required: ['id'],
+    },
+  },
+  {
+    name: 'get_website_page_content',
+    description: 'Read a jrboehlke.com page\'s current live content (title, meta description, structured data, body text) so you can check the actual current state before drafting a proposed change. NOT YET IMPLEMENTED — this tool currently always throws a clear "not implemented" error rather than fabricating page content. If it fails, draft your proposal from whatever information is already available and say plainly that you could not independently verify the live page.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        pageUrl: { type: 'string', description: 'The exact page URL to read' },
+      },
+      required: ['pageUrl'],
+    },
+  },
+];
+
 const SCHEDULING_TOOLS = [
   {
     name: 'get_crews',
@@ -1522,8 +1590,13 @@ const TOOL_MAP = {
   // can WRITE into that agent's own flags table, but only ever with a
   // structurally non-native source that agent's own approval pipeline
   // refuses to execute — see tools/impl/marketing-ads-flags.js's header.
-  // It cannot create/modify a campaign or spend directly.
-  marketing:  [...SA_TOOLS.filter(t => t.name.includes('tag')), ...EMAIL_TOOLS.filter(t => t.name !== 'send_email' && t.name !== 'send_draft_reply'), ...TEAMS_TOOLS, ...MARKETING_TOOLS, ...ESCALATION_TOOLS],
+  // It cannot create/modify a campaign or spend directly. WEBSITE_TOOLS
+  // (added 2026-08-29 for the seo-advisor persona, which shares this
+  // taskType) has the identical structural guarantee -- no tool in it
+  // writes to the live site, so there's no reason to exclude it from
+  // marketing-advisor's own toolset either; both personas can propose a
+  // website change if relevant to what they're working on.
+  marketing:  [...SA_TOOLS.filter(t => t.name.includes('tag')), ...EMAIL_TOOLS.filter(t => t.name !== 'send_email' && t.name !== 'send_draft_reply'), ...TEAMS_TOOLS, ...MARKETING_TOOLS, ...WEBSITE_TOOLS, ...ESCALATION_TOOLS],
   general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...TEAMS_READ_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
 };
 

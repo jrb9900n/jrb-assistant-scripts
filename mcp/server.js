@@ -33,7 +33,7 @@ function buildMcpServer() {
     'Run any task on the JRB Executive Agent — email triage, QuickBooks reports, Service Autopilot data, GitHub operations, Vercel deployments, calendar events, or any business question. Returns the agent response as a string.',
     {
       task: z.string().describe('The task or question to run. Be specific.'),
-      task_type: z.enum(['general', 'email', 'report', 'code', 'crm', 'file', 'scheduling']).optional().describe('Task category for model routing. Use code/report/email/crm for complex tasks — they always use the full model. Defaults to general.'),
+      task_type: z.enum(['general', 'email', 'report', 'code', 'crm', 'file', 'scheduling', 'marketing']).optional().describe('Task category for model routing. Use code/report/email/crm/marketing for complex tasks — they always use the full model. Defaults to general.'),
     },
     async ({ task, task_type }) => {
       logger.info('MCP run_task', { task: task.slice(0, 80), task_type });
