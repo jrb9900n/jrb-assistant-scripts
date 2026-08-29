@@ -154,6 +154,8 @@ let _page                = null;
 let _sessionExpiry       = 0;
 let _loginPromise        = null; // deduplicate concurrent login attempts
 let _incapsulaBackoffUntil = 0;  // epoch ms; refuse SA calls until this clears
+let _accountRosterCache    = null; // last full getAllSAAccounts() pull, for searchClientsFull
+let _accountRosterCachedAt = 0;    // epoch ms
 
 // Closes the live SA browser session, if any. Exported so cron.js can call this
 // from a process-exit handler — a live Chromium instance kept open for up to
@@ -713,8 +715,10 @@ export async function getPaymentData({ paymentId }) {
  * maxScan bounds how many total accounts get paged through client-side before
  * giving up. Defaults small (matches this function's old effective behavior)
  * so low-stakes/high-frequency callers like the connectivity-check ping stay
- * cheap; a real name search should pass a much higher maxScan (see
- * scheduling-visits.js and the sa_search_clients tool, which both do).
+ * cheap. scheduling-visits.js's client lookup and the sa_search_clients tool
+ * used to pass a much higher maxScan directly; both now call searchClientsFull
+ * below instead, which tries this function first (same maxScan:3000 fast path)
+ * and only falls back to a full-roster scan when this returns nothing.
  */
 export async function searchClients({ name, limit = 10, maxScan = 30 }) {
   // QuerySelection:3 returns Clients + Leads + Closed Leads (0 = Clients only, misses newly created Leads).
@@ -771,6 +775,64 @@ export async function searchClients({ name, limit = 10, maxScan = 30 }) {
   return matches;
 }
 
+const ACCOUNT_ROSTER_TTL_MS = 10 * 60_000;
+
+// Dedupe concurrent full-roster fetches (same reasoning as _loginPromise above) --
+// the LLM can issue parallel tool_use calls in one turn, and without this two
+// simultaneous cold-cache searches would each kick off their own ~30-40s
+// getAllSAAccounts pull, doubling SA session load for no benefit.
+let _accountRosterPromise = null;
+
+async function getFreshAccountRoster() {
+  const now = Date.now();
+  if (_accountRosterCache && now - _accountRosterCachedAt <= ACCOUNT_ROSTER_TTL_MS) {
+    return _accountRosterCache;
+  }
+  if (!_accountRosterPromise) {
+    _accountRosterPromise = getAllSAAccounts({ max: 20000 })
+      .then(accounts => {
+        _accountRosterCache = accounts;
+        _accountRosterCachedAt = Date.now();
+        return accounts;
+      })
+      .finally(() => { _accountRosterPromise = null; });
+  }
+  return _accountRosterPromise;
+}
+
+/**
+ * Reliable client name search: tries searchClients' cheap maxScan:3000 partial scan
+ * first (fast path -- covers most searches, since most accounts do sort within the
+ * first 3000 rows), and only falls back to a full-roster scan when that returns
+ * nothing.
+ *
+ * Confirmed live 2026-08-28: even at maxScan:3000, searchClients can still miss
+ * real, active accounts -- reproduced directly with "Palzewicz" returning 0 matches
+ * despite 2 real live client records existing, out of SA's ~10,300-account
+ * population. SortedColumns' actual sort key (`{FieldName:'', ...}`) doesn't
+ * correlate with recency or anything else useful for prioritizing a partial scan,
+ * so any fixed maxScan below the full account count will keep missing accounts
+ * that happen to sort past the cutoff for some names -- not a tunable threshold,
+ * a structural gap in the partial-scan approach. The fallback scans the entire
+ * live roster instead (one getAllSAAccounts pass, cached for ACCOUNT_ROSTER_TTL_MS)
+ * and matches client-side, same as searchClients -- but only pays that ~30-40s cost
+ * on the exact case that used to return a false "not found."
+ *
+ * Cache invalidation: createClient() below clears the cache on a successful create,
+ * so a client search immediately after creating one doesn't hit stale data and
+ * risk a duplicate create.
+ */
+export async function searchClientsFull({ name, limit = 10 }) {
+  const quick = await searchClients({ name, limit, maxScan: 3000 });
+  if (quick.length > 0) return quick;
+
+  const roster = await getFreshAccountRoster();
+  const term = name.toLowerCase();
+  return roster
+    .filter(a => (a.name || '').toLowerCase().includes(term))
+    .slice(0, limit);
+}
+
 /**
  * Create a new client in SA.
  * companyName: use for business clients (overrides ClientName to company name).
@@ -823,6 +885,10 @@ export async function createClient({ firstName, lastName, companyName = '', addr
     throw new Error(`SA createClient failed: ${errors ? JSON.stringify(errors) : res.text?.slice(0, 300)}`);
   }
   logger.info('SA: client created', { id, name });
+  // Invalidate the searchClientsFull roster cache -- otherwise a search-before-create
+  // duplicate check run again within ACCOUNT_ROSTER_TTL_MS would hit the stale
+  // pre-creation roster, find nothing, and let a caller create a real duplicate.
+  _accountRosterCache = null;
   return { clientId: id, name };
 }
 

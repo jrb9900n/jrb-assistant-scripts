@@ -17,7 +17,7 @@
 //      same displacement check as the visit itself so a travel block can't
 //      silently overlap a PROTECTED/DEEP_WORK block.
 
-import { searchClients, getClientDetails } from './serviceautopilot.js';
+import { searchClientsFull, getClientDetails } from './serviceautopilot.js';
 import {
   createCalendarEvent,
   updateCalendarEvent,
@@ -443,16 +443,13 @@ export async function scheduleEstimateVisit({ clientName, date, startTime, durat
   // Step 1: SA client lookup. Don't guess on zero or multiple matches --
   // hand it back for Michael to disambiguate.
   //
-  // maxScan raised well above searchClients' own conservative default (30) --
-  // SA's V2AccountList_Query name filter is a confirmed server-side no-op, so
-  // a real search needs to page through a meaningful chunk of the actual
-  // account population to have a real chance of finding a client that isn't
-  // already on SA's arbitrary "recent clients" default page (see
-  // searchClients' own comment in serviceautopilot.js). Even at 3000 this is
-  // a probabilistic improvement, not a guaranteed fix, for a client base in
-  // the thousands -- a genuine full-text search endpoint would be needed to
-  // close this completely, which is a separate, substantial effort.
-  const matches = await searchClients({ name: clientName, maxScan: 3000 });
+  // Uses searchClientsFull (full-roster scan, cached) rather than searchClients'
+  // maxScan-bounded partial scan -- confirmed live 2026-08-28 that even
+  // maxScan:3000 (this call's old value) still misses real, active accounts
+  // against SA's ~10,300-account population, since SA's V2AccountList_Query name
+  // filter is a confirmed server-side no-op and the partial scan's sort order
+  // doesn't correlate with anything that would make a fixed cutoff safe.
+  const matches = await searchClientsFull({ name: clientName });
   if (matches.length !== 1) {
     return {
       status: 'needs_clarification',
