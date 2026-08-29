@@ -123,7 +123,7 @@ export async function deleteAgent(name) {
  * @param {boolean} [opts.saveContext]
  */
 export async function runSavedAgent({ agentName, task, vars = {}, saveContext = true }) {
-  const { runAgent } = await import('../core/agent.js');
+  const { runAgent, resolveModelAlias } = await import('../core/agent.js');
   const agentDef = await loadAgent(agentName);
 
   // Interpolate variables
@@ -136,7 +136,13 @@ export async function runSavedAgent({ agentName, task, vars = {}, saveContext = 
   return runAgent({
     task: resolvedTask,
     taskType: agentDef.taskType,
-    model: agentDef.model,
+    // agentDef.model is the shorthand alias seeded in agents/seed.js
+    // ('sonnet' | 'haiku' | null) -- runAgent's `model` param is passed
+    // straight through to anthropic.messages.create() as the literal model
+    // field, so the alias must be resolved to a real model ID first (or to
+    // undefined, letting routeModel's taskType/keyword routing decide).
+    // Passing the alias unresolved 404'd on every saved-agent run.
+    model: resolveModelAlias(agentDef.model),
     systemPromptOverride: agentDef.systemPrompt,
     saveContext,
   });

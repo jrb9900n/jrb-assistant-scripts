@@ -8,7 +8,7 @@ import { createInterface } from 'readline';
 import { runAgent } from './core/agent.js';
 import { logger } from './core/logger.js';
 
-const TASK_TYPES = ['email', 'crm', 'report', 'code', 'file', 'general'];
+const TASK_TYPES = ['email', 'crm', 'report', 'code', 'file', 'general', 'marketing'];
 
 async function runTask(taskType, task) {
   if (!TASK_TYPES.includes(taskType)) {
@@ -42,7 +42,7 @@ if (process.argv.length === 3) {
 const rl = createInterface({ input: process.stdin, output: process.stdout });
 
 console.log('\n🤖 J.R. Boehlke Executive Agent');
-console.log('Type your task. Prefix with task type (email/crm/report/code/file) for better routing.');
+console.log('Type your task. Prefix with task type (email/crm/report/code/file/marketing) for better routing.');
 console.log('Example: "email: summarise my inbox"   or just "what invoices are overdue?"');
 console.log('Type "exit" to quit.\n');
 
@@ -55,7 +55,7 @@ function prompt() {
     }
 
     // Parse optional "taskType: task" prefix
-    const match = input.match(/^(email|crm|report|code|file):\s*(.+)/i);
+    const match = input.match(/^(email|crm|report|code|file|marketing):\s*(.+)/i);
     const taskType = match ? match[1].toLowerCase() : 'general';
     const task = match ? match[2] : input;
 
