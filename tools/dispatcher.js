@@ -20,6 +20,7 @@ import * as scripts     from './impl/scripts.js';
 import * as vercel      from './impl/vercel.js';
 import * as scheduling  from './impl/scheduling.js';
 import * as sa          from './impl/serviceautopilot.js';
+import * as adp         from './impl/adp.js';
 import { scheduleEstimateVisit } from './impl/scheduling-visits.js';
 import { checkMichaelAvailability, bookTimeWithMichael } from './impl/scheduling-booking.js';
 import * as fleetsharp  from './impl/fleetsharp.js';
@@ -192,6 +193,15 @@ const HANDLERS = {
   sa_create_job:           (i) => sa.createJob(i),
   sa_add_ticket:           ({ notes, ...rest }) => sa.addTicket({ ...rest, body: notes }),
   sa_get_ticket:           (i) => sa.getTicket(i),
+
+  // ADP (RUN Powered by ADP) payroll — scaffold, not yet live. See
+  // tools/impl/adp.js header for what's blocking real endpoint wiring.
+  adp_search_employees:            (i) => adp.searchEmployees(i),
+  adp_get_employee:                (i) => adp.getEmployee(i),
+  adp_get_pay_statement:           (i) => adp.getPayStatement(i),
+  adp_get_timeoff_balance:         (i) => adp.getTimeOffBalance(i),
+  adp_update_employee_contact_info:(i) => adp.updateEmployeeContactInfo(i),
+  adp_submit_time_off_request:     (i) => adp.submitTimeOffRequest(i),
   sa_list_tag_categories:  ()  => sa.getTagCategories(),
   sa_list_tags:            ()  => sa.listTags(),
   sa_get_client_tags:      (i) => sa.getClientTags(i),
