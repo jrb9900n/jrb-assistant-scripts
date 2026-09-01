@@ -610,6 +610,19 @@ One Intuit developer app (`QB_CLIENT_ID`/`QB_CLIENT_SECRET`) can be authorized a
 
 ---
 
+## Cron Missed-Fire Watchdog (built 2026-09-01)
+
+`transport_accounting_report` (monthly Transport + Management report) silently didn't fire at its scheduled 6 AM on 2026-09-01 — zero log evidence it even started, and it had no `recoverMissedExecutions` set. Two fixes, both in `scheduler/cron.js`:
+
+1. Added `recoverMissedExecutions: true` to `transport_accounting_report` itself, matching the established pattern from PR #354 (SA nightly sync) and PR #271 (extended to weekly/monthly tasks). Note this is node-cron's own built-in option — it recovers a task missed because the scheduler *process* was down at the scheduled time, but not necessarily a single dropped tick on an otherwise-live process (the more likely cause here, e.g. an event-loop stall straddling the target second).
+2. New `cron_missed_fire_watchdog` task (every 30 min) as an independent second layer: persists each task's last-successful-run timestamp (`os.tmpdir()/jrb-scheduler-task-state.json`, same directory convention as the existing PID/lock/heartbeat files), and for every task whose schedule shape it can confidently parse (fixed daily/weekly/monthly time-of-day, or fixed `*/N` interval — `estimateMonitoring()`/`mostRecentExpectedFire()`), checks whether it's actually run since its own most-recently-due scheduled time. If not: sends Michael a Teams alert naming the task and how overdue it is, then attempts one self-heal run through a new shared `runScheduledTask()` path (also now used by the normal per-task `cron.schedule()` registration, replacing the old inline callback). Both trigger sources share a `wrap-<taskname>` run-lock — distinct from any lock a task acquires internally under its own name for sibling-task coordination (e.g. `sa_waiting_list_sync`/`sa_nightly_sync`) — so a normal fire and a watchdog self-heal can never race and double-run the same task's side effects (e.g. sending a report email twice).
+
+**Deliberately skips rather than guesses**: a schedule shape outside the ones just listed (e.g. `michael_inbox_processor`'s thrice-daily `15 7,13,19 * * *` — multiple fixed hours isn't handled) is silently left unmonitored. A false "overdue" alert is worse than no alert; extending `estimateMonitoring()` to cover more shapes is straightforward if a real gap is found later.
+
+**Known accepted limitation**: an exceptionally slow run that's still legitimately in progress past its grace window (e.g. a long SA-scrape-backed daily task queued behind a sibling lock) can trigger one spurious overdue alert immediately followed by a "skipped, already running" self-heal result. Harmless — `recordTaskRun` on the eventual successful completion clears the overdue state so it doesn't repeat — just occasionally noisy. Not worth per-task expected-duration tuning for a monitoring add-on.
+
+---
+
 ## Terminology note: "SA" always means ServiceAutopilot
 
 Confirmed directly by Michael 2026-08-17: "Anytime 'SA' is mentioned you may assume it is serviceautopilot." This applies both to interpreting his messages and to intent-matching code (see `teams/router.js`'s `isCrmActionRequest` - the bare `\bsa\b` token has been added/removed/re-added several times by well-meaning "cleanup"; it must stay). Do not narrow this based on a first-principles false-positive argument - ask Michael before changing it again.

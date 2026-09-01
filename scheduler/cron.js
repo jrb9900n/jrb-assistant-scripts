@@ -105,6 +105,157 @@ async function waitForLockToAppear(lockFile, graceMs = 10_000, pollMs = 2000) {
   }
 }
 
+// ── Missed-fire watchdog (cron_missed_fire_watchdog, below) ─────────────────
+// recoverMissedExecutions (node-cron's own option, used throughout this file)
+// catches misses caused by the scheduler process being down at the scheduled
+// time, but not a single missed tick on an otherwise-live process (e.g. an
+// event-loop stall straddling the target second) -- the actual root cause
+// behind transport_accounting_report silently not firing on 2026-09-01 despite
+// being scheduled. This is a second, independent layer: every 30 min, checks
+// whether each monitored task has actually run since its own most-recently-due
+// scheduled time, and if not, alerts Michael via Teams and attempts one
+// self-heal run through the same runScheduledTask() path everything else uses.
+//
+// Only schedule shapes this can confidently reason about are monitored --
+// anything else is silently skipped rather than guessed at (a false "overdue"
+// alert is worse than no alert). Covers every shape actually used in this file
+// as of 2026-09-01: fixed daily/weekly/monthly time-of-day, and fixed-interval
+// (*/N minutes or hours).
+//
+// Known accepted limitation: an exceptionally slow run (well past its grace
+// window before completing) can trigger one spurious overdue alert followed
+// immediately by a "skipped, already running" self-heal result -- harmless
+// (recordTaskRun on eventual success clears the overdue state so it never
+// repeats), just occasionally noisy. Not worth per-task expected-duration
+// tuning for a monitoring add-on.
+
+const TASK_STATE_FILE = join(tmpdir(), 'jrb-scheduler-task-state.json');
+
+function loadTaskState() {
+  try { return JSON.parse(readFileSync(TASK_STATE_FILE, 'utf8')); } catch { return {}; }
+}
+
+function recordTaskRun(name) {
+  try {
+    const state = loadTaskState();
+    state[name] = { ...(state[name] || {}), lastRunMs: Date.now() };
+    writeFileSync(TASK_STATE_FILE, JSON.stringify(state), 'utf8');
+  } catch (err) {
+    logger.warn('recordTaskRun: failed to persist task state', { name, err: err.message });
+  }
+}
+
+function recordTaskAlert(name) {
+  try {
+    const state = loadTaskState();
+    state[name] = { ...(state[name] || {}), lastAlertMs: Date.now() };
+    writeFileSync(TASK_STATE_FILE, JSON.stringify(state), 'utf8');
+  } catch (err) {
+    logger.warn('recordTaskAlert: failed to persist task state', { name, err: err.message });
+  }
+}
+
+// Parses one 5-field cron field into a shape estimateMonitoring can reason about.
+function parseCronField(field) {
+  if (field === '*') return { type: 'wildcard' };
+  const intervalMatch = field.match(/^\*\/(\d+)$/);
+  if (intervalMatch) return { type: 'interval', n: Number(intervalMatch[1]) };
+  const values = new Set();
+  for (const part of field.split(',')) {
+    const rangeMatch = part.match(/^(\d+)-(\d+)$/);
+    if (rangeMatch) {
+      for (let v = Number(rangeMatch[1]); v <= Number(rangeMatch[2]); v++) values.add(v);
+    } else if (/^\d+$/.test(part)) {
+      values.add(Number(part));
+    } else {
+      return { type: 'unsupported' }; // e.g. named days/months -- not used in this file
+    }
+  }
+  return { type: 'fixed', values };
+}
+
+// Returns a monitoring spec, or null if this schedule shape shouldn't be guessed at.
+function estimateMonitoring(schedule) {
+  const parts = schedule.trim().split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [minF, hourF, domF, monthF, dowF] = parts.map(parseCronField);
+  if (monthF.type !== 'wildcard') return null; // month restrictions never used here
+
+  if (minF.type === 'interval' && hourF.type === 'wildcard' && domF.type === 'wildcard' && dowF.type === 'wildcard') {
+    const intervalMs = minF.n * 60_000;
+    return { kind: 'interval', intervalMs, graceMs: Math.max(intervalMs * 0.5, 10 * 60_000) };
+  }
+  if (minF.type === 'fixed' && minF.values.size === 1 && hourF.type === 'interval' && domF.type === 'wildcard' && dowF.type === 'wildcard') {
+    const intervalMs = hourF.n * 3_600_000;
+    return { kind: 'interval', intervalMs, graceMs: Math.max(intervalMs * 0.25, 30 * 60_000) };
+  }
+  if (minF.type === 'fixed' && minF.values.size === 1 && hourF.type === 'wildcard' && domF.type === 'wildcard' && dowF.type === 'wildcard') {
+    return { kind: 'interval', intervalMs: 3_600_000, graceMs: 15 * 60_000 };
+  }
+
+  if (minF.type !== 'fixed' || minF.values.size !== 1 || hourF.type !== 'fixed' || hourF.values.size !== 1) return null;
+  const minute = [...minF.values][0], hour = [...hourF.values][0];
+
+  if (domF.type === 'wildcard' && dowF.type === 'wildcard') {
+    return { kind: 'daily', hour, minute, graceMs: 120 * 60_000 };
+  }
+  if (domF.type === 'wildcard' && dowF.type === 'fixed') {
+    return { kind: 'weekly', hour, minute, days: dowF.values, graceMs: 120 * 60_000 };
+  }
+  if (domF.type === 'fixed' && domF.values.size === 1 && dowF.type === 'wildcard') {
+    return { kind: 'monthly', hour, minute, day: [...domF.values][0], graceMs: 360 * 60_000 };
+  }
+  return null; // unrecognized combination -- skip rather than guess
+}
+
+// Most recent scheduled fire time at or before `now`, for daily/weekly/monthly specs.
+function mostRecentExpectedFire(now, spec) {
+  if (spec.kind === 'daily') {
+    const d = new Date(now); d.setHours(spec.hour, spec.minute, 0, 0);
+    if (d.getTime() > now.getTime()) d.setDate(d.getDate() - 1);
+    return d.getTime();
+  }
+  if (spec.kind === 'weekly') {
+    for (let back = 0; back < 8; back++) {
+      const d = new Date(now); d.setDate(d.getDate() - back); d.setHours(spec.hour, spec.minute, 0, 0);
+      if (d.getTime() <= now.getTime() && spec.days.has(d.getDay())) return d.getTime();
+    }
+    return null;
+  }
+  if (spec.kind === 'monthly') {
+    const d = new Date(now.getFullYear(), now.getMonth(), spec.day, spec.hour, spec.minute, 0, 0);
+    if (d.getTime() > now.getTime()) d.setMonth(d.getMonth() - 1);
+    return d.getTime();
+  }
+  return null;
+}
+
+// Shared execution path for both a normal scheduled fire and a watchdog self-heal
+// attempt -- gives every task a consistent run-lock (distinct from any lock a task
+// acquires internally under its own name, e.g. for sibling-task coordination) so
+// the two trigger sources can never run the same task concurrently and double-fire
+// a side effect like sending a report email twice.
+async function runScheduledTask(task, trigger) {
+  const wrapLockName = `wrap-${task.name}`;
+  if (!acquireRunLock(wrapLockName, 4 * 3_600_000)) {
+    logger.info(`Scheduled task skipped (already running): ${task.name}`, { trigger });
+    return { skipped: true };
+  }
+  try {
+    logger.info(`Scheduled task starting: ${task.name}`, { trigger });
+    await task.run();
+    logger.info(`Scheduled task complete: ${task.name}`, { trigger });
+    try { writeFileSync(SCHEDULER_HEARTBEAT_FILE, String(Date.now()), 'utf8'); } catch {}
+    recordTaskRun(task.name);
+    return { success: true };
+  } catch (err) {
+    logger.error(`Scheduled task failed: ${task.name}`, { err: err.message, trigger });
+    return { success: false, error: err.message };
+  } finally {
+    releaseRunLock(wrapLockName);
+  }
+}
+
 let saWasDown = false;
 const qbWasDown = new Map(); // company -> bool, so a JRB Transport outage/recovery never stomps JRB's own alert state
 let adsHealthWasDown = false;
@@ -1226,6 +1377,7 @@ const SCHEDULED_TASKS = [
     // formula bug always classifying every day "Short".
     schedule: '0 6 1 * *',
     name: 'transport_accounting_report',
+    recoverMissedExecutions: true,
     run: async () => {
       const { runMonthlyTransportPackage } = await import('../tools/impl/monthly-transport-package.js');
       const now = new Date();
@@ -2719,6 +2871,61 @@ ${EA_REPLY_STYLE}`;
       }
     },
   },
+  {
+    // Every 30 min -- see the "Missed-fire watchdog" comment block above
+    // acquireRunLock/estimateMonitoring for the full design rationale.
+    schedule: '*/30 * * * *',
+    name: 'cron_missed_fire_watchdog',
+    run: async () => {
+      const now = new Date();
+      const state = loadTaskState();
+      for (const task of SCHEDULED_TASKS) {
+        if (task.name === 'cron_missed_fire_watchdog') continue;
+        const spec = estimateMonitoring(task.schedule);
+        if (!spec) continue;
+        const taskState = state[task.name];
+        if (!taskState || !taskState.lastRunMs) continue; // never recorded yet -- bootstrapping
+
+        let overdue = false;
+        let expectedLabel = '';
+        if (spec.kind === 'interval') {
+          overdue = (now.getTime() - taskState.lastRunMs) > (spec.intervalMs + spec.graceMs);
+          expectedLabel = `every ${Math.round(spec.intervalMs / 60000)} min`;
+        } else {
+          const expected = mostRecentExpectedFire(now, spec);
+          if (expected !== null && (now.getTime() - expected) > spec.graceMs && taskState.lastRunMs < expected) {
+            overdue = true;
+            expectedLabel = new Date(expected).toLocaleString('en-US', { timeZone: 'America/Chicago' });
+          }
+        }
+        if (!overdue) continue;
+
+        // Only alert once per distinct missed occurrence -- cleared the moment
+        // lastRunMs advances past this alert (i.e. the next successful run).
+        if (taskState.lastAlertMs && taskState.lastAlertMs > taskState.lastRunMs) continue;
+
+        const hoursLate = ((now.getTime() - taskState.lastRunMs) / 3_600_000).toFixed(1);
+        logger.warn('cron_missed_fire_watchdog: task overdue', { task: task.name, expectedLabel, hoursLate });
+        recordTaskAlert(task.name);
+        try {
+          await sendProactiveMessage(
+            `⚠️ Scheduled task "${task.name}" appears to have missed its run (expected ~${expectedLabel}, last ran ${hoursLate}h ago). Attempting an automatic catch-up run now.`
+          );
+        } catch (notifyErr) {
+          logger.error('cron_missed_fire_watchdog: Teams alert failed', { err: notifyErr.message });
+        }
+
+        const result = await runScheduledTask(task, 'watchdog-selfheal');
+        if (result.skipped) {
+          logger.info('cron_missed_fire_watchdog: self-heal skipped, task already running', { task: task.name });
+        } else if (result.success) {
+          try { await sendProactiveMessage(`✅ "${task.name}" catch-up run completed successfully.`); } catch {}
+        } else {
+          try { await sendProactiveMessage(`❌ "${task.name}" catch-up run also failed: ${result.error}`); } catch {}
+        }
+      }
+    },
+  },
 ];
 
 // â”€â”€ Dev task detection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -2749,16 +2956,8 @@ function isCrmActionRequest(text) {
 
 logger.info('Scheduler starting', { tasks: SCHEDULED_TASKS.map(t => t.name) });
 for (const task of SCHEDULED_TASKS) {
-  cron.schedule(task.schedule, async () => {
-    logger.info(`Scheduled task starting: ${task.name}`);
-    try {
-      await task.run();
-      logger.info(`Scheduled task complete: ${task.name}`);
-      try { writeFileSync(SCHEDULER_HEARTBEAT_FILE, String(Date.now()), 'utf8'); } catch {}
-    } catch (err) {
-      logger.error(`Scheduled task failed: ${task.name}`, { err: err.message });
-    }
-  }, task.recoverMissedExecutions ? { recoverMissedExecutions: true } : undefined);
+  cron.schedule(task.schedule, () => runScheduledTask(task, 'scheduled'),
+    task.recoverMissedExecutions ? { recoverMissedExecutions: true } : undefined);
 }
 logger.info('All schedules registered. Scheduler running.');
 
