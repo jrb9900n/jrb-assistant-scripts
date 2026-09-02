@@ -15,8 +15,10 @@
 // scheduling/sharepoint (the same buckets Teams' own intent router draws
 // from for Michael's conversations), and exclude only what's actually
 // broken on this channel, not what merely seemed risky. Currently that's
-// just escalate_to_claude_code -- it dereferences context.activity, which
-// voice never supplies, and throws. Everything else Teams' business
+// just escalate_to_claude_code -- it needs context.activity (a Teams
+// conversation to ask Michael's yes/no in), which voice never supplies, so
+// it just declines gracefully rather than doing anything useful over a call.
+// Everything else Teams' business
 // taskTypes can do, voice can now do too, including the write paths
 // (SA client/estimate/job creation, billing/tag config, book_time_with_michael)
 // -- see VOICE_SYSTEM_PROMPT's explicit "confirm before committing"
@@ -61,7 +63,7 @@ const BUSINESS_TASK_TYPES = ['calendar', 'email', 'crm', 'report', 'scheduling',
 // Tools that exist in the registry but are structurally incompatible with
 // this channel -- not a risk judgment call, a technical one.
 const VOICE_EXCLUDED_TOOL_NAMES = new Set([
-  'escalate_to_claude_code', // needs context.activity (a Teams activity object); voice never has one
+  'escalate_to_claude_code', // needs context.activity (a Teams conversation to ask approval in); voice never has one, so it would just decline instead of doing anything useful
 ]);
 
 // The mailbox voice-channel drafts land in. Deliberately NOT sourced from
