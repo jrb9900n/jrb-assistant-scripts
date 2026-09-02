@@ -61,6 +61,23 @@ const STALE_PENDING_MS = 30 * 60 * 1000;
 // object threaded through core/agent.js -> tools/dispatcher.js — same
 // pattern as privacy-gate.js's requestEmployeeApproval.
 export async function requestEscalation({ activity, sessionId, task, taskType, reason }) {
+  // Several runAgent() call sites that grant a taskType with escalate_to_claude_code
+  // in its TOOL_MAP never pass a `context` object at all -- there's no live Teams
+  // conversation to ask Michael's yes/no in. Confirmed sites: the 'general' MCP
+  // run_task path (mcp/server.js), the /execute HTTP endpoint, the FieldOps
+  // 'scheduling' chat endpoint (all in teams/bot.js), and the standing-exception
+  // branch of handleEmployeeMessage (teams/bot.js, taskType 'general' there is
+  // intentional -- see that branch's own comment -- but still has no context).
+  // Found live 2026-09-02: every one of those call sites crashed with "Cannot read
+  // properties of undefined (reading 'conversation')" instead of the graceful
+  // escalation-declined message this was supposed to return, because activity was
+  // undefined. Escalation is fundamentally a Teams-approval flow -- when there's no
+  // conversation to approve it in, decline cleanly instead of throwing.
+  if (!activity?.conversation?.id) {
+    logger.warn('claude-code-escalation: no Teams conversation context available, declining', { taskType, reason: reason?.slice(0, 120) });
+    return "I can't escalate this to Claude Code from here — escalation needs a live Teams conversation with Michael to ask for approval, and this request didn't come from one.";
+  }
+
   const db = supabase();
 
   const staleCutoff = new Date(Date.now() - STALE_PENDING_MS).toISOString();

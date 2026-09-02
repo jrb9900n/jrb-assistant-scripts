@@ -42,6 +42,19 @@ const VAGUE_DECLINE = "That's something I'd need to check with Michael on first 
 // LLM-produced tool input — see registry.js's schema for this tool, which
 // deliberately takes no LLM-fillable parameters at all.
 export async function requestEmployeeApproval({ sender, activity, requestText }) {
+  // Same class of gap fixed in tools/impl/claude-code-escalation.js's
+  // requestEscalation (2026-09-02): this reads activity.conversation.id
+  // unconditionally, same as that file did before the fix. Not currently
+  // reachable (the only call site -- teams/bot.js's 'employee' taskType
+  // branch -- always has a real Teams activity), but the two flows are
+  // explicitly documented as mirroring each other's pattern (see this
+  // file's own header and claude-code-escalation.js's), so guard here too
+  // rather than leaving a latent crash for whenever that stops being true.
+  if (!activity?.conversation?.id) {
+    logger.warn('privacy-gate: no Teams conversation context available, declining', { requester: sender?.name });
+    return VAGUE_DECLINE;
+  }
+
   const db = supabase();
   const { data: row, error } = await db
     .from('employee_requests')
