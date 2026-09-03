@@ -17,6 +17,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
 import { buildContextBlock, logObservation } from './feedback.js';
+import { SONNET } from '../../core/agent.js';
 import {
   searchEmails,
   getEmail,
@@ -35,7 +36,9 @@ import { sendProactiveMessage } from '../../teams/notify.js';
 
 const MICHAEL = 'michael@jrboehlke.com';
 const HAIKU   = 'claude-haiku-4-5-20251001';
-const SONNET  = 'claude-sonnet-4-6';
+// SONNET imported from core/agent.js above — this file used to keep its own
+// separate copy of the literal, which is exactly the drift this PR's other
+// two fixes (agent.js, cron.js) were meant to close for good.
 
 // ── Supabase ─────────────────────────────────────────────────────────────────
 
