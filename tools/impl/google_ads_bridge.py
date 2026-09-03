@@ -166,7 +166,23 @@ def get_keyword_performance(client, args):
 # scope decision this makes deliberately, and why it stops here (no bid
 # changes, no campaign/ad group/ad creation in this first pass).
 
+def _require_numeric_id(value, label):
+    # GAQL has no bind-parameter API for search() -- IDs are interpolated
+    # directly into the query string, same as name_filter() above does for
+    # free text (which escapes quotes/backslashes for the same reason).
+    # Google Ads criterion/campaign IDs are always plain digit strings, so
+    # rejecting anything else closes this off rather than escaping it: an
+    # unvalidated `"123 OR 1=1"` here would turn `WHERE ...criterion_id = 123
+    # OR 1=1` into a match-everything clause, and the first row GAQL happens
+    # to return would get paused/re-budgeted instead of the intended one.
+    s = str(value)
+    if not s.isdigit():
+        raise ValueError(f"{label} must be a numeric ID, got: {value!r}")
+    return s
+
+
 def _keyword_resource_name(ga_service, keyword_id):
+    keyword_id = _require_numeric_id(keyword_id, "keywordId")
     query = f"""
         SELECT ad_group_criterion.resource_name
         FROM ad_group_criterion
@@ -203,7 +219,7 @@ def enable_keyword(client, args):
 
 
 def adjust_campaign_budget(client, args):
-    campaign_id = args["campaignId"]
+    campaign_id = _require_numeric_id(args["campaignId"], "campaignId")
     new_budget_usd = args["newDailyBudgetUsd"]
     ga_service = client.get_service("GoogleAdsService")
     query = f"""

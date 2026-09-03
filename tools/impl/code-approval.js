@@ -73,6 +73,29 @@ export const CONFIRM_REQUIRED_TOOL_NAMES = new Set([
   'google_ads_adjust_campaign_budget',
 ]);
 
+// Subset of the set above that must NEVER fall through to executing
+// ungated just because dispatchTool() was called with no Teams/voice
+// context -- see tools/dispatcher.js's channelOf()/gate for the "no context
+// = trusted CLI/MCP caller" assumption this deliberately does NOT extend to.
+// Found live via /code-review 2026-09-03: that assumption is already false
+// for at least three real call sites -- teams/bot.js's employee
+// standing-exception branch (an unverified non-Michael sender), mcp/
+// server.js's run_task tool, and scheduler/cron.js's email general-fallback
+// -- all pass taskType 'general'/'report' with zero context, which is
+// exactly the condition the existing gate treats as exempt. Money-moving
+// tools can't accept that risk the way write_file/run_script/github_* have
+// been (silently, so far) -- refusing outright here is safer than either
+// silently executing or silently pending with no notification. The broader
+// question of whether write_file/run_script/github_push/github_merge_pr
+// should get the same tightening is real and worth its own follow-up, not
+// folded in here since those are established, possibly-relied-upon
+// behavior this change doesn't have full visibility into.
+export const REFUSE_IF_NO_CHANNEL_TOOL_NAMES = new Set([
+  'google_ads_pause_keyword',
+  'google_ads_enable_keyword',
+  'google_ads_adjust_campaign_budget',
+]);
+
 // vercel_api is one tool name covering several actions via an `action`
 // field -- only the write-flavored ones actually change something live.
 const VERCEL_WRITE_ACTIONS = new Set(['redeploy', 'add_domain', 'set_env']);

@@ -29,7 +29,7 @@ import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { requestEmployeeApproval } from './impl/privacy-gate.js';
 import { requestEscalation } from './impl/claude-code-escalation.js';
-import { requiresApproval, requestCodeApproval } from './impl/code-approval.js';
+import { requiresApproval, requestCodeApproval, REFUSE_IF_NO_CHANNEL_TOOL_NAMES } from './impl/code-approval.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 import { createClient } from '@supabase/supabase-js';
 import * as marketingSegments  from './impl/marketing-segments.js';
@@ -369,6 +369,14 @@ export async function dispatchTool(toolName, input, context = null, opts = {}) {
     if (channel && context?.taskType !== 'auto_fix') {
       logger.info('Dispatching tool: gated, requesting approval', { toolName, channel });
       return requestCodeApproval(toolName, input, context, channel);
+    }
+    // Money-moving tools don't get the "no channel = trusted CLI/MCP caller"
+    // exemption above -- see REFUSE_IF_NO_CHANNEL_TOOL_NAMES's own comment
+    // for the real call sites (found via /code-review) that would otherwise
+    // let this execute completely ungated and unnotified.
+    if (!channel && REFUSE_IF_NO_CHANNEL_TOOL_NAMES.has(toolName)) {
+      logger.warn('Dispatching tool: refused, no channel to request approval through', { toolName });
+      return { pendingApproval: true, message: `This action was NOT performed: ${toolName} requires a live Teams or voice conversation to confirm with Michael first, and this call had none. Tell whoever asked that this needs to be requested again from Teams or a phone call.` };
     }
   }
 
