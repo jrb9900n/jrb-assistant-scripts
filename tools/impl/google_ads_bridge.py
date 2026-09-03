@@ -9,10 +9,17 @@ client (gRPC-based), already proven live in the sibling google-ads-agent
 project (same credentials, reused here). This script is the smallest bridge
 that reuses that proven path from JRBAgent's Node.js codebase.
 
-Deliberately implements ONLY read (GAQL search) queries -- no mutate
-operations -- even though the underlying OAuth grant (reused from
-google-ads-agent) also has write access there. The safety boundary is this
-script's function list, not the token: see tools/impl/google-ads.js's header.
+Implements read (GAQL search) queries plus a deliberately narrow set of
+mutate operations -- pause/enable a keyword, adjust a campaign's daily
+budget -- added after an explicit scope decision (2026-09-03, Michael: "google
+ads mutate is fine") to close the gap where the Teams bot could only describe
+a fix (e.g. "here are 7 keywords to pause") instead of making it. Still
+deliberately does NOT include bid changes or campaign/ad group/ad creation --
+those are separate, larger-blast-radius operations with no immediate driving
+need. The safety boundary is this script's function list, not the OAuth
+token (which has always had full write access): see
+tools/impl/google-ads.js's header and the mutate tool descriptions in
+tools/registry.js for how a caller is expected to confirm before using them.
 
 Invoked as: python google_ads_bridge.py <command> '<json-args>'
 Prints one JSON object to stdout: {"ok": true, "data": ...} or
@@ -122,7 +129,9 @@ def get_keyword_performance(client, args):
     require_dates(args)
     ga_service = client.get_service("GoogleAdsService")
     query = f"""
-        SELECT campaign.name, ad_group.name, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+        SELECT campaign.name, ad_group.name, ad_group_criterion.criterion_id,
+               ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type,
+               ad_group_criterion.status,
                metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions
         FROM keyword_view
         WHERE segments.date BETWEEN '{args['startDate']}' AND '{args['endDate']}'
@@ -132,15 +141,95 @@ def get_keyword_performance(client, args):
     """
     rows = ga_service.search(customer_id=CUSTOMER_ID, query=query)
     return [{
+        # keywordId: pass this to pause_keyword/enable_keyword -- matching on
+        # keyword text alone is ambiguous (the same text can exist in more
+        # than one ad group), and pausing the wrong one is a real-money
+        # mistake, not a cosmetic one.
+        "keywordId": str(r.ad_group_criterion.criterion_id),
         "campaign": r.campaign.name,
         "adGroup": r.ad_group.name,
         "keyword": r.ad_group_criterion.keyword.text,
         "matchType": r.ad_group_criterion.keyword.match_type.name,
+        "status": r.ad_group_criterion.status.name,
         "impressions": r.metrics.impressions,
         "clicks": r.metrics.clicks,
         "costUsd": round(r.metrics.cost_micros / 1e6, 2),
         "conversions": round(r.metrics.conversions, 2),
     } for r in rows]
+
+
+# ── Mutate operations (added: pause/enable a keyword, adjust a campaign's
+# daily budget) ─────────────────────────────────────────────────────────────
+# Ported from the sibling google-ads-agent project's already-proven
+# GoogleAdsTools.pause_keyword/enable_keyword/adjust_campaign_budget (same
+# OAuth grant, same account) -- see tools/impl/google-ads.js's header for the
+# scope decision this makes deliberately, and why it stops here (no bid
+# changes, no campaign/ad group/ad creation in this first pass).
+
+def _keyword_resource_name(ga_service, keyword_id):
+    query = f"""
+        SELECT ad_group_criterion.resource_name
+        FROM ad_group_criterion
+        WHERE ad_group_criterion.criterion_id = {keyword_id}
+    """
+    for row in ga_service.search(customer_id=CUSTOMER_ID, query=query):
+        return row.ad_group_criterion.resource_name
+    return None
+
+
+def _set_keyword_status(client, args, status):
+    keyword_id = args["keywordId"]
+    ga_service = client.get_service("GoogleAdsService")
+    resource_name = _keyword_resource_name(ga_service, keyword_id)
+    if not resource_name:
+        raise ValueError(f"No keyword found with id {keyword_id}")
+
+    criterion_service = client.get_service("AdGroupCriterionService")
+    criterion_op = client.get_type("AdGroupCriterionOperation")
+    criterion = criterion_op.update
+    criterion.resource_name = resource_name
+    criterion.status = client.enums.AdGroupCriterionStatusEnum[status]
+    criterion_op.update_mask.paths.append("status")
+    criterion_service.mutate_ad_group_criteria(customer_id=CUSTOMER_ID, operations=[criterion_op])
+    return {"keywordId": keyword_id, "newStatus": status, "reason": args.get("reason", "")}
+
+
+def pause_keyword(client, args):
+    return _set_keyword_status(client, args, "PAUSED")
+
+
+def enable_keyword(client, args):
+    return _set_keyword_status(client, args, "ENABLED")
+
+
+def adjust_campaign_budget(client, args):
+    campaign_id = args["campaignId"]
+    new_budget_usd = args["newDailyBudgetUsd"]
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT campaign_budget.resource_name, campaign_budget.amount_micros
+        FROM campaign
+        WHERE campaign.id = {campaign_id}
+    """
+    budget_resource, old_budget_micros = None, None
+    for row in ga_service.search(customer_id=CUSTOMER_ID, query=query):
+        budget_resource = row.campaign_budget.resource_name
+        old_budget_micros = row.campaign_budget.amount_micros
+    if not budget_resource:
+        raise ValueError(f"No campaign found with id {campaign_id}")
+
+    budget_service = client.get_service("CampaignBudgetService")
+    budget_op = client.get_type("CampaignBudgetOperation")
+    budget_op.update.resource_name = budget_resource
+    budget_op.update.amount_micros = int(round(new_budget_usd * 1e6))
+    budget_op.update_mask.paths.append("amount_micros")
+    budget_service.mutate_campaign_budgets(customer_id=CUSTOMER_ID, operations=[budget_op])
+    return {
+        "campaignId": campaign_id,
+        "previousDailyBudgetUsd": round(old_budget_micros / 1e6, 2) if old_budget_micros is not None else None,
+        "newDailyBudgetUsd": round(new_budget_usd, 2),
+        "reason": args.get("reason", ""),
+    }
 
 
 def get_lead_conversions(client, args):
@@ -168,6 +257,9 @@ COMMANDS = {
     "get_campaign_metrics": get_campaign_metrics,
     "get_keyword_performance": get_keyword_performance,
     "get_lead_conversions": get_lead_conversions,
+    "pause_keyword": pause_keyword,
+    "enable_keyword": enable_keyword,
+    "adjust_campaign_budget": adjust_campaign_budget,
 }
 
 

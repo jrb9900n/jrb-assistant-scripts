@@ -266,11 +266,15 @@ const HANDLERS = {
   fleetsharp_get_daily_mileage:   (i) => fleetsharp.getDailyMileage(i),
   fleetsharp_get_tracker_names:   () => fleetsharp.getTrackerNames(),
 
-  // Google Ads (read-only — see tools/impl/google-ads.js header)
+  // Google Ads — see tools/impl/google-ads.js header for the read/write split
   google_ads_list_campaigns:          (i) => googleAds.listCampaigns(i),
   google_ads_get_campaign_metrics:    (i) => googleAds.getCampaignMetrics(i),
   google_ads_get_keyword_performance: (i) => googleAds.getKeywordPerformance(i),
   google_ads_get_lead_conversions:    (i) => googleAds.getLeadConversions(i),
+  // Real-money mutate ops -- gated via code-approval.js's CONFIRM_REQUIRED_TOOL_NAMES
+  google_ads_pause_keyword:           (i) => googleAds.pauseKeyword(i),
+  google_ads_enable_keyword:          (i) => googleAds.enableKeyword(i),
+  google_ads_adjust_campaign_budget:  (i) => googleAds.adjustCampaignBudget(i),
 
   // CardDAV
   carddav_provision:      (i) => carddav.provisionCredential(i),

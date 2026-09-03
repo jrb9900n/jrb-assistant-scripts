@@ -50,11 +50,27 @@ function supabase() {
 }
 
 // Tool names that always require confirmation, regardless of input.
+// google_ads_pause_keyword/enable_keyword/adjust_campaign_budget added
+// 2026-09-03 alongside their own build -- same reasoning as this file's
+// header: a tool description telling the model to "always confirm first" is
+// advisory, not enforced, and these three are real, immediate, live-money
+// changes, not code/infra. NOTE: like every other entry in this set, this
+// gate only actually fires when dispatchTool() is called with Teams or voice
+// context (see channelOf() below) -- a call site with no context at all
+// (e.g. scheduler/cron.js's email general-fallback runAgent() call, which
+// passes no `context` param) falls through ungated today. That's a
+// pre-existing gap affecting every tool in this set, not something this
+// change introduces or fixes -- flagged, not silently patched, since closing
+// it means changing this gate's behavior for write_file/github_push/etc.
+// too, a bigger decision than this PR's scope.
 export const CONFIRM_REQUIRED_TOOL_NAMES = new Set([
   'write_file',
   'run_script',
   'github_push',
   'github_merge_pr',
+  'google_ads_pause_keyword',
+  'google_ads_enable_keyword',
+  'google_ads_adjust_campaign_budget',
 ]);
 
 // vercel_api is one tool name covering several actions via an `action`
@@ -95,6 +111,12 @@ export function describeAction(toolName, input) {
       return `Merge PR #${input?.pr_number ?? '?'} in ${input?.repo ?? 'jrb-assistant-scripts'}`;
     case 'vercel_api':
       return `Vercel ${input?.action ?? '(unknown action)'} on ${input?.project ?? '(unknown project)'}`;
+    case 'google_ads_pause_keyword':
+      return `Pause Google Ads keyword ${input?.keywordId ?? '(unknown id)'} -- ${input?.reason ?? ''}`;
+    case 'google_ads_enable_keyword':
+      return `Re-enable Google Ads keyword ${input?.keywordId ?? '(unknown id)'} -- ${input?.reason ?? ''}`;
+    case 'google_ads_adjust_campaign_budget':
+      return `Set Google Ads campaign ${input?.campaignId ?? '(unknown id)'}'s daily budget to $${input?.newDailyBudgetUsd ?? '?'} -- ${input?.reason ?? ''}`;
     default:
       return `${toolName}(${JSON.stringify(input ?? {}).slice(0, 200)})`;
   }
