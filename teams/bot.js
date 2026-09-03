@@ -521,21 +521,11 @@ async function processTeamsMessage(activity, sessionId) {
     logger.warn('Teams: resolvePendingApprovalReply check failed (non-fatal)', { err: err.message });
   }
 
-  // Same shape as the privacy-gate check above, for a different pending
-  // state machine: a yes/no reply to a Claude Code escalation Michael was
-  // asked to approve (see tools/impl/claude-code-escalation.js, triggered by
-  // the escalate_to_claude_code tool). Checked second since both are cheap
-  // no-ops in the overwhelmingly common case of neither being pending.
-  try {
-    const { resolvePendingEscalationReply } = await import('../tools/impl/claude-code-escalation.js');
-    const escalationResult = await resolvePendingEscalationReply(userText);
-    if (escalationResult) {
-      await remember(escalationResult.replyToMichael);
-      return;
-    }
-  } catch (err) {
-    logger.warn('Teams: resolvePendingEscalationReply check failed (non-fatal)', { err: err.message });
-  }
+  // A Claude Code escalation (tools/impl/claude-code-escalation.js) no
+  // longer has a pending yes/no state to check for here -- rebuilt
+  // 2026-09-03 to start immediately instead of waiting on a Teams
+  // approval reply (see that file's own header for why). There is
+  // nothing left for a "resolvePendingEscalationReply"-shaped check to do.
 
   // A reply to a pending code/repo/infra-write approval (see
   // tools/impl/code-approval.js). Deliberately NOT run through
