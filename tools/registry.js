@@ -1357,11 +1357,14 @@ const FLEETSHARP_TOOLS = [
   },
 ];
 
-// Google Ads reporting — read-only by design (see tools/impl/google-ads.js
-// header). Placed in the same TOOL_MAP slots as FLEETSHARP_TOOLS (report +
-// general) and deliberately left out of 'email'/'employee'/'auto_fix' — those
-// task types process untrusted inbound content or run unattended, and this
-// module touches a live ad-spend account.
+// Google Ads: reporting, plus (as of 2026-09-03) a narrow set of real-money
+// mutate tools -- google_ads_pause_keyword/enable_keyword/
+// adjust_campaign_budget, gated by code-approval.js's CONFIRM_REQUIRED_TOOL_NAMES
+// (see tools/impl/google-ads.js's header for the scope decision). Placed in
+// the same TOOL_MAP slots as FLEETSHARP_TOOLS (report + general) and
+// deliberately left out of 'email'/'employee'/'auto_fix' — those task types
+// process untrusted inbound content or run unattended, and this module
+// touches a live ad-spend account.
 const GOOGLE_ADS_TOOLS = [
   {
     name: 'google_ads_list_campaigns',

@@ -183,15 +183,31 @@ def _require_numeric_id(value, label):
 
 
 def _keyword_resource_name(ga_service, keyword_id):
+    # criterion_id is only unique WITHIN an ad group, not account-wide --
+    # that's exactly why AdGroupCriterion's real resource name is the
+    # composite "{ad_group_id}~{criterion_id}", and why every other GAQL
+    # query in this file that touches ad_group_criterion also selects
+    # campaign/ad_group alongside it. Querying by criterion_id alone and
+    # taking the first row (the original version of this function) could
+    # silently resolve to a different ad group's same-numbered keyword and
+    # pause/enable the wrong one with zero error -- refuse on any ambiguity
+    # instead of guessing which row is "the" one.
     keyword_id = _require_numeric_id(keyword_id, "keywordId")
     query = f"""
-        SELECT ad_group_criterion.resource_name
+        SELECT ad_group_criterion.resource_name, campaign.name, ad_group.name
         FROM ad_group_criterion
         WHERE ad_group_criterion.criterion_id = {keyword_id}
     """
-    for row in ga_service.search(customer_id=CUSTOMER_ID, query=query):
-        return row.ad_group_criterion.resource_name
-    return None
+    rows = list(ga_service.search(customer_id=CUSTOMER_ID, query=query))
+    if not rows:
+        return None
+    if len(rows) > 1:
+        locations = ", ".join(f"{r.campaign.name} / {r.ad_group.name}" for r in rows)
+        raise ValueError(
+            f"keywordId {keyword_id} is ambiguous -- it matches {len(rows)} ad groups: {locations}. "
+            f"Re-check google_ads_get_keyword_performance's campaign/adGroup fields for the intended one."
+        )
+    return rows[0].ad_group_criterion.resource_name
 
 
 def _set_keyword_status(client, args, status):
@@ -227,6 +243,7 @@ def adjust_campaign_budget(client, args):
         SELECT campaign_budget.resource_name, campaign_budget.amount_micros
         FROM campaign
         WHERE campaign.id = {campaign_id}
+        AND campaign.status != 'REMOVED'
     """
     budget_resource, old_budget_micros = None, None
     for row in ga_service.search(customer_id=CUSTOMER_ID, query=query):
