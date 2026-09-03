@@ -2926,6 +2926,23 @@ ${EA_REPLY_STYLE}`;
       }
     },
   },
+  {
+    // Weekly, Sunday 9 PM -- after a week of real calls have accumulated,
+    // review every not-yet-reviewed voice_call_log row and synthesize
+    // durable behavior changes into the `rules` table (agent: 'voice').
+    // Quiet time slot, deliberately outside the crowded 6-8 AM daily
+    // cluster and away from any other weekly task's exact minute.
+    // See tools/impl/voice-call-review.js for the full design and why
+    // code-level findings are flagged to Michael rather than auto-applied.
+    schedule: '0 21 * * 0',
+    name: 'voice_call_quality_review',
+    recoverMissedExecutions: true,
+    run: async () => {
+      const { runVoiceCallQualityReview } = await import('../tools/impl/voice-call-review.js');
+      const result = await runVoiceCallQualityReview();
+      logger.info('Voice call quality review complete', result);
+    },
+  },
 ];
 
 // â”€â”€ Dev task detection helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
