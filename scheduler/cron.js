@@ -5,7 +5,7 @@ import { spawn, execSync } from 'child_process';
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { runAgent } from '../core/agent.js';
+import { runAgent, SONNET } from '../core/agent.js';
 import { logger } from '../core/logger.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 
@@ -348,10 +348,12 @@ function asHtmlBody(text) {
   return s.split(/\n{2,}/).map(p => `<p>${p.replace(/\n/g, '<br>')}</p>`).join('');
 }
 
-// Matches core/agent.js's SONNET constant -- used to force Sonnet on the
-// email_poller general-fallback call below rather than relying on routeModel's
-// keyword heuristic (that taskType isn't in SONNET_TASK_TYPES).
-const FORCE_SONNET_MODEL = 'claude-sonnet-4-6';
+// Forces Sonnet on the email_poller general-fallback call below rather than
+// relying on routeModel's keyword heuristic (that taskType isn't in
+// SONNET_TASK_TYPES). Imported from core/agent.js instead of a second
+// hardcoded literal here -- the two copies had already drifted out of sync
+// once (both stuck on the prior model generation).
+const FORCE_SONNET_MODEL = SONNET;
 
 const SCHEDULED_TASKS = [
   {
@@ -2502,7 +2504,14 @@ ${EA_REPLY_STYLE}`;
         // matching keyword (it does today, but that's exactly the kind of silent
         // wording-drift trap already documented elsewhere in this file for the
         // "Estimating" vs "estimate" routing miss).
-        const agentResult = await runAgent({ task, taskType: 'general', model: FORCE_SONNET_MODEL, saveContext: false });
+        // saveContext: true (changed from false) -- this is Michael's own request via
+        // his own email channel, exactly the same shape as a Teams 'general' message,
+        // but was never writing its outcome back into agent_memory. A later Teams
+        // conversation referencing "did you handle that email" had no way to know --
+        // Teams/voice already share memory this way (see voice/call-memory.js's own
+        // comment on cross-channel visibility), email was the one channel silently
+        // left out.
+        const agentResult = await runAgent({ task, taskType: 'general', model: FORCE_SONNET_MODEL, saveContext: true });
         const result = asHtmlBody(agentResult?.result) || '<p>I received your email and will follow up shortly.</p>';
 
         await sendEmail({

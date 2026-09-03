@@ -25,7 +25,12 @@ if (missing.length) {
 }
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-const SONNET = 'claude-sonnet-4-6';
+// Exported so every other call site that needs to force Sonnet (e.g.
+// scheduler/cron.js's email general-fallback) imports this instead of
+// hardcoding its own copy of the model ID -- a prior duplicate literal in
+// cron.js already drifted out of sync with this one once (both stuck on
+// claude-sonnet-4-6 while this session runs claude-sonnet-5).
+export const SONNET = 'claude-sonnet-5';
 const HAIKU  = 'claude-haiku-4-5-20251001';
 const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 
