@@ -222,7 +222,13 @@ export async function connectRealtimeSession({ session, hangUp }) {
     // handler clears session._pendingUnlock before invoking it, so this
     // timeout finds nothing left to do.
     setTimeout(() => {
-      if (session._pendingUnlock) {
+      // readyState guard -- found via /code-review: a call that already
+      // ended (hangup, socket closed) before this fires would otherwise
+      // still run the Supabase-backed unlock and a no-op ws.send() on a
+      // dead socket for no benefit. ws@8's send() silently no-ops once
+      // closed rather than throwing, so this would have gone unnoticed
+      // rather than erroring.
+      if (session._pendingUnlock && ws.readyState === WebSocket.OPEN) {
         logger.warn('Voice bridge: response.done never arrived for trusted-caller greeting, running unlock via watchdog', { callId: session.callConnectionId });
         const runUnlock = session._pendingUnlock;
         session._pendingUnlock = null;
