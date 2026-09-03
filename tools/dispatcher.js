@@ -29,7 +29,7 @@ import * as fuzzyMatch  from './impl/fuzzy-match.js';
 import { guardOutbound, classifyInbound, buildFlagEntry } from './impl/email-guardrail.js';
 import { requestEmployeeApproval } from './impl/privacy-gate.js';
 import { requestEscalation } from './impl/claude-code-escalation.js';
-import { requiresApproval, requestCodeApproval } from './impl/code-approval.js';
+import { requiresApproval, requestCodeApproval, REFUSE_IF_NO_CHANNEL_TOOL_NAMES } from './impl/code-approval.js';
 import { sendProactiveMessage } from '../teams/notify.js';
 import { createClient } from '@supabase/supabase-js';
 import * as marketingSegments  from './impl/marketing-segments.js';
@@ -266,11 +266,15 @@ const HANDLERS = {
   fleetsharp_get_daily_mileage:   (i) => fleetsharp.getDailyMileage(i),
   fleetsharp_get_tracker_names:   () => fleetsharp.getTrackerNames(),
 
-  // Google Ads (read-only — see tools/impl/google-ads.js header)
+  // Google Ads — see tools/impl/google-ads.js header for the read/write split
   google_ads_list_campaigns:          (i) => googleAds.listCampaigns(i),
   google_ads_get_campaign_metrics:    (i) => googleAds.getCampaignMetrics(i),
   google_ads_get_keyword_performance: (i) => googleAds.getKeywordPerformance(i),
   google_ads_get_lead_conversions:    (i) => googleAds.getLeadConversions(i),
+  // Real-money mutate ops -- gated via code-approval.js's CONFIRM_REQUIRED_TOOL_NAMES
+  google_ads_pause_keyword:           (i) => googleAds.pauseKeyword(i),
+  google_ads_enable_keyword:          (i) => googleAds.enableKeyword(i),
+  google_ads_adjust_campaign_budget:  (i) => googleAds.adjustCampaignBudget(i),
 
   // CardDAV
   carddav_provision:      (i) => carddav.provisionCredential(i),
@@ -362,9 +366,22 @@ export async function dispatchTool(toolName, input, context = null, opts = {}) {
   // that path too, not because it's load-bearing today.
   if (!opts.bypassApproval && requiresApproval(toolName, input)) {
     const channel = channelOf(context);
-    if (channel && context?.taskType !== 'auto_fix') {
+    const canRequestApproval = channel && context?.taskType !== 'auto_fix';
+    if (canRequestApproval) {
       logger.info('Dispatching tool: gated, requesting approval', { toolName, channel });
       return requestCodeApproval(toolName, input, context, channel);
+    }
+    // Money-moving tools don't get the "no channel = trusted CLI/MCP caller"
+    // exemption above, OR the auto_fix exemption -- checked against
+    // !canRequestApproval (not just !channel) so a future change that ever
+    // adds one of these tools to auto_fix's toolset can't silently combine
+    // with a live channel to slip through both checks at once. See
+    // REFUSE_IF_NO_CHANNEL_TOOL_NAMES's own comment for the real call sites
+    // (found via /code-review) that would otherwise let this execute
+    // completely ungated and unnotified.
+    if (!canRequestApproval && REFUSE_IF_NO_CHANNEL_TOOL_NAMES.has(toolName)) {
+      logger.warn('Dispatching tool: refused, no channel to request approval through', { toolName });
+      return { pendingApproval: true, message: `This action was NOT performed: ${toolName} requires a live Teams or voice conversation to confirm with Michael first, and this call had none. Tell whoever asked that this needs to be requested again from Teams or a phone call.` };
     }
   }
 

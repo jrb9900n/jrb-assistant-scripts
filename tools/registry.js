@@ -1357,11 +1357,14 @@ const FLEETSHARP_TOOLS = [
   },
 ];
 
-// Google Ads reporting — read-only by design (see tools/impl/google-ads.js
-// header). Placed in the same TOOL_MAP slots as FLEETSHARP_TOOLS (report +
-// general) and deliberately left out of 'email'/'employee'/'auto_fix' — those
-// task types process untrusted inbound content or run unattended, and this
-// module touches a live ad-spend account.
+// Google Ads: reporting, plus (as of 2026-09-03) a narrow set of real-money
+// mutate tools -- google_ads_pause_keyword/enable_keyword/
+// adjust_campaign_budget, gated by code-approval.js's CONFIRM_REQUIRED_TOOL_NAMES
+// (see tools/impl/google-ads.js's header for the scope decision). Placed in
+// the same TOOL_MAP slots as FLEETSHARP_TOOLS (report + general) and
+// deliberately left out of 'email'/'employee'/'auto_fix' — those task types
+// process untrusted inbound content or run unattended, and this module
+// touches a live ad-spend account.
 const GOOGLE_ADS_TOOLS = [
   {
     name: 'google_ads_list_campaigns',
@@ -1411,6 +1414,43 @@ const GOOGLE_ADS_TOOLS = [
         endDate: { type: 'string', description: 'End of the range, YYYY-MM-DD' },
       },
       required: ['startDate', 'endDate'],
+    },
+  },
+  {
+    name: 'google_ads_pause_keyword',
+    description: 'Pause a Google Ads keyword — real, immediate, live-money-spending change. Get keywordId from google_ads_get_keyword_performance\'s results (match on campaign+ad group+keyword text, not text alone — the same keyword text can exist in more than one ad group). ALWAYS read back the exact keyword, campaign, and ad group to Michael and get his explicit yes before calling this — never call it speculatively or as part of a "here\'s what I\'d do" suggestion.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        keywordId: { type: 'string', description: 'The criterion ID from google_ads_get_keyword_performance\'s keywordId field.' },
+        reason: { type: 'string', description: 'Why this keyword is being paused — recorded in the Knowledge Log for the weekly pattern synthesis.' },
+      },
+      required: ['keywordId', 'reason'],
+    },
+  },
+  {
+    name: 'google_ads_enable_keyword',
+    description: 'Re-enable a previously paused Google Ads keyword. Same confirmation requirement as google_ads_pause_keyword — read back the exact keyword and get an explicit yes first.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        keywordId: { type: 'string', description: 'The criterion ID from google_ads_get_keyword_performance\'s keywordId field.' },
+        reason: { type: 'string', description: 'Why this keyword is being re-enabled — recorded in the Knowledge Log.' },
+      },
+      required: ['keywordId', 'reason'],
+    },
+  },
+  {
+    name: 'google_ads_adjust_campaign_budget',
+    description: 'Change a Google Ads campaign\'s daily budget — real, immediate, live-money-spending change. Get campaignId from google_ads_list_campaigns. ALWAYS read back the campaign name, current budget, and proposed new budget to Michael and get his explicit yes before calling this — never call it speculatively.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        campaignId: { type: 'string', description: 'The campaign ID from google_ads_list_campaigns\' id field.' },
+        newDailyBudgetUsd: { type: 'number', description: 'The new daily budget in whole/decimal USD, e.g. 120 for $120/day.' },
+        reason: { type: 'string', description: 'Why the budget is changing — recorded in the Knowledge Log for the weekly pattern synthesis.' },
+      },
+      required: ['campaignId', 'newDailyBudgetUsd', 'reason'],
     },
   },
 ];

@@ -50,11 +50,50 @@ function supabase() {
 }
 
 // Tool names that always require confirmation, regardless of input.
+// google_ads_pause_keyword/enable_keyword/adjust_campaign_budget added
+// 2026-09-03 alongside their own build -- same reasoning as this file's
+// header: a tool description telling the model to "always confirm first" is
+// advisory, not enforced, and these three are real, immediate, live-money
+// changes, not code/infra. NOTE: like every other entry in this set, this
+// gate only actually fires when dispatchTool() is called with Teams or voice
+// context (see channelOf() below) -- a call site with no context at all
+// (e.g. scheduler/cron.js's email general-fallback runAgent() call, which
+// passes no `context` param) falls through ungated today. That's a
+// pre-existing gap affecting every tool in this set, not something this
+// change introduces or fixes -- flagged, not silently patched, since closing
+// it means changing this gate's behavior for write_file/github_push/etc.
+// too, a bigger decision than this PR's scope.
 export const CONFIRM_REQUIRED_TOOL_NAMES = new Set([
   'write_file',
   'run_script',
   'github_push',
   'github_merge_pr',
+  'google_ads_pause_keyword',
+  'google_ads_enable_keyword',
+  'google_ads_adjust_campaign_budget',
+]);
+
+// Subset of the set above that must NEVER fall through to executing
+// ungated just because dispatchTool() was called with no Teams/voice
+// context -- see tools/dispatcher.js's channelOf()/gate for the "no context
+// = trusted CLI/MCP caller" assumption this deliberately does NOT extend to.
+// Found live via /code-review 2026-09-03: that assumption is already false
+// for at least three real call sites -- teams/bot.js's employee
+// standing-exception branch (an unverified non-Michael sender), mcp/
+// server.js's run_task tool, and scheduler/cron.js's email general-fallback
+// -- all pass taskType 'general'/'report' with zero context, which is
+// exactly the condition the existing gate treats as exempt. Money-moving
+// tools can't accept that risk the way write_file/run_script/github_* have
+// been (silently, so far) -- refusing outright here is safer than either
+// silently executing or silently pending with no notification. The broader
+// question of whether write_file/run_script/github_push/github_merge_pr
+// should get the same tightening is real and worth its own follow-up, not
+// folded in here since those are established, possibly-relied-upon
+// behavior this change doesn't have full visibility into.
+export const REFUSE_IF_NO_CHANNEL_TOOL_NAMES = new Set([
+  'google_ads_pause_keyword',
+  'google_ads_enable_keyword',
+  'google_ads_adjust_campaign_budget',
 ]);
 
 // vercel_api is one tool name covering several actions via an `action`
@@ -83,7 +122,17 @@ export function requiresApproval(toolName, input) {
 // executed. Falls back to a generic description for anything not
 // explicitly listed rather than throwing, so a future gated tool added to
 // CONFIRM_REQUIRED_TOOL_NAMES without a matching case here still works.
-export function describeAction(toolName, input) {
+//
+// Async (changed 2026-09-03 for the Google Ads cases): a description built
+// purely from the model's raw tool-call input -- a bare numeric keywordId,
+// a new budget number with no current value to compare against -- gives
+// Michael nothing to actually sanity-check before he types "confirm". A
+// typo'd $5000 instead of $500, or the wrong criterion ID entirely, would
+// sail straight through. These two cases now do a best-effort live lookup
+// (google-ads.js's getKeywordById/findCampaignById, both null-safe) so the
+// message shows the real keyword/campaign name and, for budget changes, the
+// current value alongside the proposed one.
+export async function describeAction(toolName, input) {
   switch (toolName) {
     case 'write_file':
       return `Write file: ${input?.path ?? '(unknown path)'}`;
@@ -95,6 +144,29 @@ export function describeAction(toolName, input) {
       return `Merge PR #${input?.pr_number ?? '?'} in ${input?.repo ?? 'jrb-assistant-scripts'}`;
     case 'vercel_api':
       return `Vercel ${input?.action ?? '(unknown action)'} on ${input?.project ?? '(unknown project)'}`;
+    case 'google_ads_pause_keyword':
+    case 'google_ads_enable_keyword': {
+      const verb = toolName === 'google_ads_pause_keyword' ? 'Pause' : 'Re-enable';
+      const { getKeywordById } = await import('./google-ads.js');
+      const kw = await getKeywordById(input?.keywordId);
+      const target = kw
+        ? `"${kw.keyword}" (currently ${kw.status}) in ${kw.campaign} / ${kw.adGroup}`
+        : `keyword ${input?.keywordId ?? '(unknown id)'} (couldn't resolve the keyword text/campaign -- verify the ID before confirming)`;
+      return `${verb} Google Ads keyword ${target} -- ${input?.reason ?? ''}`;
+    }
+    case 'google_ads_adjust_campaign_budget': {
+      const { findCampaignById } = await import('./google-ads.js');
+      const campaign = await findCampaignById(input?.campaignId);
+      const newBudget = input?.newDailyBudgetUsd ?? '?';
+      if (campaign) {
+        const from = campaign.dailyBudgetUsd;
+        const pct = (typeof from === 'number' && from > 0 && typeof newBudget === 'number')
+          ? ` (${newBudget >= from ? '+' : ''}${Math.round((newBudget - from) / from * 100)}%)`
+          : '';
+        return `Set "${campaign.name}"'s daily budget: $${from ?? '?'} → $${newBudget}${pct} -- ${input?.reason ?? ''}`;
+      }
+      return `Set Google Ads campaign ${input?.campaignId ?? '(unknown id)'}'s daily budget to $${newBudget} (couldn't resolve the campaign name/current budget -- verify before confirming) -- ${input?.reason ?? ''}`;
+    }
     default:
       return `${toolName}(${JSON.stringify(input ?? {}).slice(0, 200)})`;
   }
@@ -114,7 +186,7 @@ export function describeAction(toolName, input) {
  */
 export async function requestCodeApproval(toolName, input, context, channel) {
   const db = supabase();
-  const description = describeAction(toolName, input);
+  const description = await describeAction(toolName, input);
 
   // Same stale-cleanup pattern as claude-code-escalation.js -- a session
   // that never resolved an earlier pending action shouldn't pile up
