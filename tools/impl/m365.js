@@ -955,17 +955,22 @@ export async function getSentEmailsTo({ userEmail, recipientAddress, limit = 5 }
 
 export async function getThreadEmails({ userEmail, thread_id, limit = 10 } = {}) {
   const user = userEmail ?? USER();
+  // Graph's /messages endpoint does NOT support combining $filter with $orderby —
+  // doing so produces: 400 "The restriction or sort order is too complex for this operation."
+  // (confirmed 2026-08-26). Drop $orderby here and sort the small result set client-side.
   const data = await graph(
     'GET',
-    `/users/${user}/messages?$filter=conversationId eq '${thread_id}'&$top=${limit}&$select=id,subject,from,sentDateTime,receivedDateTime,conversationId&$orderby=receivedDateTime desc`
+    `/users/${user}/messages?$filter=conversationId eq '${thread_id}'&$top=${limit}&$select=id,subject,from,sentDateTime,receivedDateTime,conversationId`
   );
-  return (data.value ?? []).map(m => ({
-    id:        m.id,
-    from:      m.from?.emailAddress?.address,
-    subject:   m.subject,
-    date:      m.receivedDateTime ?? m.sentDateTime,
-    thread_id: m.conversationId,
-  }));
+  return (data.value ?? [])
+    .map(m => ({
+      id:        m.id,
+      from:      m.from?.emailAddress?.address,
+      subject:   m.subject,
+      date:      m.receivedDateTime ?? m.sentDateTime,
+      thread_id: m.conversationId,
+    }))
+    .sort((a, b) => new Date(b.date) - new Date(a.date)); // desc, same order as old $orderby
 }
 
 // Returns text unchanged if it already ends with "Michael" (case-insensitive, trailing
