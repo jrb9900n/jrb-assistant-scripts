@@ -208,9 +208,27 @@ export function attachAcsMediaSocket(ws, headers) {
     // 'close' callback, and a slow Supabase/Anthropic call shouldn't hold up
     // socket teardown. Reads session.transcript before sessions.remove()
     // below clears the map entry it lives on.
-    finalizeCallMemory(session).catch((err) =>
-      logger.error('Voice bridge: call memory finalize failed', { callConnectionId, err: err.message })
-    );
+    //
+    // Once the call's row actually exists in voice_call_log (only after
+    // finalizeCallMemory's insert resolves -- chained via .then, not run in
+    // parallel, so there's something for it to find), kick off the
+    // call-quality review for this call right away rather than waiting for
+    // the weekly cron -- per Michael's explicit request 2026-09-02 ("I want
+    // the call review to trigger after each call, not once a week"). Also
+    // fire-and-forget for the same reason as finalizeCallMemory above, and
+    // dynamically imported so a normal call's hot path never pays to load
+    // tools/impl/voice-call-review.js's Anthropic-fetch machinery unless a
+    // call actually just ended. The weekly cron registration in
+    // scheduler/cron.js stays in place as a backstop for anything this
+    // inline trigger misses (e.g. a process crash between insert and here).
+    finalizeCallMemory(session)
+      .then(async () => {
+        const { runVoiceCallQualityReview } = await import('../tools/impl/voice-call-review.js');
+        return runVoiceCallQualityReview({ perCall: true });
+      })
+      .catch((err) =>
+        logger.error('Voice bridge: call memory finalize or per-call review failed', { callConnectionId, err: err.message })
+      );
     sessions.remove(callConnectionId);
   });
 

@@ -256,13 +256,25 @@ function formatTeamsSummary({ reviewed, rulesWritten, codeIssues, callsConsidere
 }
 
 /**
- * Entry point for the scheduled task: review new calls, synthesize learnings
- * across recent history, notify Michael with what changed and what still
- * needs a human/dev look. No-ops quietly (no Teams message) if there was
- * nothing new to review at all -- a routine "nothing happened" run isn't
- * worth a notification, same convention as this repo's other quiet crons.
+ * Entry point for both the per-call trigger (voice/acs-call-handler.js, right
+ * after a call ends) and the weekly cron backstop (scheduler/cron.js) --
+ * review new calls, synthesize learnings across recent history, notify
+ * Michael with what changed and what still needs a human/dev look.
+ *
+ * @param {object} [opts]
+ * @param {boolean} [opts.perCall] - true when called right after a single
+ *   call ends rather than on the weekly schedule. Changes notification
+ *   behavior only, not what gets reviewed/synthesized: a Teams message after
+ *   EVERY call, even an unremarkable one, would be exactly the kind of
+ *   notification spam this repo's other crons deliberately avoid (see
+ *   calendar_change_watch's alert-once convention) -- Michael can place
+ *   several calls a day, so per-call mode only notifies when something
+ *   concrete actually surfaced (a new rule or a flagged code issue). The
+ *   weekly run keeps sending a summary either way, same as any other
+ *   scheduled report, since "reviewed N calls, nothing new" once a week is
+ *   expected signal, not noise.
  */
-export async function runVoiceCallQualityReview() {
+export async function runVoiceCallQualityReview({ perCall = false } = {}) {
   const { reviewed, results } = await reviewUnprocessedCalls();
   if (reviewed === 0) {
     logger.info('[voice-call-review] no unreviewed calls');
@@ -271,11 +283,14 @@ export async function runVoiceCallQualityReview() {
 
   const { rulesWritten, codeIssues, callsConsidered } = await synthesizeVoiceCallLearnings();
 
-  logger.info('[voice-call-review] run complete', { reviewed, rulesWritten, codeIssueCount: codeIssues.length });
+  logger.info('[voice-call-review] run complete', { reviewed, rulesWritten, codeIssueCount: codeIssues.length, perCall });
 
-  await sendProactiveMessage(formatTeamsSummary({ reviewed, rulesWritten, codeIssues, callsConsidered }), {
-    target: 'michael',
-  }).catch((err) => logger.warn('[voice-call-review] Teams notify failed', { err: err.message }));
+  const hasSomethingToReport = rulesWritten > 0 || codeIssues?.length > 0;
+  if (!perCall || hasSomethingToReport) {
+    await sendProactiveMessage(formatTeamsSummary({ reviewed, rulesWritten, codeIssues, callsConsidered }), {
+      target: 'michael',
+    }).catch((err) => logger.warn('[voice-call-review] Teams notify failed', { err: err.message }));
+  }
 
   return { reviewed, rulesWritten, codeIssues, results };
 }
