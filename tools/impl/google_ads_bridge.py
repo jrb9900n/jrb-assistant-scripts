@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Read-only Google Ads API bridge, invoked by tools/impl/google-ads.js.
+"""Google Ads API bridge (reporting + a narrow set of mutate operations),
+invoked by tools/impl/google-ads.js.
 
 Google's REST interface for the Ads API 404s ("Method not found") on every
 canonical method as of 2026-08-26 -- confirmed live against a real OAuth
@@ -233,6 +234,37 @@ def adjust_campaign_budget(client, args):
         old_budget_micros = row.campaign_budget.amount_micros
     if not budget_resource:
         raise ValueError(f"No campaign found with id {campaign_id}")
+
+    # A campaign_budget resource can be shared across more than one campaign
+    # (a legitimate, common Google Ads setup) -- mutating it by resource_name
+    # would silently change another campaign's spend cap too, with nothing in
+    # the confirmation Michael saw (code-approval.js's describeAction only
+    # names the one campaign requested) hinting that was about to happen. No
+    # override flag here on purpose -- the model's tool_use input isn't a
+    # trusted channel (whatever it passes gets stored verbatim and replayed
+    # as-is once Michael confirms, see code-approval.js's
+    # executeApprovedAction), so a bypass flag would just be something the
+    # model could set on the very first call, before any real human ever saw
+    # this warning. A genuinely-wanted shared-budget change is a manual Ads
+    # UI action, not this tool.
+    sharing_query = f"""
+        SELECT campaign.id, campaign.name
+        FROM campaign
+        WHERE campaign_budget.resource_name = '{budget_resource}'
+        AND campaign.status != 'REMOVED'
+    """
+    sharing_campaigns = [
+        {"id": str(r.campaign.id), "name": r.campaign.name}
+        for r in ga_service.search(customer_id=CUSTOMER_ID, query=sharing_query)
+    ]
+    other_campaigns = [c for c in sharing_campaigns if c["id"] != campaign_id]
+    if other_campaigns:
+        names = ", ".join(f'{c["name"]} (id {c["id"]})' for c in other_campaigns)
+        raise ValueError(
+            f"Campaign {campaign_id}'s budget is shared with {len(other_campaigns)} other campaign(s): "
+            f"{names}. Changing it would change their daily budget too -- this tool refuses shared-budget "
+            f"changes; do this manually in the Ads UI if it's genuinely intended."
+        )
 
     budget_service = client.get_service("CampaignBudgetService")
     budget_op = client.get_type("CampaignBudgetOperation")

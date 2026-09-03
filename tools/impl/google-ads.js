@@ -93,6 +93,13 @@ export async function adjustCampaignBudget({ campaignId, newDailyBudgetUsd, reas
     throw new Error('adjustCampaignBudget requires a positive newDailyBudgetUsd');
   }
   if (!reason) throw new Error('adjustCampaignBudget requires reason (for the Knowledge Log / audit trail)');
+  // No override for the shared-budget check google_ads_bridge.py's
+  // adjust_campaign_budget does before mutating, deliberately -- the model's
+  // tool_use input isn't a trusted channel (see dispatchTool()'s own JSDoc),
+  // so any override flag here would just be something the model could set
+  // on its very first call, before Michael ever saw a shared-budget warning
+  // to confirm. If a shared-budget change is ever genuinely wanted, that's
+  // a manual Ads UI action, not this tool.
   const result = await runBridge('adjust_campaign_budget', { campaignId, newDailyBudgetUsd, reason });
   logObservation({ agentName: 'google_ads', actionTaken: `Changed campaign ${campaignId} daily budget to $${newDailyBudgetUsd}`, rawContext: reason })
     .catch(err => logger.warn("google-ads: logObservation failed (non-fatal)", { err: err.message }));
