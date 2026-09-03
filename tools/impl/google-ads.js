@@ -62,6 +62,31 @@ export async function getLeadConversions({ nameContains, startDate, endDate } = 
   return runBridge('get_lead_conversions', { nameContains, startDate, endDate });
 }
 
+// Read-only, best-effort lookup by exact ID -- used by code-approval.js to
+// build a confirmation message Michael can actually sanity-check (keyword
+// text/campaign/ad group, not a bare numeric ID), not by any tool schema.
+// Returns null rather than throwing on any failure -- a lookup that can't
+// resolve shouldn't block the approval flow, just fall back to a plainer message.
+export async function getKeywordById(keywordId) {
+  try {
+    const result = await runBridge('get_keyword_by_id', { keywordId });
+    return result ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Same best-effort contract as getKeywordById, for showing Michael the
+// current budget alongside the proposed new one.
+export async function findCampaignById(campaignId) {
+  try {
+    const campaigns = await listCampaigns({});
+    return campaigns.find(c => c.id === String(campaignId)) ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // ── Mutate operations (real-money actions -- see the 2026-09-03 scope
 // decision in this file's header) ────────────────────────────────────────
 

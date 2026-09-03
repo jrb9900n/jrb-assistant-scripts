@@ -210,6 +210,35 @@ def _keyword_resource_name(ga_service, keyword_id):
     return rows[0].ad_group_criterion.resource_name
 
 
+def get_keyword_by_id(client, args):
+    # Read-only lookup by exact criterion_id -- used by code-approval.js to
+    # show Michael the actual keyword text/campaign/ad group/status in the
+    # confirmation message instead of a bare numeric ID he has no way to
+    # sanity-check against. Returns null (not an error) when not found or
+    # ambiguous, so the confirmation message can fall back to the raw ID
+    # rather than blocking on this best-effort lookup.
+    keyword_id = args.get("keywordId", "")
+    if not str(keyword_id).isdigit():
+        return None
+    ga_service = client.get_service("GoogleAdsService")
+    query = f"""
+        SELECT ad_group_criterion.keyword.text, ad_group_criterion.status,
+               campaign.name, ad_group.name
+        FROM ad_group_criterion
+        WHERE ad_group_criterion.criterion_id = {keyword_id}
+    """
+    rows = list(ga_service.search(customer_id=CUSTOMER_ID, query=query))
+    if len(rows) != 1:
+        return None
+    r = rows[0]
+    return {
+        "keyword": r.ad_group_criterion.keyword.text,
+        "status": r.ad_group_criterion.status.name,
+        "campaign": r.campaign.name,
+        "adGroup": r.ad_group.name,
+    }
+
+
 def _set_keyword_status(client, args, status):
     keyword_id = args["keywordId"]
     ga_service = client.get_service("GoogleAdsService")
@@ -322,6 +351,7 @@ COMMANDS = {
     "get_campaign_metrics": get_campaign_metrics,
     "get_keyword_performance": get_keyword_performance,
     "get_lead_conversions": get_lead_conversions,
+    "get_keyword_by_id": get_keyword_by_id,
     "pause_keyword": pause_keyword,
     "enable_keyword": enable_keyword,
     "adjust_campaign_budget": adjust_campaign_budget,

@@ -122,7 +122,17 @@ export function requiresApproval(toolName, input) {
 // executed. Falls back to a generic description for anything not
 // explicitly listed rather than throwing, so a future gated tool added to
 // CONFIRM_REQUIRED_TOOL_NAMES without a matching case here still works.
-export function describeAction(toolName, input) {
+//
+// Async (changed 2026-09-03 for the Google Ads cases): a description built
+// purely from the model's raw tool-call input -- a bare numeric keywordId,
+// a new budget number with no current value to compare against -- gives
+// Michael nothing to actually sanity-check before he types "confirm". A
+// typo'd $5000 instead of $500, or the wrong criterion ID entirely, would
+// sail straight through. These two cases now do a best-effort live lookup
+// (google-ads.js's getKeywordById/findCampaignById, both null-safe) so the
+// message shows the real keyword/campaign name and, for budget changes, the
+// current value alongside the proposed one.
+export async function describeAction(toolName, input) {
   switch (toolName) {
     case 'write_file':
       return `Write file: ${input?.path ?? '(unknown path)'}`;
@@ -135,11 +145,28 @@ export function describeAction(toolName, input) {
     case 'vercel_api':
       return `Vercel ${input?.action ?? '(unknown action)'} on ${input?.project ?? '(unknown project)'}`;
     case 'google_ads_pause_keyword':
-      return `Pause Google Ads keyword ${input?.keywordId ?? '(unknown id)'} -- ${input?.reason ?? ''}`;
-    case 'google_ads_enable_keyword':
-      return `Re-enable Google Ads keyword ${input?.keywordId ?? '(unknown id)'} -- ${input?.reason ?? ''}`;
-    case 'google_ads_adjust_campaign_budget':
-      return `Set Google Ads campaign ${input?.campaignId ?? '(unknown id)'}'s daily budget to $${input?.newDailyBudgetUsd ?? '?'} -- ${input?.reason ?? ''}`;
+    case 'google_ads_enable_keyword': {
+      const verb = toolName === 'google_ads_pause_keyword' ? 'Pause' : 'Re-enable';
+      const { getKeywordById } = await import('./google-ads.js');
+      const kw = await getKeywordById(input?.keywordId);
+      const target = kw
+        ? `"${kw.keyword}" (currently ${kw.status}) in ${kw.campaign} / ${kw.adGroup}`
+        : `keyword ${input?.keywordId ?? '(unknown id)'} (couldn't resolve the keyword text/campaign -- verify the ID before confirming)`;
+      return `${verb} Google Ads keyword ${target} -- ${input?.reason ?? ''}`;
+    }
+    case 'google_ads_adjust_campaign_budget': {
+      const { findCampaignById } = await import('./google-ads.js');
+      const campaign = await findCampaignById(input?.campaignId);
+      const newBudget = input?.newDailyBudgetUsd ?? '?';
+      if (campaign) {
+        const from = campaign.dailyBudgetUsd;
+        const pct = (typeof from === 'number' && from > 0 && typeof newBudget === 'number')
+          ? ` (${newBudget >= from ? '+' : ''}${Math.round((newBudget - from) / from * 100)}%)`
+          : '';
+        return `Set "${campaign.name}"'s daily budget: $${from ?? '?'} → $${newBudget}${pct} -- ${input?.reason ?? ''}`;
+      }
+      return `Set Google Ads campaign ${input?.campaignId ?? '(unknown id)'}'s daily budget to $${newBudget} (couldn't resolve the campaign name/current budget -- verify before confirming) -- ${input?.reason ?? ''}`;
+    }
     default:
       return `${toolName}(${JSON.stringify(input ?? {}).slice(0, 200)})`;
   }
@@ -159,7 +186,7 @@ export function describeAction(toolName, input) {
  */
 export async function requestCodeApproval(toolName, input, context, channel) {
   const db = supabase();
-  const description = describeAction(toolName, input);
+  const description = await describeAction(toolName, input);
 
   // Same stale-cleanup pattern as claude-code-escalation.js -- a session
   // that never resolved an earlier pending action shouldn't pile up
