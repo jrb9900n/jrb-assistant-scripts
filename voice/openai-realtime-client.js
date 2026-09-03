@@ -210,6 +210,25 @@ export async function connectRealtimeSession({ session, hangUp }) {
   // parallel with createResponse().
   if (session.authState === 'verified') {
     session._pendingUnlock = () => runUnlockWithRetry(session, ws);
+    // Watchdog fallback -- found via /code-review: if the greeting's
+    // response.done never arrives (socket error/close mid-generation, or
+    // any other way the normal trigger below could be missed), the trusted
+    // caller would otherwise stay tool-less for the entire call with
+    // nothing to recover it. Same "primary path + independent timeout
+    // safety net" idiom this codebase already uses elsewhere (e.g.
+    // scheduler/cron.js's cron_missed_fire_watchdog). A greeting turn is
+    // short; 6s is generous margin without leaving a real failure
+    // unrecovered for long. Harmless if response.done fires first -- that
+    // handler clears session._pendingUnlock before invoking it, so this
+    // timeout finds nothing left to do.
+    setTimeout(() => {
+      if (session._pendingUnlock) {
+        logger.warn('Voice bridge: response.done never arrived for trusted-caller greeting, running unlock via watchdog', { callId: session.callConnectionId });
+        const runUnlock = session._pendingUnlock;
+        session._pendingUnlock = null;
+        runUnlock();
+      }
+    }, 6000);
   }
 
   // Output only ever happens in response to a turn (VAD-detected end of
@@ -415,7 +434,12 @@ async function handleTranscript(session, ws, transcript, hangUp) {
   const storedPin = process.env.VOICE_CALL_PIN;
   if (matchSpokenPin(transcript, storedPin)) {
     session.authState = 'verified';
-    await unlockVerifiedSession(session, ws);
+    // runUnlockWithRetry (not a bare unlockVerifiedSession call) -- found via
+    // /code-review: this path had the exact same single-point-of-failure
+    // exposure the trusted-caller path was given retry protection for (no
+    // later PIN check to fall back on if the trailing ws.send throws), just
+    // never noticed because this call site predates that path.
+    await runUnlockWithRetry(session, ws);
     logger.info('Voice bridge: caller PIN verified', { callId: session.callConnectionId });
     return;
   }
