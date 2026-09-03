@@ -24,6 +24,24 @@ function create(callConnectionId, initial = {}) {
     // handleTranscript), so a spoken PIN attempt never lands in here.
     startedAt: new Date().toISOString(),
     transcript: [],
+    // Per-tool-call record for voice/call-memory.js + voice-call-review.js --
+    // {name, args, success, error, latencyMs, at}. Populated in
+    // openai-realtime-client.js's handleFunctionCall, regardless of
+    // authState (though nothing reaches there pre-verification -- see the
+    // belt-and-suspenders check in handleFunctionCall itself).
+    toolCalls: [],
+    // True while an OpenAI Realtime response is in flight (from the moment
+    // this bridge sends response.create until that response's response.done
+    // arrives) -- see openai-realtime-client.js's createResponse(). Used to
+    // avoid firing a "give me a second" filler on top of an already-active
+    // response, which the Realtime API is expected to reject.
+    responseActive: false,
+    // Identity marker for whichever media WebSocket is currently live for
+    // this call -- see acs-call-handler.js's attachAcsMediaSocket(). A
+    // reconnect replaces this with the new ws; the OLD ws's eventual close
+    // event checks against this to tell "this call really ended" apart from
+    // "the socket that got replaced is finally tearing down."
+    _activeMediaWs: null,
   };
   sessions.set(callConnectionId, state);
   return state;

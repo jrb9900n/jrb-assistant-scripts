@@ -41,7 +41,7 @@ export async function loadRecentCallContext() {
  */
 export async function finalizeCallMemory(session) {
   if (!session?.transcript?.length) return;
-  const { callConnectionId, fromNumber, transcript, startedAt } = session;
+  const { callConnectionId, fromNumber, transcript, startedAt, toolCalls } = session;
 
   const { error } = await supabase.from('voice_call_log').insert({
     call_connection_id: callConnectionId,
@@ -49,6 +49,7 @@ export async function finalizeCallMemory(session) {
     started_at: startedAt,
     ended_at: new Date().toISOString(),
     transcript,
+    tool_calls: toolCalls ?? [],
   });
   if (error) {
     logger.warn('Voice bridge: call transcript save failed', { err: error.message, callConnectionId });
