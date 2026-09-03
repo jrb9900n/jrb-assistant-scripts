@@ -366,15 +366,20 @@ export async function dispatchTool(toolName, input, context = null, opts = {}) {
   // that path too, not because it's load-bearing today.
   if (!opts.bypassApproval && requiresApproval(toolName, input)) {
     const channel = channelOf(context);
-    if (channel && context?.taskType !== 'auto_fix') {
+    const canRequestApproval = channel && context?.taskType !== 'auto_fix';
+    if (canRequestApproval) {
       logger.info('Dispatching tool: gated, requesting approval', { toolName, channel });
       return requestCodeApproval(toolName, input, context, channel);
     }
     // Money-moving tools don't get the "no channel = trusted CLI/MCP caller"
-    // exemption above -- see REFUSE_IF_NO_CHANNEL_TOOL_NAMES's own comment
-    // for the real call sites (found via /code-review) that would otherwise
-    // let this execute completely ungated and unnotified.
-    if (!channel && REFUSE_IF_NO_CHANNEL_TOOL_NAMES.has(toolName)) {
+    // exemption above, OR the auto_fix exemption -- checked against
+    // !canRequestApproval (not just !channel) so a future change that ever
+    // adds one of these tools to auto_fix's toolset can't silently combine
+    // with a live channel to slip through both checks at once. See
+    // REFUSE_IF_NO_CHANNEL_TOOL_NAMES's own comment for the real call sites
+    // (found via /code-review) that would otherwise let this execute
+    // completely ungated and unnotified.
+    if (!canRequestApproval && REFUSE_IF_NO_CHANNEL_TOOL_NAMES.has(toolName)) {
       logger.warn('Dispatching tool: refused, no channel to request approval through', { toolName });
       return { pendingApproval: true, message: `This action was NOT performed: ${toolName} requires a live Teams or voice conversation to confirm with Michael first, and this call had none. Tell whoever asked that this needs to be requested again from Teams or a phone call.` };
     }
