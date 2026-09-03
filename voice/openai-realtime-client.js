@@ -18,10 +18,31 @@ import { logger } from '../core/logger.js';
 import { matchSpokenPin } from './call-auth.js';
 import { buildVoiceToolSchema, handleVoiceToolCall } from './tool-bridge.js';
 import { loadRecentCallContext } from './call-memory.js';
+import { buildContextBlock } from '../tools/impl/feedback.js';
 
 const REALTIME_URL = 'wss://api.openai.com/v1/realtime?model=gpt-realtime';
 const PIN_MAX_ATTEMPTS = 3;
 const VOICE = 'alloy';
+
+// How long a tool call is allowed to run silently before the assistant says
+// something -- see scheduleFillerIfSlow() below. Built in response to
+// real feedback (2026-09-02): the assistant goes fully silent on a slow
+// tool call (e.g. a wide SA client search, a FleetSharp fetch) with zero
+// acknowledgment, which reads as a dead line rather than "still working on
+// it." Two tiers so a call that's taking unusually long gets a distinct,
+// apologetic second filler rather than repeating the first one verbatim.
+const FILLER_FIRST_MS = 1200;
+const FILLER_SECOND_MS = 5000;
+const FILLER_PHRASES_FIRST = [
+  'One moment, let me check that.',
+  'Give me just a second.',
+  'Okay, let me pull that up.',
+];
+const FILLER_PHRASES_SECOND = [
+  'Sorry, still working on that -- just a few more seconds.',
+  "This one's taking a bit longer than usual, bear with me.",
+  'Almost there, thanks for your patience.',
+];
 
 const PIN_GATE_PROMPT = `You are JRB's executive assistant, answering a live phone call.
 Before discussing anything else, greet the caller briefly and ask them to say their PIN.
@@ -85,6 +106,50 @@ function audioSessionConfig(instructions, tools) {
   return session;
 }
 
+// Centralizes every response.create send so session.responseActive stays
+// accurate -- scheduleFillerIfSlow() below relies on it to avoid firing a
+// filler on top of an already-active response (the Realtime API is expected
+// to reject overlapping responses on one conversation).
+function createResponse(ws, session, response) {
+  session.responseActive = true;
+  const payload = { type: 'response.create' };
+  if (response) payload.response = response;
+  ws.send(JSON.stringify(payload));
+}
+
+// Speaks a short, contextless acknowledgment if a tool call is still
+// pending past FILLER_FIRST_MS, and a distinct apologetic one past
+// FILLER_SECOND_MS -- see the constants' own comment above for why. Skips
+// silently (rather than forcing the filler through) if a response is
+// already active when a timer fires, since the two are not expected to be
+// safely combinable. Not yet verified against a real call -- if OpenAI's
+// Realtime API rejects a response.create sent this soon after the previous
+// response.done (e.g. some minimum turnaround requirement), the timer's
+// `ws.send` would still fire but produce a logged 'error' event rather than
+// audio; the real tool-call flow below is unaffected either way since it
+// doesn't wait on these fillers.
+function scheduleFillerIfSlow(ws, session, callId) {
+  let settled = false;
+  const timers = [
+    setTimeout(() => {
+      if (settled || session.responseActive) return;
+      const phrase = FILLER_PHRASES_FIRST[Math.floor(Math.random() * FILLER_PHRASES_FIRST.length)];
+      logger.info('Voice bridge: slow tool call, sending first filler', { callId });
+      createResponse(ws, session, { instructions: `Say exactly, naturally: "${phrase}" -- nothing else.` });
+    }, FILLER_FIRST_MS),
+    setTimeout(() => {
+      if (settled || session.responseActive) return;
+      const phrase = FILLER_PHRASES_SECOND[Math.floor(Math.random() * FILLER_PHRASES_SECOND.length)];
+      logger.info('Voice bridge: slow tool call, sending second filler', { callId });
+      createResponse(ws, session, { instructions: `Say exactly, naturally: "${phrase}" -- nothing else.` });
+    }, FILLER_SECOND_MS),
+  ];
+  return () => {
+    settled = true;
+    timers.forEach(clearTimeout);
+  };
+}
+
 /**
  * @param {object} opts
  * @param {object} opts.session - the call's session-state.js record (mutated in place:
@@ -107,7 +172,7 @@ export async function connectRealtimeSession({ session, hangUp }) {
   // caller speech) or an explicit response.create -- without this, the
   // model's "greet the caller" instruction would never actually produce
   // audio until the caller spoke first, leaving a silent, confusing line.
-  ws.send(JSON.stringify({ type: 'response.create' }));
+  createResponse(ws, session);
 
   // The `ws.once('error', reject)` registered above for the initial connect
   // race stays attached afterward too (it only unregisters once fired), so
@@ -151,6 +216,13 @@ export async function connectRealtimeSession({ session, hangUp }) {
     }
 
     if (evt.type === 'response.done') {
+      // Clear before anything else below -- a filler timer racing this
+      // event should see the response as no-longer-active as soon as
+      // possible, and the function-call handling further down can itself
+      // send a new response (the filler-acknowledgment one), which must
+      // start from a clean 'not active' state.
+      session.responseActive = false;
+
       // Per OpenAI's own documented pattern, the function name only
       // reliably appears on the completed response's output items
       // (response.done -> response.output[].name), not on
@@ -233,11 +305,27 @@ async function handleTranscript(session, ws, transcript, hangUp) {
     // off instead of starting from zero every time. Awaited before the
     // session.update so it's part of the model's instructions from its very
     // first post-PIN response, not raced in afterward.
-    const recentContext = await loadRecentCallContext().catch((err) => {
-      logger.warn('Voice bridge: loadRecentCallContext failed, continuing without it', { callId: session.callConnectionId, err: err.message });
-      return '';
-    });
-    const instructions = recentContext ? `${VOICE_SYSTEM_PROMPT}\n\n${recentContext}` : VOICE_SYSTEM_PROMPT;
+    //
+    // buildContextBlock('voice') pulls the same standing-rules mechanism
+    // Teams already uses (tools/impl/feedback.js) -- added 2026-09-02.
+    // Before this, voice-call-review.js's synthesized rules (agent: 'voice')
+    // had nowhere to actually take effect: this channel built its system
+    // prompt from VOICE_SYSTEM_PROMPT + recentContext only, never touching
+    // the `rules` table at all. getRulesForAgent('voice') also picks up any
+    // row tagged 'general'/'all', so a correction given on Teams can shape
+    // voice behavior too, same as the reverse already worked via
+    // loadRecentCallContext's shared agent_memory.
+    const [recentContext, rulesContext] = await Promise.all([
+      loadRecentCallContext().catch((err) => {
+        logger.warn('Voice bridge: loadRecentCallContext failed, continuing without it', { callId: session.callConnectionId, err: err.message });
+        return '';
+      }),
+      buildContextBlock('voice').catch((err) => {
+        logger.warn('Voice bridge: buildContextBlock failed, continuing without it', { callId: session.callConnectionId, err: err.message });
+        return '';
+      }),
+    ]);
+    const instructions = `${VOICE_SYSTEM_PROMPT}${rulesContext}${recentContext ? `\n\n${recentContext}` : ''}`;
     ws.send(JSON.stringify({
       type: 'session.update',
       session: audioSessionConfig(instructions, buildVoiceToolSchema()),
@@ -267,7 +355,7 @@ async function handleFunctionCall(session, ws, evt) {
       type: 'conversation.item.create',
       item: { type: 'function_call_output', call_id: evt.call_id, output: JSON.stringify({ error: 'Not authorized yet.' }) },
     }));
-    ws.send(JSON.stringify({ type: 'response.create' }));
+    createResponse(ws, session);
     return;
   }
 
@@ -278,15 +366,33 @@ async function handleFunctionCall(session, ws, evt) {
   // handlers like book_time_with_michael read sender.isMichael directly --
   // a bare string here would make sender.isMichael undefined, misclassifying
   // Michael himself as a non-Michael employee requester.
+  const startedAt = Date.now();
+  const cancelFillers = scheduleFillerIfSlow(ws, session, session.callConnectionId);
   const result = await handleVoiceToolCall(evt.name, evt.arguments, {
     sender: { isMichael: true, aadId: null, name: 'Michael Reardon', email: 'michael@jrboehlke.com', employeeId: null },
     callId: session.callConnectionId,
     fromNumber: session.fromNumber,
+  });
+  cancelFillers();
+
+  // For voice-call-review.js -- see that file and the migration adding this
+  // column for why raw tool outcomes (not just spoken transcript text) are
+  // needed to actually diagnose data-access failures and real latency.
+  // evt.arguments is the raw JSON string OpenAI sent; kept as-is (not
+  // re-parsed) since handleVoiceToolCall already tolerates malformed JSON
+  // and a parse failure here shouldn't be able to break call-logging.
+  session.toolCalls?.push({
+    name: evt.name,
+    args: evt.arguments,
+    success: !result?.error,
+    error: result?.error ?? null,
+    latencyMs: Date.now() - startedAt,
+    at: new Date().toISOString(),
   });
 
   ws.send(JSON.stringify({
     type: 'conversation.item.create',
     item: { type: 'function_call_output', call_id: evt.call_id, output: JSON.stringify(result) },
   }));
-  ws.send(JSON.stringify({ type: 'response.create' }));
+  createResponse(ws, session);
 }

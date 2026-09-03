@@ -113,6 +113,29 @@ export function attachAcsMediaSocket(ws, headers) {
     return;
   }
 
+  // A second media-socket attach for a call that already has one is a
+  // RECONNECT (ACS re-establishing the stream after a network blip, or a
+  // duplicate/retried delivery on ACS's side), not a fresh call. Before this
+  // fix, every attach unconditionally called connectRealtimeSession() below,
+  // which always opens a brand-new OpenAI Realtime session primed with the
+  // PIN-gate prompt -- regardless of session.authState already being
+  // 'verified'. Confirmed live 2026-09-02 on two separate real calls: the
+  // caller was suddenly asked to say the PIN again mid-conversation, and the
+  // model's own conversational context reset (no memory of anything
+  // discussed so far in the call), because it really was starting over from
+  // a fresh, un-primed OpenAI session -- even though this file's own
+  // session-state.js record correctly still said 'verified' the whole time.
+  // Fix: only start a new Realtime session if this call doesn't have one
+  // yet; a reconnect just rewires the audio-out path onto the new socket and
+  // keeps using the existing (already-verified, already has conversation
+  // history) OpenAI session untouched.
+  const isReconnect = !!session.openaiClient;
+
+  // Identity check for the close handler below -- see its own comment for
+  // why a stale socket's close must not tear down a call that's already
+  // live again on a newer one.
+  session._activeMediaWs = ws;
+
   session.wsToAcs = {
     sendAudioOut: (base64pcm) => {
       if (ws.readyState !== ws.OPEN) return;
@@ -156,6 +179,16 @@ export function attachAcsMediaSocket(ws, headers) {
   });
 
   ws.on('close', () => {
+    // A stale socket from BEFORE a reconnect closing later must not tear
+    // down a call that's already live again on a newer socket -- without
+    // this check, the reconnect fix above would still be undermined: the
+    // old socket's belated close would call sessions.remove() and finalize
+    // the call out from under the still-ongoing conversation on the new one.
+    if (session._activeMediaWs !== ws) {
+      logger.info('Voice bridge: stale media socket closed post-reconnect, ignoring', { callConnectionId });
+      return;
+    }
+
     // Primary cleanup path, not just a backstop: confirmed live 2026-08-26
     // that handleCallbackEvent's 'Microsoft.Communication.CallDisconnected'
     // branch (the intended cleanup trigger -- closes openaiClient AND
@@ -184,6 +217,11 @@ export function attachAcsMediaSocket(ws, headers) {
   ws.on('error', (err) => {
     logger.error('Voice bridge: ACS media socket error', { callConnectionId, err: err.message });
   });
+
+  if (isReconnect) {
+    logger.info('Voice bridge: media socket reconnected mid-call, keeping existing Realtime session', { callConnectionId });
+    return;
+  }
 
   connectRealtimeSession({ session, hangUp: () => hangUpCall(callConnectionId) })
     .then((client) => { session.openaiClient = client; })
