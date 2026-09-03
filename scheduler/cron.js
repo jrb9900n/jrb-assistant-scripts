@@ -2927,11 +2927,16 @@ ${EA_REPLY_STYLE}`;
     },
   },
   {
-    // Weekly, Sunday 9 PM -- after a week of real calls have accumulated,
-    // review every not-yet-reviewed voice_call_log row and synthesize
-    // durable behavior changes into the `rules` table (agent: 'voice').
-    // Quiet time slot, deliberately outside the crowded 6-8 AM daily
-    // cluster and away from any other weekly task's exact minute.
+    // BACKSTOP, not the primary trigger (as of 2026-09-02): each call now
+    // triggers its own review immediately when it ends (see
+    // voice/acs-call-handler.js's ws.on('close') handler), per Michael's
+    // explicit request to not wait a week. This weekly Sunday 9 PM sweep
+    // still exists to catch anything the inline trigger missed -- e.g. a
+    // process crash between finalizeCallMemory's insert and the review call
+    // -- same defense-in-depth posture as cron_missed_fire_watchdog backing
+    // up recoverMissedExecutions elsewhere in this file. Quiet time slot,
+    // deliberately outside the crowded 6-8 AM daily cluster and away from
+    // any other weekly task's exact minute.
     // See tools/impl/voice-call-review.js for the full design and why
     // code-level findings are flagged to Michael rather than auto-applied.
     schedule: '0 21 * * 0',
