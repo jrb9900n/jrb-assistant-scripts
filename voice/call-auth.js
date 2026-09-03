@@ -31,15 +31,18 @@ function checkCallerAllowlist(fromE164) {
 }
 
 // Confirmed by Michael 2026-09-03: calls from this number skip the spoken-PIN
-// challenge outright. Not sourced from Credential Manager like
-// VOICE_ALLOWED_CALLER_IDS/VOICE_CALL_PIN -- it's not a secret, it's a phone
-// number, and hardcoding it here (rather than another env var) makes the
-// bypass grep-able and obvious to the next person reading this file, instead
-// of one more opaque entry in an env-var list that reads like the merely-
-// advisory allowlist above.
-const TRUSTED_NO_PIN_CALLER_ID = '+14146593840';
+// challenge outright. Sourced from VOICE_TRUSTED_NO_PIN_CALLER_ID env var
+// rather than hardcoded -- the number is not secret, but keeping it out of
+// source/git history means it can be rotated (number ported, reassigned, etc.)
+// without a code change and without permanently granting bypass to a future
+// owner of a stale number in git history. Set this in the same secrets store
+// as VOICE_ALLOWED_CALLER_IDS / VOICE_CALL_PIN.
+// If the env var is not set, isTrustedNoPinCallerId() always returns false
+// (safe default: no bypass).
+const TRUSTED_NO_PIN_CALLER_ID = (process.env.VOICE_TRUSTED_NO_PIN_CALLER_ID || '').trim();
 
 function isTrustedNoPinCallerId(fromE164) {
+  if (!TRUSTED_NO_PIN_CALLER_ID) return false;
   return fromE164 === TRUSTED_NO_PIN_CALLER_ID;
 }
 
