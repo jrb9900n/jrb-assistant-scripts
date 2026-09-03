@@ -806,30 +806,54 @@ export async function processVendorEmailReceipt(email, { listEmailAttachments, g
     report = vendorMatch;
   }
 
-  // Prefer an actual attachment (PDF/image) if the vendor sent one; otherwise save the HTML body as the receipt.
   const attachments = await listEmailAttachments({ email_id: email.id, userEmail });
   const receiptAttachment = attachments.find(a => RECEIPT_MIME_TYPES.has(a.contentType?.toLowerCase()));
 
-  let storagePath;
-  if (receiptAttachment) {
-    const bytes = await getEmailAttachmentBytes({ email_id: email.id, attachment_id: receiptAttachment.id, userEmail });
-    const ext = receiptAttachment.name?.split('.').pop() || 'jpg';
-    storagePath = `${report.id}/${Date.now()}-vendor-email.${ext}`;
-    const { error: uploadErr } = await supabase.storage
-      .from('expense-receipts')
-      .upload(storagePath, bytes, { contentType: receiptAttachment.contentType, upsert: false });
-    if (uploadErr) { logger.error('processVendorEmailReceipt: attachment upload failed', { err: uploadErr.message, reportId: report.id }); return true; }
-  } else {
-    if (!bodyText) {
-      const full = await getEmail({ email_id: email.id, userEmail });
-      bodyText = full.body ?? '';
-    }
-    storagePath = `${report.id}/${Date.now()}-vendor-email.html`;
-    const { error: uploadErr } = await supabase.storage
-      .from('expense-receipts')
-      .upload(storagePath, Buffer.from(bodyText, 'utf8'), { contentType: 'text/html', upsert: false });
-    if (uploadErr) { logger.error('processVendorEmailReceipt: body upload failed', { err: uploadErr.message, reportId: report.id }); return true; }
+  // Only ever attach a real attachment (PDF/image) -- never any longer tries
+  // to save the raw HTML body as a "receipt." That fallback (removed here)
+  // could never have worked: expense-receipts' bucket policy only allows
+  // image/jpeg,png,webp,heic,heif + application/pdf (confirmed live
+  // 2026-09-03 via storage.getBucket -- CLAUDE.md's own "image/* + PDF"
+  // description was aspirational, not actual; text/html was never in the
+  // real allowed_mime_types list since the bucket was created). Every prior
+  // call into this branch logged "body upload failed: mime type text/html
+  // is not supported" and returned true anyway -- silently marking the
+  // source email read/handled with no receipt ever attached to the report,
+  // and no visible sign anything was wrong beyond a log line. Skipping
+  // cleanly (matching processEmailedReceipt's own "no attachment = not a
+  // receipt we can use" behavior above) is honest about what this function
+  // can actually do, instead of leaving broken code that always errors.
+  //
+  // Note this also fixes a second, more consequential bug the same
+  // investigation found: RECEIPT_MIME_TYPES already includes
+  // 'application/pdf', but the bucket's real allowed_mime_types never did
+  // (fixed live via storage.updateBucket, 2026-09-03) -- a genuine vendor
+  // PDF receipt attachment, and processEmailedReceipt's own PDF path above,
+  // would have silently failed to upload the exact same way.
+  if (!receiptAttachment) {
+    // Return true (mark the source email read), not false -- found via
+    // /code-review: a candidate report was already matched by amount/date/
+    // vendor above, and that match won't change on a later poll (no
+    // attachment isn't going to appear on a re-read of the same email).
+    // Returning false here would leave the email unread forever, since
+    // email_poller (scheduler/cron.js) only calls markEmailRead when this
+    // returns true -- re-running the exact same match query and logging
+    // the exact same "no usable attachment" line every 5 minutes,
+    // indefinitely, instead of once. The report itself is unaffected
+    // either way (receipt_path stays null, still completable via the
+    // normal SMS/portal flow) -- this is just a best-effort auto-attach
+    // that had nothing to attach.
+    logger.info('processVendorEmailReceipt: matched a report but no usable attachment, leaving receipt_path unset', { reportId: report.id, from: email.from });
+    return true;
   }
+
+  const bytes = await getEmailAttachmentBytes({ email_id: email.id, attachment_id: receiptAttachment.id, userEmail });
+  const ext = receiptAttachment.name?.split('.').pop() || 'jpg';
+  const storagePath = `${report.id}/${Date.now()}-vendor-email.${ext}`;
+  const { error: uploadErr } = await supabase.storage
+    .from('expense-receipts')
+    .upload(storagePath, bytes, { contentType: receiptAttachment.contentType, upsert: false });
+  if (uploadErr) { logger.error('processVendorEmailReceipt: attachment upload failed', { err: uploadErr.message, reportId: report.id }); return true; }
 
   await supabase.from('expense_reports').update({ receipt_path: storagePath }).eq('id', report.id);
   if (report.qbo_transaction_id) uploadReceiptToQboAsync(report.id, report.qbo_transaction_id, storagePath);
