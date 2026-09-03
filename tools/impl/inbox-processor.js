@@ -16,6 +16,8 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { createClient } from '@supabase/supabase-js';
 import { logger } from '../../core/logger.js';
+import { buildContextBlock, logObservation } from './feedback.js';
+import { SONNET } from '../../core/agent.js';
 import {
   searchEmails,
   getEmail,
@@ -34,7 +36,9 @@ import { sendProactiveMessage } from '../../teams/notify.js';
 
 const MICHAEL = 'michael@jrboehlke.com';
 const HAIKU   = 'claude-haiku-4-5-20251001';
-const SONNET  = 'claude-sonnet-4-6';
+// SONNET imported from core/agent.js above — this file used to keep its own
+// separate copy of the literal, which is exactly the drift this PR's other
+// two fixes (agent.js, cron.js) were meant to close for good.
 
 // ── Supabase ─────────────────────────────────────────────────────────────────
 
@@ -375,16 +379,42 @@ async function generateDraftBody(email, classification) {
     toneBlock = `- Match the tone/style Michael has actually used with this specific person before — formality level, sign-off, sentence length. Real past examples of Michael writing to this person:\n\n${examples}`;
   }
 
+  // This module runs its own direct Anthropic calls instead of core/agent.js's
+  // runAgent(), so it was never reading the shared rules/patterns feedback loop
+  // that every Teams/voice/scheduled-agent reply already gets via
+  // buildSystemPrompt() -- a correction Michael gave on Teams (e.g. "never
+  // promise a callback time") had no way to reach a draft generated here.
+  // Best-effort: a lookup failure shouldn't block drafting.
+  const rulesContext = await buildContextBlock('email').catch(err => {
+    logger.warn('inbox-processor: buildContextBlock failed (non-fatal)', { err: err.message });
+    return '';
+  });
+
   const resp = await anthropic.messages.create({
     model:      SONNET,
     max_tokens: 512,
-    system:     `${DRAFT_SYSTEM}\n\n${toneBlock}`,
+    system:     `${DRAFT_SYSTEM}\n\n${toneBlock}${rulesContext}`,
     messages: [{
       role:    'user',
       content: `Write a reply to this email.\n\nFrom: ${email.from_name ?? email.from}\nSubject: ${email.subject}\nMessage: ${email.snippet?.slice(0, 600)}\n\nIntent: ${classification.intent}`,
     }],
   });
-  return resp.content[0]?.text ?? '';
+  const body = resp.content[0]?.text ?? '';
+
+  // Feed the same Knowledge Log every other channel writes to (see
+  // core/agent.js's own logObservation call) -- this was the one place a
+  // real, autonomous drafting decision happened with zero trace in the
+  // weekly pattern synthesis. Fire-and-forget: a logging failure shouldn't
+  // block the actual draft from being saved.
+  logObservation({
+    agentName: 'email',
+    actionTaken: `Drafted reply (bucket: ${classification.bucket}, category: ${classification.category})`,
+    sender: email.from,
+    subject: email.subject,
+    rawContext: classification.intent,
+  }).catch(err => logger.warn('inbox-processor: logObservation failed (non-fatal)', { err: err.message }));
+
+  return body;
 }
 
 // ── Upsert to email_triage ───────────────────────────────────────────────────
