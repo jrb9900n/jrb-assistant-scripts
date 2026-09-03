@@ -7,7 +7,7 @@
 // on that assumption, not just trusted blindly.
 import { CallAutomationClient, StreamingData, createOutboundAudioData } from '@azure/communication-call-automation';
 import { logger } from '../core/logger.js';
-import { checkCallerAllowlist } from './call-auth.js';
+import { checkCallerAllowlist, isTrustedNoPinCallerId } from './call-auth.js';
 import { connectRealtimeSession } from './openai-realtime-client.js';
 import { finalizeCallMemory } from './call-memory.js';
 import * as sessions from './session-state.js';
@@ -30,7 +30,15 @@ export async function handleIncomingCallEvent(evt) {
   const fromNumber = evt.data?.from?.phoneNumber?.value ?? null;
   const incomingCallContext = evt.data?.incomingCallContext;
 
-  if (!checkCallerAllowlist(fromNumber)) {
+  // isTrustedNoPinCallerId() checked first and independently of
+  // VOICE_ALLOWED_CALLER_IDS -- found via /code-review: checkCallerAllowlist
+  // runs (and rejects) before the trusted number is ever consulted below, so
+  // without this, the PIN-skip feature silently does nothing unless someone
+  // separately remembered to also add +14146593840 to VOICE_ALLOWED_CALLER_IDS.
+  // The trusted number is a deliberate, narrower decision than that env var
+  // (see call-auth.js's own comment) and shouldn't depend on it being kept
+  // in sync.
+  if (!isTrustedNoPinCallerId(fromNumber) && !checkCallerAllowlist(fromNumber)) {
     logger.warn('Voice bridge: rejecting call from unrecognized caller ID', { fromNumber });
     try {
       await getClient().rejectCall(incomingCallContext);
@@ -64,7 +72,16 @@ export async function handleIncomingCallEvent(evt) {
     // answerCall() resolves { callConnectionProperties, callConnection } --
     // not a flat object -- the id lives on callConnectionProperties.
     const callConnectionId = answerResult.callConnectionProperties.callConnectionId;
-    sessions.create(callConnectionId, { fromNumber, authState: 'awaiting_pin' });
+    // isTrustedNoPinCallerId() skips the spoken-PIN challenge for one
+    // specific number (see call-auth.js's own comment on the tradeoff) --
+    // openai-realtime-client.js's connectRealtimeSession() checks authState
+    // at connect time and unlocks the full tool schema immediately when
+    // it's already 'verified', instead of gating on a PIN match.
+    const authState = isTrustedNoPinCallerId(fromNumber) ? 'verified' : 'awaiting_pin';
+    sessions.create(callConnectionId, { fromNumber, authState });
+    if (authState === 'verified') {
+      logger.info('Voice bridge: trusted caller ID, skipping PIN challenge', { callConnectionId, fromNumber });
+    }
     logger.info('Voice bridge: answered call', { callConnectionId, fromNumber });
   } catch (err) {
     logger.error('Voice bridge: answerCall failed', { err: err.message, fromNumber });

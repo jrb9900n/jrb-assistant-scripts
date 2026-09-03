@@ -167,7 +167,76 @@ export async function connectRealtimeSession({ session, hangUp }) {
     ws.once('error', reject);
   });
 
-  ws.send(JSON.stringify({ type: 'session.update', session: audioSessionConfig(PIN_GATE_PROMPT, null) }));
+  // session.authState can already be 'verified' at connect time -- see
+  // call-auth.js's isTrustedNoPinCallerId()/acs-call-handler.js, which skips
+  // the PIN challenge entirely for one specific caller ID. Everyone else
+  // starts at 'awaiting_pin' as before.
+  //
+  // Either way, the FIRST session.update is sent synchronously (no await)
+  // so the greeting-triggering createResponse below never sits behind a
+  // network call. unlockVerifiedSession() awaits Supabase (recent context +
+  // rules) before it can attach tools -- caught by /code-review: awaiting it
+  // here first would leave the trusted caller listening to dead air for
+  // however long that query takes, right at connect time, the same "reads
+  // as a dead line" problem FILLER_FIRST_MS exists to solve for mid-call
+  // tool latency, just with no equivalent mitigation at session start. So a
+  // trusted caller gets a plain, immediate greeting on the bare system
+  // prompt (no tools yet), and unlockVerifiedSession() runs after,
+  // swapping in the full instructions + tools a moment later -- well before
+  // the caller could plausibly ask for anything tool-shaped.
+  if (session.authState === 'verified') {
+    // Unlike VOICE_SYSTEM_PROMPT's normal use (a follow-up session.update
+    // after PIN match, applied mid-conversation), this is the very first
+    // thing the model sees this call -- VOICE_SYSTEM_PROMPT alone has no
+    // "open with a greeting" instruction the way PIN_GATE_PROMPT does, so
+    // one is appended here specifically for this first turn. Found via
+    // /code-review.
+    ws.send(JSON.stringify({
+      type: 'session.update',
+      session: audioSessionConfig(`${VOICE_SYSTEM_PROMPT}\n\nThis is the start of the call -- greet the caller now, briefly and naturally. Your tools are still loading in for a moment -- if asked to do something specific before that finishes, say "just a second, still getting set up" rather than claiming you can't do it.`, null),
+    }));
+  } else {
+    ws.send(JSON.stringify({ type: 'session.update', session: audioSessionConfig(PIN_GATE_PROMPT, null) }));
+  }
+
+  // unlockVerifiedSession() swaps in the full instructions + tools for a
+  // trusted caller, but must not run while the greeting response above is
+  // still being generated -- found via /code-review: OpenAI's Realtime API
+  // has no documented guarantee about a session.update landing cleanly
+  // mid-generation, and the PIN-match path (handleTranscript) never has
+  // this problem since it only ever runs after the caller's own utterance
+  // already completed its turn. Deferred via session._pendingUnlock,
+  // invoked once from the response.done handler below instead of raced in
+  // parallel with createResponse().
+  if (session.authState === 'verified') {
+    session._pendingUnlock = () => runUnlockWithRetry(session, ws);
+    // Watchdog fallback -- found via /code-review: if the greeting's
+    // response.done never arrives (socket error/close mid-generation, or
+    // any other way the normal trigger below could be missed), the trusted
+    // caller would otherwise stay tool-less for the entire call with
+    // nothing to recover it. Same "primary path + independent timeout
+    // safety net" idiom this codebase already uses elsewhere (e.g.
+    // scheduler/cron.js's cron_missed_fire_watchdog). A greeting turn is
+    // short; 6s is generous margin without leaving a real failure
+    // unrecovered for long. Harmless if response.done fires first -- that
+    // handler clears session._pendingUnlock before invoking it, so this
+    // timeout finds nothing left to do.
+    setTimeout(() => {
+      // readyState guard -- found via /code-review: a call that already
+      // ended (hangup, socket closed) before this fires would otherwise
+      // still run the Supabase-backed unlock and a no-op ws.send() on a
+      // dead socket for no benefit. ws@8's send() silently no-ops once
+      // closed rather than throwing, so this would have gone unnoticed
+      // rather than erroring.
+      if (session._pendingUnlock && ws.readyState === WebSocket.OPEN) {
+        logger.warn('Voice bridge: response.done never arrived for trusted-caller greeting, running unlock via watchdog', { callId: session.callConnectionId });
+        const runUnlock = session._pendingUnlock;
+        session._pendingUnlock = null;
+        runUnlock();
+      }
+    }, 6000);
+  }
+
   // Output only ever happens in response to a turn (VAD-detected end of
   // caller speech) or an explicit response.create -- without this, the
   // model's "greet the caller" instruction would never actually produce
@@ -222,6 +291,18 @@ export async function connectRealtimeSession({ session, hangUp }) {
       // send a new response (the filler-acknowledgment one), which must
       // start from a clean 'not active' state.
       session.responseActive = false;
+
+      // Runs the trusted-caller tool/context unlock deferred from
+      // connectRealtimeSession() above, exactly once, only after the opening
+      // greeting response has actually finished generating -- never raced
+      // against it. Cleared before invoking so a later response.done this
+      // same call (e.g. after the caller's first real utterance) can't
+      // re-trigger it.
+      if (session._pendingUnlock) {
+        const runUnlock = session._pendingUnlock;
+        session._pendingUnlock = null;
+        runUnlock();
+      }
 
       // Per OpenAI's own documented pattern, the function name only
       // reliably appears on the completed response's output items
@@ -278,6 +359,65 @@ export async function connectRealtimeSession({ session, hangUp }) {
   };
 }
 
+// Swaps in the full system prompt + tool schema for a now-trusted session --
+// shared by handleTranscript() (PIN matched mid-call) and
+// connectRealtimeSession() (caller ID pre-verified at answer time, see
+// call-auth.js's isTrustedNoPinCallerId()). Assumes session.authState is
+// already 'verified' by the time this is called.
+// One retry on failure -- for the trusted no-PIN caller, unlockVerifiedSession
+// is the ONLY thing that ever attaches tools this call (there's no later PIN
+// match to fall back on), so a transient failure here silently strands the
+// most-trusted caller with a tool-less session for the whole call otherwise.
+// loadRecentCallContext/buildContextBlock already swallow their own errors
+// into '' -- a rejection here means the trailing ws.send itself threw
+// (e.g. socket already closing), which a brief retry can plausibly recover
+// from; a second failure is logged and left alone rather than looping.
+async function runUnlockWithRetry(session, ws) {
+  try {
+    await unlockVerifiedSession(session, ws);
+  } catch (err) {
+    logger.warn('Voice bridge: unlockVerifiedSession failed for trusted caller, retrying once', { callId: session.callConnectionId, err: err.message });
+    try {
+      await unlockVerifiedSession(session, ws);
+    } catch (err2) {
+      logger.error('Voice bridge: unlockVerifiedSession failed twice for trusted caller, tools not attached this call', { callId: session.callConnectionId, err: err2.message });
+    }
+  }
+}
+
+async function unlockVerifiedSession(session, ws) {
+  // Recent call/Teams history (memory.js's shared agent_memory, via
+  // call-memory.js) so a call picks up where the last conversation left
+  // off instead of starting from zero every time. Awaited before the
+  // session.update so it's part of the model's instructions from its very
+  // first response, not raced in afterward.
+  //
+  // buildContextBlock('voice') pulls the same standing-rules mechanism
+  // Teams already uses (tools/impl/feedback.js) -- added 2026-09-02.
+  // Before this, voice-call-review.js's synthesized rules (agent: 'voice')
+  // had nowhere to actually take effect: this channel built its system
+  // prompt from VOICE_SYSTEM_PROMPT + recentContext only, never touching
+  // the `rules` table at all. getRulesForAgent('voice') also picks up any
+  // row tagged 'general'/'all', so a correction given on Teams can shape
+  // voice behavior too, same as the reverse already worked via
+  // loadRecentCallContext's shared agent_memory.
+  const [recentContext, rulesContext] = await Promise.all([
+    loadRecentCallContext().catch((err) => {
+      logger.warn('Voice bridge: loadRecentCallContext failed, continuing without it', { callId: session.callConnectionId, err: err.message });
+      return '';
+    }),
+    buildContextBlock('voice').catch((err) => {
+      logger.warn('Voice bridge: buildContextBlock failed, continuing without it', { callId: session.callConnectionId, err: err.message });
+      return '';
+    }),
+  ]);
+  const instructions = `${VOICE_SYSTEM_PROMPT}${rulesContext}${recentContext ? `\n\n${recentContext}` : ''}`;
+  ws.send(JSON.stringify({
+    type: 'session.update',
+    session: audioSessionConfig(instructions, buildVoiceToolSchema()),
+  }));
+}
+
 async function handleTranscript(session, ws, transcript, hangUp) {
   // Once verified, every subsequent transcribed caller utterance is a real
   // conversation turn for voice/call-memory.js, not a PIN attempt -- record
@@ -300,36 +440,12 @@ async function handleTranscript(session, ws, transcript, hangUp) {
   const storedPin = process.env.VOICE_CALL_PIN;
   if (matchSpokenPin(transcript, storedPin)) {
     session.authState = 'verified';
-    // Recent call/Teams history (memory.js's shared agent_memory, via
-    // call-memory.js) so a call picks up where the last conversation left
-    // off instead of starting from zero every time. Awaited before the
-    // session.update so it's part of the model's instructions from its very
-    // first post-PIN response, not raced in afterward.
-    //
-    // buildContextBlock('voice') pulls the same standing-rules mechanism
-    // Teams already uses (tools/impl/feedback.js) -- added 2026-09-02.
-    // Before this, voice-call-review.js's synthesized rules (agent: 'voice')
-    // had nowhere to actually take effect: this channel built its system
-    // prompt from VOICE_SYSTEM_PROMPT + recentContext only, never touching
-    // the `rules` table at all. getRulesForAgent('voice') also picks up any
-    // row tagged 'general'/'all', so a correction given on Teams can shape
-    // voice behavior too, same as the reverse already worked via
-    // loadRecentCallContext's shared agent_memory.
-    const [recentContext, rulesContext] = await Promise.all([
-      loadRecentCallContext().catch((err) => {
-        logger.warn('Voice bridge: loadRecentCallContext failed, continuing without it', { callId: session.callConnectionId, err: err.message });
-        return '';
-      }),
-      buildContextBlock('voice').catch((err) => {
-        logger.warn('Voice bridge: buildContextBlock failed, continuing without it', { callId: session.callConnectionId, err: err.message });
-        return '';
-      }),
-    ]);
-    const instructions = `${VOICE_SYSTEM_PROMPT}${rulesContext}${recentContext ? `\n\n${recentContext}` : ''}`;
-    ws.send(JSON.stringify({
-      type: 'session.update',
-      session: audioSessionConfig(instructions, buildVoiceToolSchema()),
-    }));
+    // runUnlockWithRetry (not a bare unlockVerifiedSession call) -- found via
+    // /code-review: this path had the exact same single-point-of-failure
+    // exposure the trusted-caller path was given retry protection for (no
+    // later PIN check to fall back on if the trailing ws.send throws), just
+    // never noticed because this call site predates that path.
+    await runUnlockWithRetry(session, ws);
     logger.info('Voice bridge: caller PIN verified', { callId: session.callConnectionId });
     return;
   }
