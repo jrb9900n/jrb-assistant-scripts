@@ -1029,6 +1029,90 @@ const SA_TOOLS = [
   },
 ];
 
+// ADP (RUN Powered by ADP) payroll connector — SCAFFOLD, not yet live (see
+// tools/impl/adp.js header). Registered now so the tool surface/schemas exist
+// and can be wired end-to-end once ADP API access is actually granted; every
+// handler currently returns { configured: false } or throws a clear
+// not-yet-implemented error rather than silently no-oping. Scope deliberately
+// excludes direct deposit, pay rate, and tax-election writes (Michael's
+// explicit call, 2026-09-01) — do not add those without a separate go-ahead.
+const ADP_TOOLS = [
+  {
+    name: 'adp_search_employees',
+    description: 'Search ADP (RUN Powered by ADP) employees/workers by name. NOT YET LIVE — returns a configured:false result until ADP API access is set up; see tools/impl/adp.js.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Name or partial name to search for' },
+      },
+      required: ['query'],
+    },
+  },
+  {
+    name: 'adp_get_employee',
+    description: "Fetch an employee's ADP profile (name, contact info, job/department, hire date). Does NOT return bank/SSN/pay-rate fields — out of scope for this connector. NOT YET LIVE — see tools/impl/adp.js.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        employeeId: { type: 'string', description: 'ADP worker/employee ID, from adp_search_employees' },
+      },
+      required: ['employeeId'],
+    },
+  },
+  {
+    name: 'adp_get_pay_statement',
+    description: 'Fetch a read-only pay statement (gross/net/deductions summary) for one employee and pay date. NOT YET LIVE — see tools/impl/adp.js.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        employeeId: { type: 'string', description: 'ADP worker/employee ID, from adp_search_employees' },
+        payDate:    { type: 'string', description: 'Pay date, YYYY-MM-DD' },
+      },
+      required: ['employeeId', 'payDate'],
+    },
+  },
+  {
+    name: 'adp_get_timeoff_balance',
+    description: "Fetch an employee's current time-off/PTO balances. NOT YET LIVE — see tools/impl/adp.js.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        employeeId: { type: 'string', description: 'ADP worker/employee ID, from adp_search_employees' },
+      },
+      required: ['employeeId'],
+    },
+  },
+  {
+    name: 'adp_update_employee_contact_info',
+    description: "Update an employee's contact info (phone, personal email, address) in ADP. Does NOT touch direct deposit, pay rate, or tax elections — those are deliberately out of scope for this connector. NOT YET LIVE — see tools/impl/adp.js.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        employeeId:    { type: 'string', description: 'ADP worker/employee ID, from adp_search_employees' },
+        phone:         { type: 'string', description: 'New phone number' },
+        personalEmail: { type: 'string', description: 'New personal email address' },
+        address:       { type: 'string', description: 'New mailing address' },
+      },
+      required: ['employeeId'],
+    },
+  },
+  {
+    name: 'adp_submit_time_off_request',
+    description: "Submit a time-off request on an employee's behalf in ADP. NOT YET LIVE — see tools/impl/adp.js.",
+    input_schema: {
+      type: 'object',
+      properties: {
+        employeeId: { type: 'string', description: 'ADP worker/employee ID, from adp_search_employees' },
+        startDate:  { type: 'string', description: 'Start date, YYYY-MM-DD' },
+        endDate:    { type: 'string', description: 'End date, YYYY-MM-DD' },
+        type:       { type: 'string', description: 'Time-off type, e.g. vacation, sick, unpaid' },
+        notes:      { type: 'string', description: 'Optional note for the request' },
+      },
+      required: ['employeeId', 'startDate', 'endDate', 'type'],
+    },
+  },
+];
+
 // Marketing agent tools (built 2026-08-25, create_ads_flag added 2026-08-26) —
 // see tools/impl/marketing-segments.js for the segment-identification
 // methodology and the three real bugs it encodes fixes for. Deliberately no
@@ -1637,7 +1721,14 @@ const TOOL_MAP = {
   // marketing-advisor's own toolset either; both personas can propose a
   // website change if relevant to what they're working on.
   marketing:  [...SA_TOOLS.filter(t => t.name.includes('tag')), ...EMAIL_TOOLS.filter(t => t.name !== 'send_email' && t.name !== 'send_draft_reply'), ...TEAMS_TOOLS, ...MARKETING_TOOLS, ...WEBSITE_TOOLS, ...ESCALATION_TOOLS],
-  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...TEAMS_READ_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
+  general:    [...EMAIL_TOOLS, ...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...FILE_TOOLS, ...CODE_TOOLS, ...SEARCH_TOOLS, ...VERCEL_TOOLS, ...TEAMS_TOOLS, ...TEAMS_READ_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ADP_TOOLS, ...ESCALATION_TOOLS],
+  // ADP payroll (scaffold, see ADP_TOOLS comment above). Kept as its own
+  // taskType rather than folded into 'crm' — payroll data (even the
+  // low-risk-only slice this connector exposes) is a distinct sensitivity
+  // class from CRM/scheduling data and deserves its own explicit bucket.
+  // Deliberately NOT added to TOOL_MAP.employee — the same privacy boundary
+  // that keeps QB/SA out of a non-Michael requester's toolset applies here.
+  payroll:    [...ADP_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
 };
 
 // Fail loudly at load time, not silently at call time, if a future rename
