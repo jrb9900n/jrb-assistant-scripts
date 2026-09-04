@@ -260,6 +260,7 @@ let saWasDown = false;
 const qbWasDown = new Map(); // company -> bool, so a JRB Transport outage/recovery never stomps JRB's own alert state
 let adsHealthWasDown = false;
 let calendarWatchWasDown = false;
+let invoiceForwarderWasErroring = false; // alert-once-on-failure/recovery for invoice_folder_forwarder (catastrophic run failures only, e.g. Graph/Supabase unreachable -- per-message send failures are reported separately, once, from inside the run itself)
 // Best-effort dedupe for calendar_change_watch -- Graph delta queries can
 // redeliver the same change across polls (confirmed live during testing).
 // Process-lifetime only, not persistent -- a restart can cause one
@@ -1466,6 +1467,58 @@ const SCHEDULED_TASKS = [
         }
       } finally {
         releaseRunLock('michael_inbox_processor');
+      }
+    },
+  },
+  {
+    // Every 5 minutes — forward any new email in michael@jrboehlke.com's
+    // "_Invoices" folder to joanne@jrboehlke.com. That folder is populated by
+    // michael_inbox_processor above (moves invoice-categorised mail there);
+    // Outlook has no native rule that can trigger on "moved into a folder by
+    // another process," so this poller is the actual mechanism -- see
+    // tools/impl/invoice-folder-forwarder.js's header comment for the full
+    // design (dedup via the forwarded_invoice_ids table, mark-before-send).
+    // Lock/alert wiring lives here rather than in the impl module, matching
+    // every other task in this file (e.g. michael_inbox_processor above,
+    // sa_connectivity_check below).
+    schedule: '*/5 * * * *',
+    name: 'invoice_folder_forwarder',
+    run: async () => {
+      if (!acquireRunLock('invoice_folder_forwarder', 4 * 60_000)) {
+        logger.debug('invoice_folder_forwarder: skipped (another instance running)');
+        return;
+      }
+      try {
+        const { runInvoiceFolderForwarder } = await import('../tools/impl/invoice-folder-forwarder.js');
+        const result = await runInvoiceFolderForwarder();
+        logger.info('invoice_folder_forwarder: complete', result);
+        if (invoiceForwarderWasErroring) {
+          invoiceForwarderWasErroring = false;
+          try { await sendProactiveMessage('✅ Invoice folder auto-forward recovered — back to forwarding _Invoices to Joanne normally.'); } catch {}
+        }
+        // Per-message failures don't throw (see runInvoiceFolderForwarder) --
+        // alert once per run so a stuck message (which won't be retried,
+        // by design) gets a human's attention instead of silently going missing.
+        if (result?.errors > 0) {
+          try {
+            await sendProactiveMessage(`⚠️ Invoice folder auto-forward: ${result.errors} of ${result.forwarded + result.errors} new invoice email(s) failed to forward to Joanne this run. Check logs/agent.log for "invoice-folder-forwarder: failed to forward message" and forward manually if needed.`);
+          } catch {}
+        }
+        // truncated means the _Invoices folder has grown past MAX_MESSAGES_SCAN
+        // in one run -- worth a human look at folder hygiene, not an emergency.
+        if (result?.truncated) {
+          try {
+            await sendProactiveMessage(`⚠️ Invoice folder auto-forward: the _Invoices folder is large enough that this run hit its safety scan limit. Worth checking whether old already-forwarded messages should be cleared out.`);
+          } catch {}
+        }
+      } catch (err) {
+        logger.error('invoice_folder_forwarder: FAILED', { err: err.message });
+        if (!invoiceForwarderWasErroring) {
+          invoiceForwarderWasErroring = true;
+          try { await sendProactiveMessage(`⚠️ Invoice folder auto-forward is down — new invoices in _Invoices are NOT being forwarded to Joanne.\n\nError: ${err.message.slice(0, 200)}`); } catch {}
+        }
+      } finally {
+        releaseRunLock('invoice_folder_forwarder');
       }
     },
   },
