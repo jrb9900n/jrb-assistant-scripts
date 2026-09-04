@@ -1742,6 +1742,17 @@ const SCHEDULED_TASKS = [
     // Every 30 minutes — check SA connectivity, alert Michael on first failure and on recovery
     schedule: '*/30 * * * *',
     name: 'sa_connectivity_check',
+    // Confirmed 2026-09-03 via cron_missed_fire_watchdog: this task repeatedly missed its
+    // */30 tick (15:00, 16:30, 17:00, and 18:00 all silently skipped within a few hours)
+    // despite the scheduler being continuously alive the whole time -- the same node-cron
+    // missed-tick bug already documented and fixed on 15+ other tasks in this file
+    // (qb_health_check, weekly_finance_report, sa_weekly_sync, qbo_sync_watchdog, etc.):
+    // node-cron's default ScheduledTask only checks the exact current second on each 1s
+    // poll tick (recoverMissedExecutions defaults false), so a multi-second event-loop
+    // stall straddling this task's target second causes a silent, permanent skip for that
+    // occurrence, no error logged. This run is a read-only connectivity probe + alert with
+    // no side effects beyond notification, safe to opt in to catch-up.
+    recoverMissedExecutions: true,
     run: async () => {
       const { searchClients, checkProxyHealth } = await import('../tools/impl/serviceautopilot.js');
       const { sendProactiveMessage } = await import('../teams/notify.js');
