@@ -1554,22 +1554,30 @@ const EMPLOYEE_TOOLS = [
   },
 ];
 
-// Escalation path to a full headless Claude Code session, gated on Michael's
-// yes/no (built 2026-08-25 -- see tools/impl/claude-code-escalation.js).
-// Given to every Michael-initiated taskType EXCEPT employee (privacy
-// boundary -- a non-Michael requester must never be able to trigger this)
-// and auto_fix (unattended; escalation needs a live Teams round-trip for
-// Michael's approval, which self_heal_watcher's cron-triggered runs don't
-// have).
+// Escalation path to a full headless Claude Code session -- real Bash/Read/
+// Write/Edit/Glob/Grep access, its own git worktree and branch, ends in an
+// opened PR (see tools/impl/claude-code-escalation.js). Rebuilt 2026-09-03
+// (Michael: "I actually want to make the peggy leap") from a narrower
+// 3-tool sandbox that required his yes/no before anything ran at all --
+// this version starts immediately, no upfront approval, and reports back
+// via a Teams message when done. The approval that matters now happens at
+// the end (Michael's own separate PR-merge decision), not the start -- see
+// that file's header for the full reasoning. Given to every Michael-
+// initiated taskType EXCEPT employee (privacy boundary -- a non-Michael
+// requester must never be able to trigger this) and auto_fix (a different
+// reason than before: self_heal_watcher's cron-triggered incident response
+// starting an unattended, budget-uncapped-relative-to-the-incident build
+// mid-outage is a separate risk decision nobody's made yet, not "needs a
+// Teams round-trip" -- that requirement is gone).
 const ESCALATION_TOOLS = [
   {
     name: 'escalate_to_claude_code',
-    description: "Call this when you genuinely lack a tool to complete Michael's request -- e.g. no tool exists for an action he asked for, or the task needs broader investigation/tool orchestration than your current tool set supports. Do NOT call this for something you simply haven't tried yet, or that a clarifying question to Michael would resolve. This asks Michael for permission before anything runs; if he says no, nothing happens. Do not also explain in your own reply that you can't do this -- this tool's own response IS that explanation, sent to him verbatim.",
+    description: "Call this when you genuinely lack a tool to complete Michael's request -- e.g. no tool exists for an action he asked for, or the task needs broader investigation/multi-file work than your current tool set supports. Do NOT call this for something you simply haven't tried yet, or that a clarifying question to Michael would resolve. This starts a real Claude Code build immediately -- no need to ask Michael's permission first, he'll get a Teams message with the result (and a PR to review, if code changed) when it's done. Tell whoever you're talking to that you're on it and are handing this off, in your own words -- don't just repeat this tool's return text verbatim the way the old version required.",
     input_schema: {
       type: 'object',
       properties: {
         reason: { type: 'string', description: 'Specifically what tool or capability is missing, in one or two sentences.' },
-        task_to_escalate: { type: 'string', description: "A clear, self-contained restatement of the task to hand off if Michael approves -- can be more precise than Michael's original wording, but must not drop or invent scope." },
+        task_to_escalate: { type: 'string', description: "A clear, self-contained restatement of the task to hand off -- can be more precise than the original wording, but must not drop or invent scope." },
       },
       required: ['reason', 'task_to_escalate'],
     },
@@ -1654,6 +1662,21 @@ const TOOL_MAP = {
   crm:        [...QB_TOOLS, ...SA_TOOLS, ...CARDDAV_TOOLS, ...BOOKING_TOOLS, ...ESCALATION_TOOLS],
   report:     [...QB_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...FLEETSHARP_TOOLS, ...GOOGLE_ADS_TOOLS, ...ESCALATION_TOOLS],
   code:       [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  // Same as 'code' minus ESCALATION_TOOLS -- for the one call site (scheduler/
+  // cron.js's isExplicitDev email branch) whose whole prompt design is "propose
+  // a scope, don't act yet, wait for Michael to confirm." Added 2026-09-03
+  // (found via /code-review): escalate_to_claude_code used to be safe there
+  // for the same reason it used to be safe in dev_ambiguous -- it only ever
+  // created a pending row requiring Michael's yes/no. Now that it starts a
+  // real, unattended, Bash/Write/PR-opening Claude Code run immediately (see
+  // tools/impl/claude-code-escalation.js), leaving it reachable from a
+  // "don't act yet" flow would let the model bypass that prompt-only
+  // instruction entirely -- exactly the class of gap code-approval.js's own
+  // header explains prompt-only "ask first" can't reliably prevent. Keeps
+  // FILE_TOOLS/CODE_TOOLS' read/explore access (genuinely useful for scoping
+  // which files a proposal would touch), just not the one tool whose whole
+  // point is to act immediately.
+  code_scope: [...CODE_TOOLS, ...FILE_TOOLS, ...TEAMS_TOOLS],
   // Unattended investigate-and-fix pass (self_heal_watcher) -- same tools as
   // 'code' minus github_merge_pr, so it can open a PR for Michael but can
   // never merge one itself, and no TEAMS_TOOLS since nothing should be
@@ -1686,10 +1709,17 @@ const TOOL_MAP = {
   // contextual instead of static -- but deliberately has NO code/file/github/
   // deploy tools (unlike 'general', which does), so the model can't
   // accidentally start real dev work off an ambiguous request; it can only
-  // ask a clarifying question (or escalate/notify if something's actually
-  // wrong). Same "explicit narrow entry, not a TOOL_MAP.general fallthrough"
-  // pattern as the 'employee'/'auto_fix' entries above.
-  dev_ambiguous: [...TEAMS_TOOLS, ...ESCALATION_TOOLS],
+  // ask a clarifying question. Same "explicit narrow entry, not a
+  // TOOL_MAP.general fallthrough" pattern as the 'employee'/'auto_fix'
+  // entries above. ESCALATION_TOOLS deliberately dropped 2026-09-03 (found
+  // via /code-review): escalate_to_claude_code used to be safe here because
+  // it only ever created a pending row Michael had to approve -- now that it
+  // starts a real, unattended, Bash/Write/PR-opening Claude Code run
+  // immediately (see tools/impl/claude-code-escalation.js), keeping it here
+  // would let the exact ambiguous-dev-sounding message this taskType exists
+  // to catch trigger real dev work anyway, defeating the whole point of
+  // routing it here in the first place.
+  dev_ambiguous: [...TEAMS_TOOLS],
   calendar:   [...EMAIL_TOOLS.filter(t => t.name.includes('calendar') || t.name.includes('reminder')), ...BOOKING_TOOLS, ...CALENDAR_CONFLICT_TOOLS, ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   sharepoint: [...FILE_TOOLS.filter(t => t.name.includes('sharepoint')), ...FILE_TOOLS.filter(t => t.name.includes('onedrive')), ...TEAMS_TOOLS, ...ESCALATION_TOOLS],
   // Marketing agent (built 2026-08-25). `send_email` AND `send_draft_reply`

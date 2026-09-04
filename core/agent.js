@@ -62,7 +62,7 @@ const HAIKU_THRESHOLD = parseInt(process.env.HAIKU_THRESHOLD ?? '500');
 // actually satisfy. This is exactly the failure mode 'general'/'calendar'/
 // 'dev_ambiguous' were added to prevent above, just missed for this
 // taskType since it shipped the same day as that investigation.
-const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'report', 'email', 'file', 'crm', 'auto_fix', 'general', 'calendar', 'dev_ambiguous', 'marketing', 'employee']);
+const SONNET_TASK_TYPES = new Set(['scheduling', 'code', 'code_scope', 'report', 'email', 'file', 'crm', 'auto_fix', 'general', 'calendar', 'dev_ambiguous', 'marketing', 'employee']);
 
 // Maps the shorthand model aliases stored in agent_library.model ('sonnet' |
 // 'haiku' | null, see agents/library.js's AgentDefinition typedef) to the

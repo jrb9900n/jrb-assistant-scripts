@@ -2303,7 +2303,15 @@ Do not write any code yet. Return only the reply text.
 
 ${EA_REPLY_STYLE}`;
 
-          const agentResult = await runAgent({ task, taskType: 'code', saveContext: false });
+          // taskType 'code_scope' (not 'code') -- found via /code-review:
+          // 'code' now carries escalate_to_claude_code, which starts real,
+          // unattended dev work immediately (tools/impl/claude-code-
+          // escalation.js) -- exactly what this prompt's "do not write any
+          // code yet... ask Michael to confirm" instruction exists to
+          // prevent. See tools/registry.js's code_scope entry for the
+          // reasoning; it keeps the read/explore tools a good scope
+          // proposal needs, minus that one.
+          const agentResult = await runAgent({ task, taskType: 'code_scope', saveContext: false });
           const result = asHtmlBody(agentResult?.result) || '<p>Got it — I\'ll scope this out and reply shortly.</p>';
 
           await sendEmail({

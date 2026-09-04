@@ -259,9 +259,11 @@ export async function findPendingApproval(code) {
   // `column::text` cast passed through supabase-js's .filter() doesn't
   // reach PostgREST intact either (caught live by this file's own smoke
   // test before this ever reached a real Teams message). Pending rows are
-  // realistically few at once (same assumption claude-code-escalation.js's
-  // resolvePendingEscalationReply already makes), so fetch pending and match
-  // the code prefix in JS instead of pushing the cast into SQL.
+  // realistically few at once, so fetch pending and match the code prefix
+  // in JS instead of pushing the cast into SQL. (This file's approval flow
+  // is otherwise unrelated to tools/impl/claude-code-escalation.js, which
+  // no longer has a pending/approval state at all as of 2026-09-03 -- see
+  // that file's own header.)
   const { data, error } = await db
     .from('code_action_approvals')
     .select('*')
