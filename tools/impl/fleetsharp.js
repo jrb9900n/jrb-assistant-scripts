@@ -103,6 +103,16 @@ async function login(skipRestore = false) {
       return { browser, page, apiBase: restoredApiBase };
     }
 
+    // tryRestoreSession may have loaded stale cookies onto the page before
+    // determining they're expired.  Those cookies would be sent alongside the
+    // login POST and can cause FleetSharp to reject the credentials (staying on
+    // the login page) even when the username/password are correct.  Clear them
+    // now so the fresh login form sees a clean browser state.
+    try {
+      const staleCookies = await page.cookies();
+      if (staleCookies.length > 0) await page.deleteCookie(...staleCookies);
+    } catch {}
+
     logger.info('FleetSharp: starting browser login');
     const loginUrl = baseUrl.includes(LOGIN_PATH) ? baseUrl : `${baseUrl.replace(/\/$/, '')}${LOGIN_PATH}`;
     await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
@@ -116,6 +126,13 @@ async function login(skipRestore = false) {
     await new Promise(r => setTimeout(r, 2000));
 
     if (/\/login/i.test(page.url())) {
+      // Delete the session cache so the next attempt doesn't try loading the
+      // same expired cookies again — it would restore them, fail, then hit the
+      // exact same fresh-login path with the same stale cookies already set.
+      // Skip the delete on skipRestore=true (forced re-login after a 401): the
+      // cache was never consulted in that path and may still hold valid cookies
+      // a future non-forced attempt could use.
+      if (!skipRestore) { try { fs.unlinkSync(SESSION_CACHE_PATH); } catch {} }
       throw new Error('FleetSharp login failed — still on login page after submit (bad credentials or form changed)');
     }
 
