@@ -1352,6 +1352,19 @@ const SCHEDULED_TASKS = [
     // registration itself was missing from this file, meaning the job has never actually
     // run in production since whatever point the app was split into this agent/ subtree).
     // Original: PR #94, "feat: hourly fleetops auth sequence health check with auto-fix".
+    //
+    // Confirmed 2026-09-04 via cron_missed_fire_watchdog: this task missed its hourly tick
+    // repeatedly (overdue alerts at 06:30, 09:30, 11:30, 13:30 within one day, each only
+    // recovered by the watchdog's forced self-heal run) despite the scheduler being
+    // continuously alive the whole time -- the same node-cron missed-tick bug already
+    // documented and fixed on 20+ other tasks in this file (qb_health_check,
+    // weekly_finance_report, sa_connectivity_check, etc.): node-cron's default ScheduledTask
+    // only checks the exact current second on each 1s poll tick (recoverMissedExecutions
+    // defaults false), so a multi-second event-loop stall straddling this task's once-per-hour
+    // target second causes a silent, permanent skip for that occurrence, no error logged.
+    // runFleetopsHealthcheck() is a read-only drift check with an idempotent auto-fix, safe to
+    // opt in to catch-up.
+    recoverMissedExecutions: true,
     schedule: '0 * * * *',
     name: 'fleetops_healthcheck',
     run: async () => {
